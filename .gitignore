@@ -1,0 +1,11 @@
+build/
+.gradle/
+.idea/
+*.iml
+out/
+bin/
+.classpath
+.project
+.settings/
+# Note: gradle/wrapper/gradle-wrapper.jar IS committed so CI and contributors
+# can run ./gradlew without a separate Gradle install.

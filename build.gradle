@@ -1,5 +1,10 @@
 plugins {
     id 'java-library'
+    // JavaFX modules — needed at compile time because the browser UI
+    // (AtlasBrowser / AtlasExtension) uses JavaFX types. QuPath bundles JavaFX
+    // at runtime, so these stay compileOnly (see the javafx block below) and are
+    // NOT packaged into the extension jar.
+    id 'org.openjfx.javafxplugin' version '0.1.0'
 }
 
 group = 'com.patolojiatlasi'
@@ -14,6 +19,15 @@ repositories {
 
 // QuPath version to build against. QuPath 0.6.x runs on Java 21.
 ext.qupathVersion = '0.6.0'
+
+javafx {
+    // Compile against JavaFX 21 (LTS) — at or below the JavaFX that QuPath 0.6.0
+    // ships, so we never reference an API newer than the runtime provides.
+    // compileOnly because QuPath supplies JavaFX at runtime; we must not bundle it.
+    version = '21'
+    modules = ['javafx.controls', 'javafx.graphics']
+    configuration = 'compileOnly'
+}
 
 dependencies {
     // These are provided by the running QuPath application at runtime,
@@ -30,6 +44,12 @@ dependencies {
 java {
     sourceCompatibility = JavaVersion.VERSION_21
     targetCompatibility = JavaVersion.VERSION_21
+}
+
+// Source files contain Turkish string literals ("Atlası", "Browse Patoloji Atlası…").
+// Pin UTF-8 so they aren't mangled by the platform default charset on Windows.
+tasks.compileJava {
+    options.encoding = 'UTF-8'
 }
 
 tasks.named('test') {

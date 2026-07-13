@@ -1,0 +1,19 @@
+{
+    "name": "Patoloji Atlası katalog",
+    "description": "QuPath eklenti kataloğu: patolojiatlasi.com bütün-slayt görüntülerini QuPath içinden akışla açan Patoloji Atlası eklentisi (qupath-extension-atlas).",
+    "extensions": [{
+        "name": "QuPath Patoloji Atlası extension",
+        "description": "patolojiatlasi.com üzerindeki Deep Zoom (DZI) bütün-slayt görüntülerini QuPath içinden, önceden indirmeye gerek kalmadan, karo-karo akışla açar. Extensions → Browse Patoloji Atlası… menüsünden kategoriye göre gruplanmış görüntü kataloğunu açar ve .dzi URL'lerini açılabilir görüntü türü olarak kaydeder.",
+        "author": "Serdar Balcı",
+        "homepage": "https://github.com/sbalci/patolojiatlasi-QuPath",
+        "releases": [
+            {
+                "name": "v0.1.0",
+                "main_url": "https://github.com/sbalci/patolojiatlasi-QuPath/releases/download/v0.1.0/qupath-extension-atlas-0.1.0.jar",
+                "version_range": {
+                    "min": "v0.6.0"
+                }
+            }
+        ]
+    }]
+}

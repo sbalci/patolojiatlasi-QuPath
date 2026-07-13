@@ -1,0 +1,9 @@
+# The Gradle wrapper JAR is binary — never normalize it (its checksum is
+# validated by gradle/actions/wrapper-validation in CI).
+gradle-wrapper.jar binary
+
+# The POSIX wrapper script must stay LF so it runs on the CI Linux runner.
+gradlew text eol=lf
+
+# The Windows wrapper script must stay CRLF.
+gradlew.bat text eol=crlf

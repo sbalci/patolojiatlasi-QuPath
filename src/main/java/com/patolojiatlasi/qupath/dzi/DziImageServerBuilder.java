@@ -11,7 +11,7 @@ import org.slf4j.LoggerFactory;
 import qupath.lib.images.servers.ImageServer;
 import qupath.lib.images.servers.ImageServerBuilder;
 import qupath.lib.images.servers.ImageServerBuilder.ServerBuilder;
-import qupath.lib.images.servers.UriImageSupport;
+import qupath.lib.images.servers.ImageServerBuilder.UriImageSupport;
 
 /**
  * Registers Deep Zoom (.dzi) URLs as an image type QuPath can open.

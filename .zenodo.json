@@ -1,0 +1,42 @@
+{
+  "title": "QuPath Patoloji Atlası Extension (qupath-extension-atlas)",
+  "description": "<p>A <strong>QuPath 0.6+ extension</strong> that browses and opens the whole-slide images published on <a href=\"https://patolojiatlasi.com\">patolojiatlasi.com</a> directly inside QuPath.</p><p>The atlas serves its slides as <strong>Deep Zoom (DZI)</strong> pyramids (produced by <code>vips dzsave</code>, shown on the website with OpenSeadragon). This extension adds a DZI image reader to QuPath plus a searchable, category-grouped catalogue driven by the atlas's own image list, and registers <code>.dzi</code> URLs as an openable image type. Slides stream tile-by-tile over HTTP, with nothing to download in advance.</p><p><strong>Scope:</strong> viewing and study of the published atlas images.</p>",
+  "upload_type": "software",
+  "creators": [
+    {
+      "name": "Balcı, Serdar",
+      "affiliation": "Memorial Pathology, Istanbul, Turkey",
+      "orcid": "0000-0002-7852-3851"
+    }
+  ],
+  "license": "MIT",
+  "access_right": "open",
+  "keywords": [
+    "QuPath",
+    "digital pathology",
+    "computational pathology",
+    "whole slide image",
+    "WSI",
+    "Deep Zoom",
+    "DZI",
+    "image streaming",
+    "pathology education"
+  ],
+  "communities": [
+    {"identifier": "qupath"}
+  ],
+  "related_identifiers": [
+    {
+      "scheme": "url",
+      "identifier": "https://patolojiatlasi.com",
+      "relation": "isDocumentedBy",
+      "resource_type": "other"
+    },
+    {
+      "scheme": "doi",
+      "identifier": "10.1038/s41598-017-17204-5",
+      "relation": "isDerivedFrom",
+      "resource_type": "publication-article"
+    }
+  ]
+}

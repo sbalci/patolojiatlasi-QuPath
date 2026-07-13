@@ -176,15 +176,23 @@ public class AtlasCatalog {
         return fromTitle != null ? fromTitle : "Uncategorized";
     }
 
-    /** Keyword classifier; returns a category or {@code null} if nothing matched. */
+    /**
+     * Keyword classifier; returns a category or {@code null} if nothing matched.
+     * Most keywords are matched as substrings so stems catch compound words
+     * (e.g. "sarcoma" in "leiomyosarcoma"). A few short keywords that also occur
+     * inside unrelated words ("renal" in "adrenal", "anal" in "analogue", "oral"
+     * in "intratumoral", "ent" as an ENT abbreviation) are matched with word-start
+     * ({@link #hasBoundary}) or whole-word ({@link #hasFullWord}) checks instead,
+     * so they don't shadow more specific categories.
+     */
     private static String classify(String hay) {
         if (has(hay, "pancrea", "gallbladder", "bile", "cholecyst", "ampulla"))
             return "Pancreatobiliary";
         if (has(hay, "liver", "hepat"))
             return "Liver";
         if (has(hay, "gastr", "colon", "stomach", "gastric", "rectum", "esophag", "oesophag",
-                "duoden", "ileum", "jejun", "appendix", "bowel", "intestin", "anal", "celiac",
-                "signet", "adenoma", "polyp"))
+                "duoden", "ileum", "jejun", "appendix", "appendic", "bowel", "intestin", "celiac")
+                || hasFullWord(hay, "anal", "anus"))
             return "Gastrointestinal";
         if (has(hay, "neuro", "brain", "cerebell", "mening", "spinal", "glial", "astrocyt",
                 "nerve", "schwann", "glioma", "pituitary adenoma"))
@@ -199,8 +207,8 @@ public class AtlasCatalog {
             return "Dermatopathology";
         if (has(hay, "breast", "mammary"))
             return "Breast";
-        if (has(hay, "prostate", "kidney", "renal", "bladder", "testis", "ureter",
-                "genitourinary", "urothel"))
+        if (has(hay, "prostate", "kidney", "bladder", "testis", "ureter",
+                "genitourinary", "urothel") || hasBoundary(hay, "renal"))
             return "Genitourinary";
         if (has(hay, "uter", "cervix", "cervical", "ovar", "endometri", "placenta",
                 "vulva", "gynec", "gyneac", "serous"))
@@ -209,8 +217,8 @@ public class AtlasCatalog {
             return "Endocrine";
         if (has(hay, "lymph", "spleen", "marrow", "hemato", "hodgkin", "leukemia", "myeloma"))
             return "Hematopathology";
-        if (has(hay, "salivary", "larynx", "nasophary", "oral", "tongue", "tonsil",
-                "ent", "head", "neck"))
+        if (has(hay, "salivary", "larynx", "nasophary", "tongue", "tonsil", "head", "neck")
+                || hasBoundary(hay, "oral") || hasFullWord(hay, "ent"))
             return "Head & neck";
         if (has(hay, "cyto"))
             return "Cytopathology";
@@ -218,6 +226,11 @@ public class AtlasCatalog {
             return "Lectures";
         if (has(hay, "autopsy"))
             return "Autopsy";
+        // Diagnosis-only fallback: generic terms that usually indicate GI but also occur in
+        // other organs (thyroid adenoma, endometrial polyp). Checked LAST so organ-specific
+        // metadata wins first.
+        if (has(hay, "adenoma", "polyp", "signet"))
+            return "Gastrointestinal";
         return null;
     }
 
@@ -234,6 +247,35 @@ public class AtlasCatalog {
         for (String n : needles)
             if (hay.contains(n))
                 return true;
+        return false;
+    }
+
+    /** True if a needle appears at the START of a word (preceded by start-of-string or a non-letter). */
+    private static boolean hasBoundary(String hay, String... needles) {
+        for (String n : needles) {
+            int from = 0, idx;
+            while ((idx = hay.indexOf(n, from)) >= 0) {
+                if (idx == 0 || !Character.isLetter(hay.charAt(idx - 1)))
+                    return true;
+                from = idx + 1;
+            }
+        }
+        return false;
+    }
+
+    /** True if a needle appears as a whole word (a non-letter, or string edge, on both sides). */
+    private static boolean hasFullWord(String hay, String... needles) {
+        for (String n : needles) {
+            int from = 0, idx;
+            while ((idx = hay.indexOf(n, from)) >= 0) {
+                boolean startOk = idx == 0 || !Character.isLetter(hay.charAt(idx - 1));
+                int end = idx + n.length();
+                boolean endOk = end >= hay.length() || !Character.isLetter(hay.charAt(end));
+                if (startOk && endOk)
+                    return true;
+                from = idx + 1;
+            }
+        }
         return false;
     }
 

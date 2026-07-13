@@ -1,5 +1,9 @@
 # QuPath Patoloji Atlası extension
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/sbalci/patolojiatlasi-QuPath)](https://github.com/sbalci/patolojiatlasi-QuPath/releases/latest)
+[![Build](https://github.com/sbalci/patolojiatlasi-QuPath/actions/workflows/build.yml/badge.svg)](https://github.com/sbalci/patolojiatlasi-QuPath/actions/workflows/build.yml)
+
 Browse the whole-slide images published on **patolojiatlasi.com** from inside QuPath and open
 any of them directly — the slides are streamed tile-by-tile over HTTP, with nothing to download
 in advance.
@@ -37,28 +41,45 @@ browsable catalogue driven by the atlas's own image list.
 
 ---
 
-## Build
+## Install
 
-This project was generated in an environment without access to the Maven repositories that host
-QuPath, so it is shipped as source for you to build once on your own machine (JDK 21 required):
+### Method A — QuPath extension manager (recommended, no manual download)
+
+QuPath 0.6+ can install and update this extension from its catalog:
+
+1. **Extensions → Manage extension catalogs → Add**
+2. Paste this catalog URL:
+   ```
+   https://raw.githubusercontent.com/sbalci/patolojiatlasi-QuPath/master/catalog.json
+   ```
+3. Open **Extensions → Manage extensions**, find **QuPath Patoloji Atlası extension**, and click
+   **Install**. QuPath downloads the latest release JAR for you.
+4. Restart QuPath, then open **Extensions → Browse Patoloji Atlası…**.
+
+### Method B — manual (drag-and-drop)
+
+1. Download `qupath-extension-atlas-<version>.jar` from the
+   [latest release](https://github.com/sbalci/patolojiatlasi-QuPath/releases/latest).
+2. Start QuPath 0.6+.
+3. Drag the `.jar` onto the QuPath window (or copy it into the extensions directory:
+   *Extensions → Installed extensions → open extensions directory*).
+4. Restart QuPath when prompted, then open **Extensions → Browse Patoloji Atlası…**.
+
+---
+
+## Build (optional)
+
+Pre-built JARs are attached to every [GitHub release](https://github.com/sbalci/patolojiatlasi-QuPath/releases),
+so most users never need to build. To build from source (JDK 21 required):
 
 ```bash
 ./gradlew build          # macOS / Linux
 gradlew.bat build        # Windows
 ```
 
-The extension jar is written to `build/libs/qupath-extension-atlas-0.1.0.jar`.
-(`gradle build` with your own Gradle 8.x works too.)
-
----
-
-## Install
-
-1. Start QuPath 0.6.
-2. Drag **`qupath-extension-atlas-0.1.0.jar`** onto the QuPath window (or copy it into the
-   extensions directory: *Extensions → Installed extensions → open extensions directory*).
-3. Restart QuPath when prompted.
-4. Open **Extensions → Browse Patoloji Atlası…**.
+The extension jar is written to `build/libs/qupath-extension-atlas-<version>.jar`.
+QuPath's own APIs are resolved from the SciJava Maven repository at build time, so an internet
+connection is needed for the first build.
 
 ---
 
@@ -106,8 +127,41 @@ on interior tiles is cropped so each tile lands exactly on QuPath's grid.
 `src/main/resources/catalog.json` is a snapshot of `list.yaml` (deduped). To refresh it, re-export
 from the current `list.yaml`. The live **Refresh list** button always overrides it at runtime.
 
+> **Two files named `catalog.json` — don't confuse them.** The one at
+> `src/main/resources/catalog.json` is the bundled **image list** described above (it ships inside
+> the JAR). The one at the **repo root** (`catalog.json`) is the **QuPath extension catalog** that
+> the extension manager reads (Method A above) — it lists the extension's releases, not images.
+
+---
+
+## Releasing a new version
+
+1. Bump `version` in [`build.gradle`](build.gradle) (and `version` / `date-released` in
+   [`CITATION.cff`](CITATION.cff)).
+2. Prepend a new release entry to the root [`catalog.json`](catalog.json) — copy the newest block,
+   set `name` to `vX.Y.Z`, and point `main_url` at the matching release asset
+   (`.../releases/download/vX.Y.Z/qupath-extension-atlas-X.Y.Z.jar`). Keep older entries so prior
+   versions stay installable. Use `vX.Y.Z` or `vX.Y.Z-rcN` only — QuPath silently drops other
+   suffixes.
+3. Commit, then tag and push:
+   ```bash
+   git tag vX.Y.Z
+   git push origin master
+   git push origin vX.Y.Z
+   ```
+   The [Release workflow](.github/workflows/release.yml) builds the JAR and publishes a GitHub
+   release with it attached. `-rc`/`-alpha`/`-beta` tags are marked as pre-releases, so only a
+   clean `vX.Y.Z` becomes the "Latest" that the catalog's install URL resolves to.
+
+---
+
+## Citation
+
+If you use this software, please cite it using the metadata in [`CITATION.cff`](CITATION.cff)
+(GitHub renders a **"Cite this repository"** button from it).
+
 ---
 
 ## License
 
-MIT.
+MIT — see [LICENSE](LICENSE).

@@ -183,6 +183,10 @@ public class DziImageServer extends AbstractTileableImageServer {
             d.format = (fmt == null || fmt.isBlank()) ? "jpeg" : fmt.toLowerCase();
             d.width = Integer.parseInt(size.getAttribute("Width"));
             d.height = Integer.parseInt(size.getAttribute("Height"));
+            // A malformed descriptor with a non-positive TileSize would make buildMetadata()'s
+            // resolution-level loop spin forever; reject it up front.
+            if (d.tileSize <= 0 || d.width <= 0 || d.height <= 0)
+                throw new IOException("Invalid .dzi descriptor (TileSize/Width/Height must be positive): " + dziUrl);
             return d;
         } catch (IOException e) {
             throw e;

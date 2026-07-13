@@ -1,0 +1,41 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "QuPath Patoloji Atlası Extension (qupath-extension-atlas)"
+abstract: >
+  A QuPath 0.6+ extension that browses and opens the whole-slide images
+  published on patolojiatlasi.com directly inside QuPath. Slides are served as
+  Deep Zoom (DZI) pyramids and streamed tile-by-tile over HTTP, so there is
+  nothing to download in advance. The extension adds a DZI image reader plus a
+  searchable, category-grouped catalogue driven by the atlas's own image list,
+  and registers .dzi URLs as an openable image type.
+type: software
+authors:
+  - family-names: "Balcı"
+    given-names: "Serdar"
+    email: "drserdarbalci@gmail.com"
+    affiliation: "Memorial Pathology, Istanbul, Turkey"
+    orcid: "https://orcid.org/0000-0002-7852-3851"
+license: MIT
+version: "0.1.0"
+date-released: "2026-07-13"
+repository-code: "https://github.com/sbalci/patolojiatlasi-QuPath"
+url: "https://patolojiatlasi.com"
+keywords:
+  - "QuPath"
+  - "digital pathology"
+  - "computational pathology"
+  - "whole slide image"
+  - "WSI"
+  - "Deep Zoom"
+  - "DZI"
+  - "image streaming"
+  - "pathology education"
+references:
+  - type: software
+    title: "QuPath: Open source software for digital pathology image analysis"
+    authors:
+      - family-names: "Bankhead"
+        given-names: "Peter"
+    doi: "10.1038/s41598-017-17204-5"
+    year: 2017
+    notes: "Underlying platform — required citation for any QuPath-based work"

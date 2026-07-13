@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0) — creates the tag if it does not exist'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # On a tag push, this checks out the tag's commit. On workflow_dispatch the
+      # input tag may NOT exist yet (the dispatch path is documented to create it),
+      # so we deliberately do NOT pass `ref: inputs.tag` — that would fail for a
+      # not-yet-existing tag. The dispatch path builds from the selected branch HEAD,
+      # and the tag is then created against that commit by action-gh-release below.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up Gradle (with dependency cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      # SciJava Maven (maven.scijava.org) is the only host for io.github.qupath
+      # artifacts and has had intermittent timeouts. Retry the build up to 3
+      # times with 30s backoff before giving up, so a transient network blip
+      # doesn't fail the release.
+      - name: Build with Gradle (retry on transient failures)
+        run: |
+          set +e
+          for attempt in 1 2 3; do
+            echo "::group::Gradle build attempt $attempt of 3"
+            ./gradlew --no-daemon clean build
+            rc=$?
+            echo "::endgroup::"
+            if [ $rc -eq 0 ]; then
+              exit 0
+            fi
+            if [ $attempt -lt 3 ]; then
+              echo "::warning::Build attempt $attempt failed (exit $rc) — retrying in 30s..."
+              sleep 30
+            fi
+          done
+          echo "::error::Build failed after 3 attempts."
+          exit 1
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: List built artifacts
+        run: ls -la build/libs/
+
+      - name: Create GitHub release with JAR
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: ${{ steps.tag.outputs.tag }}
+          files: build/libs/qupath-extension-atlas-*.jar
+          generate_release_notes: true
+          draft: false
+          # Mark pre-release tags (-rc / -alpha / -beta) as prerelease so they never
+          # become GitHub's "Latest". A clean final vX.Y.Z (no suffix) evaluates to
+          # false here and becomes Latest as usual.
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-rc') || contains(steps.tag.outputs.tag, '-alpha') || contains(steps.tag.outputs.tag, '-beta') }}

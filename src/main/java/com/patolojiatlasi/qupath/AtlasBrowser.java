@@ -56,6 +56,9 @@ public class AtlasBrowser {
 
     private List<AtlasCase> allCases;
 
+    // Re-entrancy guard for openSelected(); touched only on the JavaFX thread.
+    private boolean opening = false;
+
     private AtlasBrowser(QuPathGUI qupath) {
         this.qupath = qupath;
     }
@@ -210,6 +213,16 @@ public class AtlasBrowser {
             status.setText("Select a case first");
             return;
         }
+        // Re-entrancy guard: opening a case spawns a background thread that mutates the
+        // shared QuPath project (project.addImage / syncChanges are not thread-safe, so
+        // two overlapping opens could corrupt the project entry list). Allow only one
+        // open in flight at a time. This flag is touched only on the JavaFX thread —
+        // openSelected() and the done()/fail() handlers all run there.
+        if (opening) {
+            status.setText("Please wait — an image is still opening…");
+            return;
+        }
+        opening = true;
         status.setText("Opening " + c.getTitle() + "…");
         progress.setVisible(true);
 
@@ -219,11 +232,22 @@ public class AtlasBrowser {
                 Project<BufferedImage> project = qupath.getProject();
                 if (project != null) {
                     ProjectImageEntry<BufferedImage> entry = project.addImage(server.getBuilder());
-                    entry.setImageName(c.getTitle());
-                    try (ImageData<BufferedImage> imageData = new ImageData<>(server)) {
-                        entry.saveImageData(imageData);
+                    try {
+                        entry.setImageName(c.getTitle());
+                        try (ImageData<BufferedImage> imageData = new ImageData<>(server)) {
+                            entry.saveImageData(imageData);
+                        }
+                        project.syncChanges();
+                    } catch (Exception inner) {
+                        // Roll back the half-added entry so the project isn't left with a
+                        // dataless orphan after a failed save.
+                        try {
+                            project.removeImage(entry, true);
+                        } catch (Exception rollbackEx) {
+                            logger.warn("Could not roll back partial project entry: {}", rollbackEx.getMessage());
+                        }
+                        throw inner;
                     }
-                    project.syncChanges();
                     Platform.runLater(() -> {
                         try {
                             qupath.refreshProject();
@@ -240,18 +264,18 @@ public class AtlasBrowser {
                 } else {
                     ImageData<BufferedImage> imageData = new ImageData<>(server);
                     Platform.runLater(() -> {
-                        qupath.getViewer().setImageData(imageData);
-                        done(c, "Opened (no project): ");
+                        try {
+                            qupath.getViewer().setImageData(imageData);
+                            done(c, "Opened (no project): ");
+                        } catch (Exception ex) {
+                            logger.error("Failed to display atlas case {}: {}", c.getReponame(), ex.getMessage(), ex);
+                            fail(c, ex);
+                        }
                     });
                 }
             } catch (Exception ex) {
                 logger.error("Failed to open atlas case {}: {}", c.getReponame(), ex.getMessage(), ex);
-                Platform.runLater(() -> {
-                    progress.setVisible(false);
-                    status.setText("Failed: " + ex.getMessage());
-                    new Alert(Alert.AlertType.ERROR,
-                            "Could not open " + c.getTitle() + "\n\n" + ex.getMessage()).showAndWait();
-                });
+                Platform.runLater(() -> fail(c, ex));
             }
         }, "atlas-open-" + c.getReponame());
         t.setDaemon(true);
@@ -259,9 +283,19 @@ public class AtlasBrowser {
     }
 
     private void done(AtlasCase c, String prefix) {
+        opening = false;
         progress.setVisible(false);
         status.setText(prefix + c.getTitle()
                 + "  (no µm/px calibration — set it in the Image tab if known)");
+    }
+
+    /** Reset the UI + re-entrancy guard after a failed open and report the error. Runs on the FX thread. */
+    private void fail(AtlasCase c, Exception ex) {
+        opening = false;
+        progress.setVisible(false);
+        status.setText("Failed: " + ex.getMessage());
+        new Alert(Alert.AlertType.ERROR,
+                "Could not open " + c.getTitle() + "\n\n" + ex.getMessage()).showAndWait();
     }
 
     private void refreshFromList(Button refreshBtn) {
