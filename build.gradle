@@ -1,0 +1,48 @@
+plugins {
+    id 'java-library'
+}
+
+group = 'com.patolojiatlasi'
+version = '0.1.0'
+
+repositories {
+    mavenCentral()
+    // QuPath artifacts are published to the SciJava Maven repository
+    maven { url = 'https://maven.scijava.org/content/repositories/releases' }
+    maven { url = 'https://maven.scijava.org/content/repositories/snapshots' }
+}
+
+// QuPath version to build against. QuPath 0.6.x runs on Java 21.
+ext.qupathVersion = '0.6.0'
+
+dependencies {
+    // These are provided by the running QuPath application at runtime,
+    // so they are compileOnly (not bundled into the extension jar).
+    compileOnly "io.github.qupath:qupath-gui-fx:${qupathVersion}"
+    compileOnly "io.github.qupath:qupath-core:${qupathVersion}"
+    compileOnly 'org.slf4j:slf4j-api:2.0.16'
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+
+    testImplementation "io.github.qupath:qupath-gui-fx:${qupathVersion}"
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+jar {
+    archiveBaseName = 'qupath-extension-atlas'
+    manifest {
+        attributes(
+            'Implementation-Title': 'QuPath Patoloji Atlası extension',
+            'Implementation-Version': project.version,
+            'Automatic-Module-Name': 'com.patolojiatlasi.qupath'
+        )
+    }
+}
