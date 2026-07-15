@@ -10,8 +10,10 @@ import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
@@ -59,6 +61,11 @@ public class AtlasBrowser {
 
     private List<AtlasCase> allCases;
 
+    // Persistent selection basket, deduped by AtlasCase (DZI URL). Independent of the tree,
+    // so it survives search/filter/refresh. Touched only on the JavaFX thread.
+    private final java.util.LinkedHashSet<AtlasCase> selection = new java.util.LinkedHashSet<>();
+    private final Label selectionCount = new Label("0 selected");
+
     // Re-entrancy guard for openSelected(); touched only on the JavaFX thread.
     private boolean opening = false;
 
@@ -105,6 +112,10 @@ public class AtlasBrowser {
         });
         tree.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> updatePreview());
 
+        MenuItem addToSelectionItem = new MenuItem("Add to selection");
+        addToSelectionItem.setOnAction(e -> addToSelection());
+        tree.setContextMenu(new ContextMenu(addToSelectionItem));
+
         // Preview pane
         thumbView.setFitWidth(220);
         thumbView.setPreserveRatio(true);
@@ -119,6 +130,8 @@ public class AtlasBrowser {
 
         Button openBtn = new Button("Open in QuPath");
         openBtn.setOnAction(e -> openSelected());
+        Button addSelBtn = new Button("Add to selection");
+        addSelBtn.setOnAction(e -> addToSelection());
         Button webBtn = new Button("Copy web link");
         webBtn.setOnAction(e -> copyWebLink());
         Button aboutBtn = new Button("About");
@@ -129,7 +142,7 @@ public class AtlasBrowser {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bottom = new HBox(6, openBtn, webBtn, status, spacer, aboutBtn);
+        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, status, spacer, aboutBtn);
         bottom.setPadding(new Insets(8));
 
         BorderPane root = new BorderPane();
@@ -249,6 +262,23 @@ public class AtlasBrowser {
         content.putString(c.getViewerUrl());
         javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
         status.setText("Copied: " + c.getViewerUrl());
+    }
+
+    private void addToSelection() {
+        AtlasCase c = getSelectedCase();
+        if (c == null) {
+            status.setText("Select a case first");
+            return;
+        }
+        if (selection.add(c))
+            status.setText("Added to selection: " + c.getTitle());
+        else
+            status.setText("Already in selection: " + c.getTitle());
+        updateSelectionCount();
+    }
+
+    private void updateSelectionCount() {
+        selectionCount.setText(selection.size() + " selected");
     }
 
     private void openSelected() {
