@@ -65,6 +65,7 @@ public class AtlasBrowser {
     // so it survives search/filter/refresh. Touched only on the JavaFX thread.
     private final java.util.LinkedHashSet<AtlasCase> selection = new java.util.LinkedHashSet<>();
     private final Label selectionCount = new Label("0 selected");
+    private final Button createProjectBtn = new Button("Create project…");
 
     // Re-entrancy guard for openSelected(); touched only on the JavaFX thread.
     private boolean opening = false;
@@ -142,7 +143,11 @@ public class AtlasBrowser {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, status, spacer, aboutBtn);
+        createProjectBtn.setDisable(true);
+        createProjectBtn.setOnAction(e ->
+                ProjectBuilderDialog.show(qupath, stage, selection, this::updateSelectionCount));
+
+        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn, status, spacer, aboutBtn);
         bottom.setPadding(new Insets(8));
 
         BorderPane root = new BorderPane();
@@ -279,6 +284,7 @@ public class AtlasBrowser {
 
     private void updateSelectionCount() {
         selectionCount.setText(selection.size() + " selected");
+        createProjectBtn.setDisable(selection.isEmpty());
     }
 
     private void openSelected() {

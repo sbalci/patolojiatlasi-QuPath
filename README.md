@@ -38,6 +38,12 @@ to these sites:
   - With a **project** open, the slide is added to the project and opened as an entry, so your
     annotations, detections and measurements are saved with the project.
   - With no project open, it opens in the current viewer for read-only viewing.
+- **Curate a project from several images.** Use **Add to selection** (button or the tree
+  right-click menu) to build up a set as you browse and search — the selection persists across
+  searches and *Refresh list*. Then **Create project…** opens a dialog where you review the set
+  and either create a **new project** on disk or **add the selection to the current project**.
+  Because slides stream from URLs, the resulting project is tiny and portable — hand the project
+  folder to students (they need this extension installed) to run a course, seminar, or exam set.
 - **Refresh list** pulls the latest `lists/list.yaml` live from the
   `patolojiatlasi/patolojiatlasi.github.io` repository, so new cases appear without updating the
   extension. A snapshot of the list (288 images) is bundled so the browser works offline out of
