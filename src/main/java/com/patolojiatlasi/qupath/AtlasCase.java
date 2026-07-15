@@ -103,6 +103,20 @@ public class AtlasCase {
     }
 
     @Override
+    public boolean equals(Object o) {
+        if (this == o)
+            return true;
+        if (!(o instanceof AtlasCase other))
+            return false;
+        return dziUrl.equals(other.dziUrl);
+    }
+
+    @Override
+    public int hashCode() {
+        return dziUrl.hashCode();
+    }
+
+    @Override
     public String toString() {
         return getTitle();
     }
