@@ -10,8 +10,10 @@ import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextField;
 import javafx.scene.control.TreeItem;
@@ -21,6 +23,7 @@ import javafx.scene.image.ImageView;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
@@ -118,8 +121,15 @@ public class AtlasBrowser {
         openBtn.setOnAction(e -> openSelected());
         Button webBtn = new Button("Copy web link");
         webBtn.setOnAction(e -> copyWebLink());
+        Button aboutBtn = new Button("About");
+        aboutBtn.setTooltip(new javafx.scene.control.Tooltip("About this extension and the atlas websites"));
+        aboutBtn.setOnAction(e -> showAbout());
 
-        HBox bottom = new HBox(6, openBtn, webBtn, status);
+        // Spacer pushes the About button to the far right of the bar.
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        HBox bottom = new HBox(6, openBtn, webBtn, status, spacer, aboutBtn);
         bottom.setPadding(new Insets(8));
 
         BorderPane root = new BorderPane();
@@ -134,6 +144,40 @@ public class AtlasBrowser {
         s.setScene(new Scene(root, 720, 660));
         s.setOnHidden(e -> stage = null);
         return s;
+    }
+
+    /**
+     * Small About dialog explaining what the extension does, with clickable links to the
+     * atlas's public websites (Turkish and English). Links open in the system browser via
+     * QuPath's own {@code openInBrowser}.
+     */
+    private void showAbout() {
+        Label desc = new Label(
+                "Browse whole-slide images published on the Patoloji Atlası and open them "
+                + "directly in QuPath. Slides are streamed tile-by-tile as Deep Zoom (DZI) "
+                + "pyramids, so there is nothing to download in advance.\n\n"
+                + "The images belong to the atlas and are shared for viewing and study.");
+        desc.setWrapText(true);
+        desc.setMaxWidth(440);
+
+        Label sitesHeader = new Label("Websites");
+        sitesHeader.setStyle("-fx-font-weight: bold;");
+
+        Hyperlink trLink = new Hyperlink("patolojiatlasi.com  —  Türkçe");
+        trLink.setOnAction(e -> QuPathGUI.openInBrowser("https://www.patolojiatlasi.com/"));
+        Hyperlink enLink = new Hyperlink("histopathologyatlas.com  —  English");
+        enLink.setOnAction(e -> QuPathGUI.openInBrowser("https://www.histopathologyatlas.com/"));
+
+        VBox content = new VBox(4, desc, new Separator(), sitesHeader, trLink, enLink);
+        content.setPadding(new Insets(4));
+
+        Alert alert = new Alert(Alert.AlertType.INFORMATION);
+        alert.setTitle("About");
+        alert.setHeaderText("QuPath Patoloji Atlası extension");
+        alert.getDialogPane().setContent(content);
+        if (stage != null)
+            alert.initOwner(stage);
+        alert.showAndWait();
     }
 
     private void rebuildTree() {

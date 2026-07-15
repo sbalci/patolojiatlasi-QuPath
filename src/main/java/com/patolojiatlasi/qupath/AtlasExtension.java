@@ -25,7 +25,8 @@ public class AtlasExtension implements QuPathExtension {
 
     @Override
     public String getDescription() {
-        return "Browse and open whole-slide images from patolojiatlasi.com directly inside QuPath.";
+        return "Browse and open whole-slide images from the Patoloji Atlası "
+                + "(patolojiatlasi.com / histopathologyatlas.com) directly inside QuPath.";
     }
 
     @Override

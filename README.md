@@ -14,6 +14,19 @@ browsable catalogue driven by the atlas's own image list.
 
 ---
 
+## About
+
+The **Patoloji Atlası** is a whole-slide image teaching collection curated by pathologists and
+published openly on the web. This extension brings that same collection into QuPath so the slides
+can be browsed and opened for study and analysis without leaving the application. An **About**
+button in the browser window (and the extension's entry in QuPath's extension manager) links back
+to these sites:
+
+- **Türkçe:** [patolojiatlasi.com](https://www.patolojiatlasi.com/)
+- **English:** [histopathologyatlas.com](https://www.histopathologyatlas.com/)
+
+---
+
 ## What it does
 
 - Adds **Extensions → Browse Patoloji Atlası…**, opening a searchable window that lists every
