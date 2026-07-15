@@ -107,6 +107,7 @@ public final class AtlasProjectService {
                 addCaseToProject(project, c);
                 added++;
             } catch (Exception ex) {
+                logger.warn("Failed to add \"{}\" to project: {}", c.getTitle(), ex.getMessage(), ex);
                 failures.add(new BuildResult.Failure(c, ex.getMessage()));
             }
         }

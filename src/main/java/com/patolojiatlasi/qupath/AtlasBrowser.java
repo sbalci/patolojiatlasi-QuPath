@@ -144,8 +144,7 @@ public class AtlasBrowser {
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         createProjectBtn.setDisable(true);
-        createProjectBtn.setOnAction(e ->
-                ProjectBuilderDialog.show(qupath, stage, selection, this::updateSelectionCount));
+        createProjectBtn.setOnAction(e -> openProjectBuilder());
 
         HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn, status, spacer, aboutBtn);
         bottom.setPadding(new Insets(8));
@@ -285,6 +284,25 @@ public class AtlasBrowser {
     private void updateSelectionCount() {
         selectionCount.setText(selection.size() + " selected");
         createProjectBtn.setDisable(selection.isEmpty());
+    }
+
+    /**
+     * Open the project-builder dialog, but refuse while a single-image open is still in
+     * flight: that open mutates the shared QuPath project on a background thread, and a
+     * concurrent build would race it (addImage/syncChanges are not thread-safe). Because the
+     * dialog is window-modal, once it is open no single-open can start and a second build is
+     * blocked too — so gating here is what makes single-open and builds mutually exclusive.
+     */
+    private void openProjectBuilder() {
+        if (opening) {
+            status.setText("Please wait — an image is still opening…");
+            return;
+        }
+        if (selection.isEmpty()) {
+            status.setText("Add some images to the selection first");
+            return;
+        }
+        ProjectBuilderDialog.show(qupath, stage, selection, this::updateSelectionCount);
     }
 
     private void openSelected() {

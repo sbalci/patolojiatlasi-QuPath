@@ -236,7 +236,7 @@ public class ProjectBuilderDialog {
                         finish(result);
                     });
                 }
-            } catch (Exception ex) {
+            } catch (Throwable ex) {
                 logger.error("Project build failed: {}", ex.getMessage(), ex);
                 Platform.runLater(() -> {
                     building = false;
@@ -253,15 +253,21 @@ public class ProjectBuilderDialog {
         t.start();
     }
 
-    /** Runs on the FX thread after a successful build: clear the basket, report, close. */
+    /** Runs on the FX thread after a build: keep failed cases for retry, drop the rest, report, close. */
     private void finish(AtlasProjectService.BuildResult result) {
         building = false;
         progress.setVisible(false);
-        basket.clear();
-        items.clear();
+        // Keep only the cases that failed to add, so the user can retry them without re-finding
+        // them from the tree; succeeded and skipped (already-present) cases leave the selection.
+        java.util.Set<AtlasCase> failed = new java.util.HashSet<>();
+        for (AtlasProjectService.BuildResult.Failure f : result.failures())
+            failed.add(f.c());
+        basket.removeIf(c -> !failed.contains(c));
+        items.setAll(basket);
         onSelectionChanged.run();
         if (result.hasFailures()) {
-            StringBuilder sb = new StringBuilder("Some images could not be added:\n\n");
+            StringBuilder sb = new StringBuilder(
+                    "Some images could not be added (kept in the selection so you can retry):\n\n");
             for (AtlasProjectService.BuildResult.Failure f : result.failures())
                 sb.append("• ").append(f.c().getTitle()).append(" — ").append(f.reason()).append('\n');
             new Alert(Alert.AlertType.WARNING, sb.toString()).showAndWait();
