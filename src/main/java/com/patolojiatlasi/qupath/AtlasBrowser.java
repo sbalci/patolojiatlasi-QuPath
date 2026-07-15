@@ -272,26 +272,11 @@ public class AtlasBrowser {
 
         Thread t = new Thread(() -> {
             try {
-                DziImageServer server = new DziImageServer(c.getDziURI());
                 Project<BufferedImage> project = qupath.getProject();
                 if (project != null) {
-                    ProjectImageEntry<BufferedImage> entry = project.addImage(server.getBuilder());
-                    try {
-                        entry.setImageName(c.getTitle());
-                        try (ImageData<BufferedImage> imageData = new ImageData<>(server)) {
-                            entry.saveImageData(imageData);
-                        }
-                        project.syncChanges();
-                    } catch (Exception inner) {
-                        // Roll back the half-added entry so the project isn't left with a
-                        // dataless orphan after a failed save.
-                        try {
-                            project.removeImage(entry, true);
-                        } catch (Exception rollbackEx) {
-                            logger.warn("Could not roll back partial project entry: {}", rollbackEx.getMessage());
-                        }
-                        throw inner;
-                    }
+                    ProjectImageEntry<BufferedImage> entry =
+                            AtlasProjectService.addCaseToProject(project, c);
+                    project.syncChanges();
                     Platform.runLater(() -> {
                         try {
                             qupath.refreshProject();
@@ -306,6 +291,7 @@ public class AtlasBrowser {
                         done(c, "Added to project & opened: ");
                     });
                 } else {
+                    DziImageServer server = new DziImageServer(c.getDziURI());
                     ImageData<BufferedImage> imageData = new ImageData<>(server);
                     Platform.runLater(() -> {
                         try {
