@@ -59,7 +59,9 @@ public class ProjectBuilderDialog {
     private Label locationLabel;
     private File location;
     private Button createBtn;
+    private Button cancelBtn;
     private Stage stage;
+    private boolean building;
 
     private ProjectBuilderDialog(QuPathGUI qupath, Stage owner,
             LinkedHashSet<AtlasCase> basket, Runnable onSelectionChanged) {
@@ -83,6 +85,7 @@ public class ProjectBuilderDialog {
         if (owner != null)
             stage.initOwner(owner);
         stage.setTitle("Create project from selection");
+        stage.setOnCloseRequest(e -> { if (building) e.consume(); });
 
         listView.setPrefHeight(220);
         listView.setPlaceholder(new Label("No images selected"));
@@ -116,7 +119,7 @@ public class ProjectBuilderDialog {
 
         createBtn = new Button("Create");
         createBtn.setOnAction(e -> runBuild());
-        Button cancelBtn = new Button("Cancel");
+        cancelBtn = new Button("Cancel");
         cancelBtn.setOnAction(e -> stage.close());
         progress.setVisible(false);
         progress.setPrefSize(18, 18);
@@ -201,7 +204,9 @@ public class ProjectBuilderDialog {
             projectDir = null;
         }
 
+        building = true;
         createBtn.setDisable(true);
+        cancelBtn.setDisable(true);
         progress.setVisible(true);
         statusLabel.setText("Building…");
 
@@ -234,8 +239,10 @@ public class ProjectBuilderDialog {
             } catch (Exception ex) {
                 logger.error("Project build failed: {}", ex.getMessage(), ex);
                 Platform.runLater(() -> {
+                    building = false;
                     progress.setVisible(false);
                     createBtn.setDisable(false);
+                    cancelBtn.setDisable(false);
                     statusLabel.setText("Failed: " + ex.getMessage());
                     new Alert(Alert.AlertType.ERROR,
                             "Could not build project\n\n" + ex.getMessage()).showAndWait();
@@ -248,6 +255,7 @@ public class ProjectBuilderDialog {
 
     /** Runs on the FX thread after a successful build: clear the basket, report, close. */
     private void finish(AtlasProjectService.BuildResult result) {
+        building = false;
         progress.setVisible(false);
         basket.clear();
         items.clear();
