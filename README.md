@@ -111,10 +111,10 @@ connection is needed for the first build.
   automatically on open (and enable QuPath's scale bar); (3) manually per slide after opening
   (Image tab → *Set pixel size*), or baked into a URL as `…/HE.dzi?mpp=0.25`. No pixel size is
   imposed by default, so a wrong calibration is never applied silently.
-- **Image type is set on open.** Slides open with a best-guess QuPath image type from the stain —
-  H&E → *Brightfield (H&E)*, a known special/histochemical stain → *Brightfield (other)*, any
-  other named stain → *Brightfield (H-DAB)* (assumed IHC/DAB) — so color deconvolution works
-  without setting it by hand. Change it in the Image tab if a guess is wrong.
+- **Image type is set on open when recognised.** H&E → *Brightfield (H&E)* and a known
+  special/histochemical stain → *Brightfield (other)*, so color deconvolution works without setting
+  it by hand. Any other stain (including IHC markers) is left **unset** — the extension only assigns
+  a type it is confident about and never guesses IHC/DAB; set those in the Image tab.
 - **Streaming, not downloaded.** Tiles are fetched on demand into QuPath's tile cache; a live
   connection is needed while panning into new regions.
 - **Category coverage depends on the list metadata.** Images are grouped from the `speciality`

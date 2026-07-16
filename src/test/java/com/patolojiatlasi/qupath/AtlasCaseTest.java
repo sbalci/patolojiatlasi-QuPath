@@ -56,10 +56,13 @@ class AtlasCaseTest {
     }
 
     @Test
-    void imageTypeHDabForIhcMarkers() {
-        assertEquals(ImageType.BRIGHTFIELD_H_DAB, withStain("cerbB2", 0).getImageType());
-        assertEquals(ImageType.BRIGHTFIELD_H_DAB, withStain("ki67", 0).getImageType());
-        assertEquals(ImageType.BRIGHTFIELD_H_DAB, withStain("her2", 0).getImageType());
+    void imageTypeUnsetForUnrecognizedStains() {
+        // IHC markers and anything else not clearly H&E or a special stain are left unset —
+        // the extension never guesses IHC/DAB.
+        assertEquals(ImageType.UNSET, withStain("cerbB2", 0).getImageType());
+        assertEquals(ImageType.UNSET, withStain("ki67", 0).getImageType());
+        assertEquals(ImageType.UNSET, withStain("her2", 0).getImageType());
+        assertEquals(ImageType.UNSET, withStain("somethingUnknown", 0).getImageType());
     }
 
     @Test

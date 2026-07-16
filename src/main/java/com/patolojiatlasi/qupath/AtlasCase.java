@@ -105,10 +105,11 @@ public class AtlasCase {
     }
 
     /**
-     * Best-guess QuPath image type from the stain, so slides open ready for analysis instead of
-     * unset. H&amp;E (the atlas default) → brightfield H&amp;E; a known histochemical/special stain
-     * → brightfield other; any other named (non-H&amp;E) stain in a pathology atlas is almost
-     * always an IHC marker shown with a brown DAB chromogen → brightfield H-DAB.
+     * QuPath image type inferred from the stain, so recognised slides open ready for analysis.
+     * H&amp;E (the atlas default) → brightfield H&amp;E; a known histochemical/special stain →
+     * brightfield other. Any other stain is left <b>unset</b> — the extension only assigns a type
+     * it is confident about and never guesses IHC/DAB, so an unrecognised stain is left for QuPath
+     * (or the user) to type.
      */
     public ImageData.ImageType getImageType() {
         String s = image.toLowerCase(Locale.ROOT);
@@ -116,10 +117,10 @@ public class AtlasCase {
             return ImageData.ImageType.BRIGHTFIELD_H_E;
         if (isSpecialStain(s))
             return ImageData.ImageType.BRIGHTFIELD_OTHER;
-        return ImageData.ImageType.BRIGHTFIELD_H_DAB;
+        return ImageData.ImageType.UNSET;
     }
 
-    /** Histochemical / special stains (not H&amp;E, not IHC-DAB). Matched on the stain basename. */
+    /** Histochemical / special stains (not H&amp;E). Matched on the stain basename. */
     private static boolean isSpecialStain(String s) {
         String[] keys = {
                 "pas", "giemsa", "mgg", "congo", "amyloid", "crystalviolet", "trichrome",
