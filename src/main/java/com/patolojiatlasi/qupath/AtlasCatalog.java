@@ -54,13 +54,17 @@ public class AtlasCatalog {
             }
             JsonObject root = JsonParser.parseReader(
                     new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
+            // Optional catalog-wide default pixel size (µm/px) applied to any image without its
+            // own "mpp". Absent (0) = no calibration, so nothing wrong is imposed by default.
+            double defaultMpp = d(root, "defaultMpp");
             JsonArray arr = root.getAsJsonArray("cases");
             for (JsonElement el : arr) {
                 JsonObject o = el.getAsJsonObject();
+                double mpp = o.has("mpp") ? d(o, "mpp") : defaultMpp;
                 cases.add(new AtlasCase(
                         s(o, "reponame"), s(o, "stainname"), s(o, "image"),
                         s(o, "titleEN"), s(o, "titleTR"), s(o, "organEN"),
-                        s(o, "speciality"), s(o, "type"), s(o, "dzi"), s(o, "thumb")));
+                        s(o, "speciality"), s(o, "type"), s(o, "dzi"), s(o, "thumb"), mpp));
             }
         } catch (Exception e) {
             logger.error("Failed to read bundled catalog: {}", e.getMessage(), e);
@@ -285,5 +289,16 @@ public class AtlasCatalog {
 
     private static String s(JsonObject o, String key) {
         return (o.has(key) && !o.get(key).isJsonNull()) ? o.get(key).getAsString() : "";
+    }
+
+    /** Read a numeric field as a double; 0 if absent, null, or not a number. */
+    private static double d(JsonObject o, String key) {
+        try {
+            if (o.has(key) && o.get(key).isJsonPrimitive() && o.get(key).getAsJsonPrimitive().isNumber())
+                return o.get(key).getAsDouble();
+        } catch (Exception e) {
+            // fall through
+        }
+        return 0.0;
     }
 }

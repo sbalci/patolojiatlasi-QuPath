@@ -104,10 +104,17 @@ connection is needed for the first build.
 
 ## Notes & limitations
 
-- **No pixel-size calibration.** `vips dzsave` does not store microns-per-pixel in the DZI, so
-  opened slides have no µm/px value and measurements are in **pixels** until you set the pixel
-  size manually (Image tab → *Set pixel size*). You can also bake it into the URL,
-  e.g. `…/HE.dzi?mpp=0.25`, and the server will use it.
+- **Pixel-size calibration.** `vips dzsave` does not store microns-per-pixel in the DZI, so a
+  slide opens **uncalibrated** (measurements in pixels) unless a pixel size is supplied. Three
+  ways to supply it, in order of precedence: (1) a per-image `"mpp"` field in the catalog, (2) a
+  catalog-wide `"defaultMpp"` (see *Regenerating the bundled snapshot* below) — both are applied
+  automatically on open (and enable QuPath's scale bar); (3) manually per slide after opening
+  (Image tab → *Set pixel size*), or baked into a URL as `…/HE.dzi?mpp=0.25`. No pixel size is
+  imposed by default, so a wrong calibration is never applied silently.
+- **Image type is set on open.** Slides open with a best-guess QuPath image type from the stain —
+  H&E → *Brightfield (H&E)*, a known special/histochemical stain → *Brightfield (other)*, any
+  other named stain → *Brightfield (H-DAB)* (assumed IHC/DAB) — so color deconvolution works
+  without setting it by hand. Change it in the Image tab if a guess is wrong.
 - **Streaming, not downloaded.** Tiles are fetched on demand into QuPath's tile cache; a live
   connection is needed while panning into new regions.
 - **Category coverage depends on the list metadata.** Images are grouped from the `speciality`
@@ -145,6 +152,20 @@ on interior tiles is cropped so each tile lands exactly on QuPath's grid.
 
 `src/main/resources/catalog.json` is a snapshot of `list.yaml` (deduped). To refresh it, re-export
 from the current `list.yaml`. The live **Refresh list** button always overrides it at runtime.
+
+**Optional calibration fields.** Each case object may carry a numeric `"mpp"` (microns per pixel),
+and the catalog root may carry a `"defaultMpp"` applied to any case without its own `"mpp"`. When
+present these are applied automatically on open (see *Notes & limitations*). Omit them to leave
+slides uncalibrated — only add real values (a wrong pixel size makes every measurement wrong).
+
+```jsonc
+{
+  "defaultMpp": 0.25,          // optional; applied to cases with no "mpp"
+  "cases": [
+    { "reponame": "…", "image": "HE", "dzi": "…/HE.dzi", "mpp": 0.2456 /* optional per-image */ }
+  ]
+}
+```
 
 > **Two files named `catalog.json` — don't confuse them.** The one at
 > `src/main/resources/catalog.json` is the bundled **image list** described above (it ships inside

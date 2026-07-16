@@ -346,7 +346,7 @@ public class AtlasBrowser {
                     });
                 } else {
                     DziImageServer server = new DziImageServer(c.getDziURI());
-                    ImageData<BufferedImage> imageData = new ImageData<>(server);
+                    ImageData<BufferedImage> imageData = new ImageData<>(server, c.getImageType());
                     Platform.runLater(() -> {
                         try {
                             qupath.getViewer().setImageData(imageData);
@@ -369,8 +369,10 @@ public class AtlasBrowser {
     private void done(AtlasCase c, String prefix) {
         opening = false;
         progress.setVisible(false);
-        status.setText(prefix + c.getTitle()
-                + "  (no µm/px calibration — set it in the Image tab if known)");
+        String cal = c.getMpp() > 0
+                ? "  (" + c.getMpp() + " µm/px)"
+                : "  (no µm/px calibration — set it in the Image tab if known)";
+        status.setText(prefix + c.getTitle() + cal);
     }
 
     /** Reset the UI + re-entrancy guard after a failed open and report the error. Runs on the FX thread. */

@@ -41,7 +41,9 @@ public final class AtlasProjectService {
         ProjectImageEntry<BufferedImage> entry = project.addImage(server.getBuilder());
         try {
             entry.setImageName(c.getTitle());
-            try (ImageData<BufferedImage> imageData = new ImageData<>(server)) {
+            // Open with a best-guess image type (H&E / H-DAB / other) from the stain, so the
+            // saved entry is analysis-ready instead of unset.
+            try (ImageData<BufferedImage> imageData = new ImageData<>(server, c.getImageType())) {
                 entry.saveImageData(imageData);
             }
             return entry;

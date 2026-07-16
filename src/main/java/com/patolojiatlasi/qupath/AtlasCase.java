@@ -1,6 +1,9 @@
 package com.patolojiatlasi.qupath;
 
 import java.net.URI;
+import java.util.Locale;
+
+import qupath.lib.images.ImageData;
 
 /**
  * A single viewable whole-slide image (one stain of one case) in the Patoloji Atlası.
@@ -18,10 +21,18 @@ public class AtlasCase {
     private final String type;       // "published" / "unpublished"
     private final String dziUrl;
     private final String thumbUrl;
+    private final double mpp;         // pixel size in microns/px; 0 = unknown
 
     public AtlasCase(String reponame, String stainname, String image, String titleEN,
                      String titleTR, String organEN, String speciality, String type,
                      String dziUrl, String thumbUrl) {
+        this(reponame, stainname, image, titleEN, titleTR, organEN, speciality, type,
+                dziUrl, thumbUrl, 0.0);
+    }
+
+    public AtlasCase(String reponame, String stainname, String image, String titleEN,
+                     String titleTR, String organEN, String speciality, String type,
+                     String dziUrl, String thumbUrl, double mpp) {
         this.reponame = nz(reponame);
         this.stainname = nz(stainname);
         this.image = image == null || image.isBlank() ? "HE" : image;
@@ -32,6 +43,7 @@ public class AtlasCase {
         this.type = nz(type);
         this.dziUrl = nz(dziUrl);
         this.thumbUrl = nz(thumbUrl);
+        this.mpp = mpp > 0 ? mpp : 0.0;
     }
 
     public String getReponame() {
@@ -74,8 +86,52 @@ public class AtlasCase {
         return dziUrl;
     }
 
+    /** Pixel size in microns/px, or 0 if unknown. */
+    public double getMpp() {
+        return mpp;
+    }
+
+    /**
+     * The DZI URI QuPath opens. When a pixel size is known, it is appended as a {@code ?mpp=}
+     * query so {@link com.patolojiatlasi.qupath.dzi.DziImageServer} applies µm/px calibration
+     * (the atlas's DZI descriptors don't carry pixel size). Double-to-string is locale-safe.
+     */
     public URI getDziURI() {
+        if (mpp > 0) {
+            String sep = dziUrl.indexOf('?') >= 0 ? "&" : "?";
+            return URI.create(dziUrl + sep + "mpp=" + mpp);
+        }
         return URI.create(dziUrl);
+    }
+
+    /**
+     * Best-guess QuPath image type from the stain, so slides open ready for analysis instead of
+     * unset. H&amp;E (the atlas default) → brightfield H&amp;E; a known histochemical/special stain
+     * → brightfield other; any other named (non-H&amp;E) stain in a pathology atlas is almost
+     * always an IHC marker shown with a brown DAB chromogen → brightfield H-DAB.
+     */
+    public ImageData.ImageType getImageType() {
+        String s = image.toLowerCase(Locale.ROOT);
+        if (s.matches("h[&-]?e[0-9]*") || s.contains("hematoxylin"))
+            return ImageData.ImageType.BRIGHTFIELD_H_E;
+        if (isSpecialStain(s))
+            return ImageData.ImageType.BRIGHTFIELD_OTHER;
+        return ImageData.ImageType.BRIGHTFIELD_H_DAB;
+    }
+
+    /** Histochemical / special stains (not H&amp;E, not IHC-DAB). Matched on the stain basename. */
+    private static boolean isSpecialStain(String s) {
+        String[] keys = {
+                "pas", "giemsa", "mgg", "congo", "amyloid", "crystalviolet", "trichrome",
+                "masson", "reticulin", "mucicarmine", "warthin", "starry", "grocott", "gms",
+                "ziehl", "afb", "verhoeff", "elastic", "gieson", "evg", "perls", "prussian",
+                "alcian", "mucin", "luxol", "cresyl", "fontana", "sudan", "toluidine",
+                "papanicolaou", "silver"
+        };
+        for (String k : keys)
+            if (s.contains(k))
+                return true;
+        return false;
     }
 
     /** Web viewer (OpenSeadragon) page. */
