@@ -11,6 +11,10 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
+import qupath.lib.regions.ImagePlane;
+import qupath.lib.roi.ROIs;
+import qupath.lib.roi.interfaces.ROI;
+
 class AtlasQuizIOTest {
 
     private static QuizQuestion mcq() {
@@ -35,6 +39,18 @@ class AtlasQuizIOTest {
         q.setPrompt("Describe the lesion.");
         q.setExplanation("Model description here.");
         q.setModelAnswer("A well-differentiated tumour.");
+        return q;
+    }
+
+    private static QuizQuestion annotation(String referenceGeometryGeoJson) {
+        QuizQuestion q = new QuizQuestion();
+        q.setId("q3");
+        q.setType(QuizType.ANNOTATION);
+        q.setSlideUrl("https://images.patolojiatlasi.com/case3/HE.dzi");
+        q.setSlideTitle("Case 3 HE");
+        q.setPrompt("Draw around the lesion.");
+        q.setInstruction("Trace the tumour border.");
+        q.setReferenceGeometryGeoJson(referenceGeometryGeoJson);
         return q;
     }
 
@@ -120,6 +136,21 @@ class AtlasQuizIOTest {
 
         AtlasQuiz back = AtlasQuizIO.read(f);
         assertEquals("", back.getTitle());
+    }
+
+    @Test
+    void acceptsAnnotationQuestionWithRealGeometry() throws IOException {
+        ROI roi = ROIs.createRectangleROI(10, 20, 100, 50, ImagePlane.getDefaultPlane());
+        AtlasQuiz quiz = new AtlasQuiz();
+        quiz.getQuestions().add(annotation(QuizGeometry.toGeoJson(roi)));
+        AtlasQuizIO.validate(quiz); // must not throw
+    }
+
+    @Test
+    void rejectsAnnotationQuestionWithBlankGeometry() {
+        AtlasQuiz quiz = new AtlasQuiz();
+        quiz.getQuestions().add(annotation("   "));
+        assertThrows(IOException.class, () -> AtlasQuizIO.validate(quiz));
     }
 
     @Test
