@@ -1,6 +1,9 @@
 package com.patolojiatlasi.qupath.focus;
 
+import java.awt.Color;
+import java.awt.Graphics2D;
 import java.awt.Rectangle;
+import java.awt.RenderingHints;
 import java.awt.Shape;
 import java.awt.image.BufferedImage;
 import java.io.File;
@@ -16,12 +19,19 @@ import com.google.gson.GsonBuilder;
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
+import javafx.geometry.Insets;
+import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
+import javafx.scene.image.ImageView;
+import javafx.scene.image.PixelFormat;
+import javafx.scene.image.WritableImage;
+import javafx.scene.layout.StackPane;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.Stage;
 import javafx.util.Duration;
 
 import org.slf4j.Logger;
@@ -70,8 +80,15 @@ public final class FocusHeatmap {
     /** Anonymous per-session id — lets contributions be de-duplicated/weighted without identifying anyone. */
     private final String sessionId = java.util.UUID.randomUUID().toString();
 
-    private boolean active;
+    // The heat map can be shown two ways, independently: as a translucent layer on the slide, and/or
+    // in a separate small window. Sampling runs while EITHER is visible.
+    private boolean overlayVisible;
+    private boolean windowVisible;
     private boolean keepMaps;
+
+    private CheckMenuItem windowItem;   // kept so closing the window can untick it
+    private Stage window;
+    private ImageView windowView;
 
     private Timeline timer;
     private int ticksSinceRefresh;
@@ -89,8 +106,11 @@ public final class FocusHeatmap {
 
     /** Build the "Odak ısı haritası" submenu with all controls wired up. */
     public Menu buildMenu() {
-        CheckMenuItem trackItem = new CheckMenuItem("Görünür — izlemeyi aç/kapat");
-        trackItem.selectedProperty().addListener((obs, was, now) -> setActive(now));
+        CheckMenuItem overlayItem = new CheckMenuItem("Slayt üzerinde göster (ısı katmanı)");
+        overlayItem.selectedProperty().addListener((obs, was, now) -> setOverlayVisible(now));
+
+        windowItem = new CheckMenuItem("Ayrı pencerede göster");
+        windowItem.selectedProperty().addListener((obs, was, now) -> setWindowVisible(now));
 
         MenuItem clearItem = new MenuItem("Temizle");
         clearItem.setOnAction(e -> clear());
@@ -105,29 +125,45 @@ public final class FocusHeatmap {
         keepItem.selectedProperty().addListener((obs, was, now) -> keepMaps = now);
 
         Menu menu = new Menu("Odak ısı haritası");
-        menu.getItems().addAll(trackItem, clearItem, saveItem, contributeItem,
+        menu.getItems().addAll(overlayItem, windowItem, clearItem, saveItem, contributeItem,
                 new SeparatorMenuItem(), keepItem);
         return menu;
     }
 
     // --- tracking lifecycle -------------------------------------------------
 
-    private void setActive(boolean on) {
-        this.active = on;
-        if (on) {
+    private void setOverlayVisible(boolean on) {
+        this.overlayVisible = on;
+        if (!on)
+            removeOverlay();
+        refreshTracking();
+    }
+
+    private void setWindowVisible(boolean on) {
+        this.windowVisible = on;
+        if (on)
+            showWindow();
+        else
+            hideWindow();
+        refreshTracking();
+    }
+
+    /** Start/stop the sampling timer based on whether either display is showing. */
+    private void refreshTracking() {
+        boolean track = overlayVisible || windowVisible;
+        if (track) {
             if (timer == null) {
                 timer = new Timeline(new KeyFrame(Duration.millis(SAMPLE_MS), e -> tick()));
                 timer.setCycleCount(Animation.INDEFINITE);
             }
-            ticksSinceRefresh = REFRESH_EVERY;
+            ticksSinceRefresh = REFRESH_EVERY;   // refresh on the first tick
             timer.play();
         } else {
             if (timer != null)
                 timer.stop();
-            // Persist the in-progress map before hiding, if the user asked to keep maps.
+            // Persist the in-progress map before going idle, if the user asked to keep maps.
             if (keepMaps && currentMap != null && !currentMap.isEmpty())
                 save(currentSlide, currentUri, currentMap, defaultDir());
-            removeOverlay();
         }
     }
 
@@ -146,7 +182,10 @@ public final class FocusHeatmap {
             currentMap.deposit(b.getX(), b.getY(), b.getWidth(), b.getHeight());
             if (++ticksSinceRefresh >= REFRESH_EVERY) {
                 ticksSinceRefresh = 0;
-                refreshOverlay(v);
+                if (overlayVisible)
+                    refreshOverlay(v);
+                if (windowVisible)
+                    updateWindow();
             }
         } catch (Exception ex) {
             logger.debug("Focus heatmap tick failed: {}", ex.getMessage());
@@ -171,6 +210,8 @@ public final class FocusHeatmap {
             currentUri = null;
         }
         ticksSinceRefresh = REFRESH_EVERY;
+        if (windowVisible)
+            updateWindow();
     }
 
     private void refreshOverlay(QuPathViewer v) {
@@ -203,9 +244,82 @@ public final class FocusHeatmap {
     private void clear() {
         if (currentMap != null) {
             currentMap.clear();
-            if (active && currentViewer != null)
+            if (overlayVisible && currentViewer != null)
                 refreshOverlay(currentViewer);
+            if (windowVisible)
+                updateWindow();
         }
+    }
+
+    // --- separate monitor window --------------------------------------------
+
+    /** Open (or focus) the small window that shows the heat map without touching the slide view. */
+    private void showWindow() {
+        if (window != null) {
+            window.show();
+            window.toFront();
+            return;
+        }
+        windowView = new ImageView();
+        windowView.setPreserveRatio(true);
+        StackPane pane = new StackPane(windowView);
+        pane.setStyle("-fx-background-color: #1c1c1e;");
+        pane.setPadding(new Insets(8));
+        window = new Stage();
+        window.setTitle("Odak ısı haritası");
+        window.setScene(new Scene(pane, 360, 320));
+        window.setOnHidden(e -> {
+            window = null;
+            windowView = null;
+            if (windowItem != null && windowItem.isSelected())
+                windowItem.setSelected(false);   // re-entrant-safe: hideWindow() no-ops (window already null)
+        });
+        updateWindow();
+        window.show();
+    }
+
+    private void hideWindow() {
+        if (window != null)
+            window.close();
+    }
+
+    /** Repaint the window with the current map, scaled up over a dark background. FX thread only. */
+    private void updateWindow() {
+        if (window == null || windowView == null)
+            return;
+        FocusMap map = currentMap;
+        if (map == null) {
+            windowView.setImage(null);
+            return;
+        }
+        BufferedImage heat = map.toImage();   // grid-sized ARGB, transparent where cold
+        int gw = map.getGridWidth();
+        int gh = map.getGridHeight();
+        int maxDim = 320;
+        double scale = (double) maxDim / Math.max(gw, gh);
+        int dw = Math.max(1, (int) Math.round(gw * scale));
+        int dh = Math.max(1, (int) Math.round(gh * scale));
+        BufferedImage disp = new BufferedImage(dw, dh, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = disp.createGraphics();
+        try {
+            g.setColor(new Color(28, 28, 30));
+            g.fillRect(0, 0, dw, dh);
+            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            g.drawImage(heat, 0, 0, dw, dh, null);
+        } finally {
+            g.dispose();
+        }
+        windowView.setImage(toFXImage(disp));
+    }
+
+    /** Convert an ARGB BufferedImage to a JavaFX image without a javafx.swing dependency. */
+    private static WritableImage toFXImage(BufferedImage bi) {
+        int w = bi.getWidth();
+        int h = bi.getHeight();
+        WritableImage img = new WritableImage(w, h);
+        int[] px = bi.getRGB(0, 0, w, h, null, 0, w);
+        img.getPixelWriter().setPixels(0, 0, w, h, PixelFormat.getIntArgbInstance(), px, 0, w);
+        return img;
     }
 
     // --- persistence --------------------------------------------------------

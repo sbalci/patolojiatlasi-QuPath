@@ -82,23 +82,31 @@ public final class FocusMap {
     }
 
     /**
-     * Render the grid as an ARGB heatmap image (grid-sized; the overlay scales it up to the slide).
-     * Cells at 0 are fully transparent; hotter cells are more opaque and shift blue→cyan→green→
-     * yellow→red. Values are normalised to the current maximum.
+     * Dwell (in accumulated sample-weight) at which a cell is considered fully "heated". Using an
+     * <b>absolute</b> scale — rather than normalising to the running maximum — is what stops the very
+     * first sample from painting everything at full intensity: a brief or zoomed-out glance deposits
+     * a tiny weight per cell and stays near-transparent; only sustained <em>focused</em> viewing
+     * (a few seconds) builds a cell up to full heat.
+     */
+    static final float FULL_HEAT = 4f;
+
+    /**
+     * Render the grid as an ARGB heatmap image (grid-sized; consumers scale it up). Cells at 0 are
+     * fully transparent; a cell's intensity is its dwell relative to {@link #FULL_HEAT} (absolute,
+     * not normalised to the max), and both colour (blue→cyan→green→yellow→red) and opacity grow with
+     * it — so lightly-viewed areas stay see-through and never obscure the slide.
      */
     public BufferedImage toImage() {
         BufferedImage img = new BufferedImage(gridW, gridH, BufferedImage.TYPE_INT_ARGB);
-        float m = max();
-        if (m <= 0)
-            return img; // fully transparent
         for (int i = 0; i < grid.length; i++) {
             float v = grid[i];
-            img.setRGB(i % gridW, i / gridW, v <= 0 ? 0 : heatColor(v / m));
+            if (v > 0)
+                img.setRGB(i % gridW, i / gridW, heatColor(Math.min(1f, v / FULL_HEAT)));
         }
-        return img;
+        return img; // untouched cells stay 0 = fully transparent
     }
 
-    /** t in [0,1] → ARGB heat color (blue→cyan→green→yellow→red); alpha grows with t. */
+    /** t in [0,1] → ARGB heat color (blue→cyan→green→yellow→red); alpha grows from 0 with t. */
     static int heatColor(float t) {
         t = Math.max(0f, Math.min(1f, t));
         float r, g, b;
@@ -106,7 +114,7 @@ public final class FocusMap {
         else if (t < 0.5f)  { r = 0;                    g = 1;                        b = 1 - (t - 0.25f) / 0.25f; }
         else if (t < 0.75f) { r = (t - 0.5f) / 0.25f;   g = 1;                        b = 0; }
         else                { r = 1;                    g = 1 - (t - 0.75f) / 0.25f;  b = 0; }
-        int alpha = (int) (60 + 180 * t);   // 60..240
+        int alpha = (int) (170 * t);   // 0 (cold, transparent) .. 170 (hot, still see-through)
         return (alpha << 24) | ((int) (r * 255) << 16) | ((int) (g * 255) << 8) | (int) (b * 255);
     }
 

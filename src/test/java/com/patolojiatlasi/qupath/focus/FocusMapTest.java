@@ -72,6 +72,18 @@ class FocusMapTest {
         int cold = FocusMap.heatColor(0f);
         int hot = FocusMap.heatColor(1f);
         assertTrue((hot >>> 24) > (cold >>> 24), "hotter cells should be more opaque");
-        assertEquals(240, hot >>> 24);
+        assertEquals(0, cold >>> 24, "a cold cell should be fully transparent so it never obscures the slide");
+        assertEquals(170, hot >>> 24);
+    }
+
+    @Test
+    void firstSampleStaysTransparentWithAbsoluteScale() {
+        // A single zoomed-out sample (the "just turned it on" case) must NOT paint full intensity:
+        // with absolute scaling each covered cell gets tiny weight, so its alpha is near-zero.
+        FocusMap m = new FocusMap(1000, 500, 100);
+        m.deposit(0, 0, 1000, 500); // whole image, one sample → ~1/5000 per cell
+        var img = m.toImage();
+        int alpha = img.getRGB(0, 0) >>> 24;
+        assertTrue(alpha < 20, "a single whole-slide sample should be almost invisible, was alpha " + alpha);
     }
 }
