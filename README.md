@@ -56,19 +56,33 @@ to these sites:
 ## Quiz (self-study)
 
 **Extensions → Sınav/quiz hazırla…** and **Extensions → Sınav/quiz çöz…** turn atlas slides into a
-self-study quiz — no project and no server required.
+self-study quiz — no project and no server required. Four question types are supported:
 
-- **Author** (`Sınav/quiz hazırla…`) — with an atlas slide open, add multiple-choice or free-text
-  questions; each question is bound to the slide that was open when you added it (its DZI URL is
-  stored with the question), so one pack can span several slides. Save the finished set as a
-  quiz-pack JSON.
+- **Multiple-choice** — a prompt with several options, one marked correct.
+- **Free-text** — a prompt with a model answer to compare your own notes against.
+- **Annotation task** — a prompt that asks you to mark or outline a feature on the slide (e.g.
+  "mark every mitosis"); you draw with QuPath's normal annotation tools, then click **Göster** to
+  overlay the instructor's reference annotation on the slide and compare by eye.
+- **Guided navigation ("find it")** — a prompt that asks you to navigate to a region (e.g. "find
+  the area of highest mitotic activity"); pan/zoom there yourself, then click **Göster** to
+  overlay the target region and recentre the viewer on it.
+
+- **Author** (`Sınav/quiz hazırla…`) — with an atlas slide open, add a question of any of the four
+  types; each question is bound to the slide that was open when you added it (its DZI URL is
+  stored with the question), so one pack can span several slides. For an annotation or navigation
+  question, draw and select the reference region on the slide yourself, then click **Referansı
+  slayttan al** to capture its shape as the question's reference (annotation) or target
+  (navigation) geometry. Save the finished set as a quiz-pack JSON.
 - **Take** (`Sınav/quiz çöz…`) — load a quiz-pack and work through its questions in order; each
-  question opens its slide, you answer, then click **Göster** to reveal the correct MCQ option or
-  the free-text model answer and self-check.
-- This is **self-study**: nothing is scored or saved anywhere, and the quiz-pack is a single
-  portable file you're free to email or hand out.
-- Annotation- and find-it-style questions (point at a region on the slide) are planned for a
-  follow-up; this slice covers MCQ and free-text only.
+  question opens its slide, you answer it — pick an option, type notes, draw an outline, or
+  navigate to a region — then click **Göster** to reveal the correct MCQ option, the free-text
+  model answer, or, for annotation/navigation questions, an overlay of the reference/target region
+  drawn directly on the slide.
+- This is **self-study**: **there is no auto-grading** — **Göster** only overlays the reference for
+  a visual self-compare, nothing is scored. Nothing is saved anywhere either: the quiz-pack is a
+  single portable file you're free to email or hand out, and anything you draw while answering an
+  annotation or navigation question is transient — it's cleared again as soon as you move to the
+  next/previous question or close the window, so it never ends up saved in the project.
 
 ---
 
