@@ -129,16 +129,16 @@ public final class CaseCompare {
             return;
         }
 
-        if (isChangedSafe(activeData)) {
-            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                    "Karşılaştırma görünümü, görüntüleyicideki görüntülerin yerini alır; "
-                    + "kaydedilmemiş değişiklikler kaybolabilir. Devam edilsin mi?",
-                    ButtonType.OK, ButtonType.CANCEL);
-            confirm.setHeaderText(null);
-            Optional<ButtonType> result = confirm.showAndWait();
-            if (result.isEmpty() || result.get() != ButtonType.OK)
-                return;
+        boolean anyUnsaved = false;
+        for (QuPathViewer vv : qupath.getViewerManager().getAllViewers()) {
+            ImageData<BufferedImage> d = vv.getImageData();
+            if (d != null && isChangedSafe(d)) {
+                anyUnsaved = true;
+                break;
+            }
         }
+        if (anyUnsaved && !confirmReplace())
+            return;
 
         int dropped = 0;
         if (stains.size() > MAX_PANELS) {
@@ -265,6 +265,21 @@ public final class CaseCompare {
         } catch (Throwable t) {
             return false;
         }
+    }
+
+    /**
+     * Asks the user to confirm replacing viewer content that has unsaved changes; {@code true} if
+     * they chose to proceed. Used before rebuilding the compare grid, since
+     * {@link QuPathViewer#setImageData} does not itself prompt to save.
+     */
+    private static boolean confirmReplace() {
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Karşılaştırma görünümü, görüntüleyicideki görüntülerin yerini alır; "
+                + "kaydedilmemiş değişiklikler kaybolabilir. Devam edilsin mi?",
+                ButtonType.OK, ButtonType.CANCEL);
+        confirm.setHeaderText(null);
+        Optional<ButtonType> result = confirm.showAndWait();
+        return result.isPresent() && result.get() == ButtonType.OK;
     }
 
     private static void infoAlert(String message) {

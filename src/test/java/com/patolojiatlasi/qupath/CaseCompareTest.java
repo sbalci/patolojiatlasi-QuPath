@@ -49,6 +49,16 @@ class CaseCompareTest {
     }
 
     @Test
+    void blankReponameDoesNotGroup() {
+        List<AtlasCase> catalog = List.of(
+                c("", "HE", "https://x/blank/HE.dzi"),
+                c("", "CD3", "https://x/blank/CD3.dzi"));
+        List<AtlasCase> r = CaseCompare.siblingStains(catalog, "https://x/blank/HE.dzi");
+        assertEquals(1, r.size(), "blank reponame must not group other blank-reponame slides together");
+        assertEquals("https://x/blank/HE.dzi", r.get(0).getDziUrl());
+    }
+
+    @Test
     void gridForMapsAndCapsAtSix() {
         assertArrayEquals(new int[]{1, 1}, CaseCompare.gridFor(1));
         assertArrayEquals(new int[]{1, 2}, CaseCompare.gridFor(2));
