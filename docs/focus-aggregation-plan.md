@@ -88,14 +88,32 @@ sha1(slideKey)[:16]`. Runs in a GitHub Action (option A/C) or inside the serverl
 
 ## Phase 3 — display on the atlas viewer
 
-The atlas viewer is already OpenSeadragon, and the `pathologyatlas/template` viewer (`HE.html`)
-already contains a heatmap **painter** (it renders a dwell grid onto a canvas over the navigator).
-Reuse it, fed by the *aggregate* grid instead of the live session:
+**Implemented as a drop-in:** [`tools/web/attention-overlay.js`](web/attention-overlay.js) adds an
+**"Dikkat haritası"** (attention map) toggle to the atlas OpenSeadragon viewer. It looks this slide up
+in `index.json`, and if an aggregate exists it overlays the aggregator's own `<hash>.png` on the slide
+(so the colormap always matches the extension) sized from the metadata, with a **"N okuyucu"** legend.
+No aggregate for the slide (or below the min-readers threshold) → the toggle hides itself.
 
-- On slide open, fetch `focus/<hash(slideKey)>.json` (404 → no attention map yet, hide the toggle).
-- Add a **"Attention map"** toggle next to the existing filters/magnifier; paint the aggregate grid
-  as a translucent overlay on the main image (and/or the navigator), same colormap as the extension.
-- Show **`readers = N`** and a small legend so viewers know it's pooled, anonymised data.
+Wire it into the viewer template (`pathologyatlas/template/HE.html`) in three lines, after the
+`OpenSeadragon({...})` call:
+
+```html
+<script src="./attention-overlay.js"></script>
+<script>
+  AtlasAttentionOverlay.init(viewer, {
+    focusBase: 'https://images.patolojiatlasi.com/focus', // where Phase-2 assets are served
+    slideKey:  'https://images.patolojiatlasi.com/<case>/HE.dzi', // MUST equal the extension's key
+    container: '#toolbar .btn-row',  // reuses the toolbar's button styling
+    opacity:   0.55
+  });
+</script>
+```
+
+The one thing the site generator must inject per page is **`slideKey`** — the canonical DZI URL, the
+exact string the QuPath extension records (DZI URL, no query). The static site already templates each
+slide page, so this is a one-field substitution. Because the overlay renders the aggregator's PNG
+directly, there is no colormap to keep in sync. (Needs a browser smoke test — validated for syntax
+here, not rendered.)
 
 ## Privacy & governance (load-bearing)
 
@@ -111,7 +129,8 @@ Reuse it, fed by the *aggregate* grid instead of the live session:
 
 - [ ] Choose Phase 1 option (start with **A. manual/batch**).
 - [x] Write the Phase 2 aggregation script → [`tools/aggregate-focus.py`](../tools/aggregate-focus.py).
-- [ ] Add the Phase 3 overlay toggle + fetch to the viewer template.
+- [x] Write the Phase 3 overlay toggle → [`tools/web/attention-overlay.js`](web/attention-overlay.js)
+      (drop into the viewer template; browser smoke test pending).
 - [ ] (If option B) stand up the receiver, then set `UPLOAD_ENABLED = true` + `UPLOAD_ENDPOINT` in
       `FocusHeatmap.java` and cut a new extension release.
 - [ ] Publish a short consent/΄how it works΄ note next to the toggle.
