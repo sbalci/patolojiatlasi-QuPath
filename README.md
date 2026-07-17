@@ -53,6 +53,25 @@ to these sites:
 
 ---
 
+## Quiz (self-study)
+
+**Extensions → Sınav/quiz hazırla…** and **Extensions → Sınav/quiz çöz…** turn atlas slides into a
+self-study quiz — no project and no server required.
+
+- **Author** (`Sınav/quiz hazırla…`) — with an atlas slide open, add multiple-choice or free-text
+  questions; each question is bound to the slide that was open when you added it (its DZI URL is
+  stored with the question), so one pack can span several slides. Save the finished set as a
+  quiz-pack JSON.
+- **Take** (`Sınav/quiz çöz…`) — load a quiz-pack and work through its questions in order; each
+  question opens its slide, you answer, then click **Göster** to reveal the correct MCQ option or
+  the free-text model answer and self-check.
+- This is **self-study**: nothing is scored or saved anywhere, and the quiz-pack is a single
+  portable file you're free to email or hand out.
+- Annotation- and find-it-style questions (point at a region on the slide) are planned for a
+  follow-up; this slice covers MCQ and free-text only.
+
+---
+
 ## Requirements
 
 - **QuPath 0.6.x** (built against the 0.6 API; runs on Java 21).

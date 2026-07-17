@@ -50,6 +50,12 @@ public class AtlasExtension implements QuPathExtension {
             menu.getItems().add(rotationItem);
             // Focus (dwell) heatmap — tracks where the reader looks; optional persistence.
             menu.getItems().add(new FocusHeatmap(qupath).buildMenu());
+            // Self-study quiz: take or author a quiz on atlas slides.
+            MenuItem quizTakeItem = new MenuItem("Sınav/quiz çöz…");
+            quizTakeItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizRunnerWindow.show(qupath));
+            MenuItem quizAuthorItem = new MenuItem("Sınav/quiz hazırla…");
+            quizAuthorItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizAuthorWindow.show(qupath));
+            menu.getItems().addAll(quizTakeItem, quizAuthorItem);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
