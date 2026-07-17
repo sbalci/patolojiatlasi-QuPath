@@ -1,8 +1,11 @@
 package com.patolojiatlasi.qupath.quiz;
 
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -28,6 +31,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import qupath.lib.gui.QuPathGUI;
+import qupath.lib.gui.viewer.QuPathViewer;
+import qupath.lib.images.ImageData;
+import qupath.lib.objects.PathObject;
+import qupath.lib.objects.hierarchy.PathObjectHierarchy;
+import qupath.lib.regions.ImagePlane;
+import qupath.lib.roi.interfaces.ROI;
 
 /**
  * Guided sequential quiz runner: load a portable quiz pack ({@link AtlasQuizIO}/{@link AtlasQuiz}),
@@ -39,9 +48,13 @@ import qupath.lib.gui.QuPathGUI;
  * focus-if-open pattern and {@code com.patolojiatlasi.qupath.ProjectBuilderDialog}'s FX-thread-only
  * in-flight boolean guard around a background operation.
  * <p>
- * This slice implements MCQ and FREETEXT questions. ANNOTATION/NAVIGATION questions in a mixed
- * pack are shown as an inert placeholder rather than crashing; see the {@code slice 2} seams in
- * {@link #buildInput(QuizQuestion)} and {@link #revealAnswer()}.
+ * Alongside MCQ/FREETEXT, this also handles ANNOTATION questions (the learner draws with QuPath's
+ * normal annotation tools; Reveal overlays the stored reference geometry) and NAVIGATION questions
+ * (the learner pans/zooms to a region; Reveal overlays the target geometry and recentres the
+ * viewer on it). Any annotation objects the learner draws while such a question is on screen are
+ * transient: they are removed again as soon as that question is left (Önceki/Sonraki or window
+ * close) — see {@link #leaveQuestion(AtlasQuiz, int)} — while everything present before the
+ * question was shown is left untouched.
  */
 public class QuizRunnerWindow {
 
@@ -81,6 +94,20 @@ public class QuizRunnerWindow {
     // Type-specific input state for the currently-displayed question; rebuilt by buildInput() on
     // every question change so stale controls from the previous question can't leak in.
     private ToggleGroup mcqGroup;
+
+    // ANNOTATION/NAVIGATION reveal + transient-annotation state. `revealOverlay` is added to
+    // `revealOverlayViewer` (captured at add-time, not re-fetched via qupath.getViewer(), so a
+    // later viewer swap can't orphan it) by revealAnswer() and removed by leaveQuestion(). All
+    // touched only on the FX thread, mirroring FocusHeatmap's currentOverlay/currentViewer pair.
+    private QuizRevealOverlay revealOverlay;
+    private QuPathViewer revealOverlayViewer;
+
+    // Snapshot of the hierarchy's annotation objects taken when the current ANNOTATION/NAVIGATION
+    // question's slide became ready (see afterSlideReady). On leaving such a question, only
+    // annotations NOT in this set (i.e. drawn by the learner while the question was shown) are
+    // removed -- anything present before the question was shown, including annotations from an
+    // earlier question that were never cleared (see leaveQuestion's Javadoc), is left alone.
+    private Set<PathObject> annotationBaseline = new HashSet<>();
 
     private QuizRunnerWindow(QuPathGUI qupath) {
         this.qupath = qupath;
@@ -146,7 +173,13 @@ public class QuizRunnerWindow {
         root.setBottom(bottom);
 
         s.setScene(new Scene(root, 640, 480));
-        s.setOnHidden(e -> stage = null);
+        s.setOnHidden(e -> {
+            // Window close is a "leave" too: whatever question was on screen (if any) gets its
+            // reveal overlay removed and its transient annotations cleared, same as Önceki/Sonraki,
+            // so nothing leaks into the shared viewer once this window instance is discarded.
+            leaveQuestion(quiz, currentIndex);
+            stage = null;
+        });
         return s;
     }
 
@@ -179,6 +212,12 @@ public class QuizRunnerWindow {
             // Current state (previously-loaded quiz, if any) is left untouched.
             return;
         }
+        // Loading a new pack abandons whatever question was on screen from the old one, just like
+        // Önceki/Sonraki would -- clean it up using the OLD quiz/currentIndex, strictly BEFORE the
+        // `quiz` field is reassigned below (leaveQuestion resolves `index` against the AtlasQuiz
+        // passed to it, so calling it after reassignment would look up the old currentIndex in the
+        // NEW, possibly-shorter pack and risk an out-of-range read).
+        leaveQuestion(this.quiz, this.currentIndex);
         this.quiz = loaded;
         titleLabel.setText(loaded.getTitle().isBlank() ? file.getName() : loaded.getTitle());
         showQuestion(1);
@@ -226,11 +265,17 @@ public class QuizRunnerWindow {
                 freetextArea.setWrapText(true);
                 inputArea.getChildren().add(freetextArea);
             }
-            default -> {
-                // slice 2: ANNOTATION/NAVIGATION input + reveal + viewport navigation
-                Label placeholder = new Label("(Bu soru tipi bir sonraki sürümde)");
-                placeholder.setWrapText(true);
-                inputArea.getChildren().add(placeholder);
+            case ANNOTATION -> {
+                String instruction = q.getInstruction();
+                Label label = new Label((instruction == null || instruction.isBlank())
+                        ? "Cevabınızı slayt üzerine çizin" : instruction);
+                label.setWrapText(true);
+                inputArea.getChildren().add(label);
+            }
+            case NAVIGATION -> {
+                Label label = new Label("İlgili bölgeye gidin");
+                label.setWrapText(true);
+                inputArea.getChildren().add(label);
             }
         }
     }
@@ -245,6 +290,7 @@ public class QuizRunnerWindow {
         String current = QuizSlide.currentSlideUrl(qupath.getViewer());
         if (q.getSlideUrl() != null && q.getSlideUrl().equals(current)) {
             setControlsDisabled(false);
+            afterSlideReady(q);
             return;
         }
         opening = true;
@@ -255,6 +301,7 @@ public class QuizRunnerWindow {
                     opening = false;
                     progress.setVisible(false);
                     setControlsDisabled(false);
+                    afterSlideReady(q);
                 },
                 ex -> {
                     opening = false;
@@ -266,6 +313,26 @@ public class QuizRunnerWindow {
                         alert.initOwner(stage);
                     alert.showAndWait();
                 });
+    }
+
+    /**
+     * Called once {@code q}'s slide is confirmed showing in the viewer (either immediately, if it
+     * was already open, or from {@link QuizSlide#openAsync}'s {@code onDone} callback) -- i.e.
+     * exactly the point at which the hierarchy underneath the viewer reflects {@code q}'s slide.
+     * Applies the question's {@link QuizQuestion.Viewport}, if any, and -- for ANNOTATION/NAVIGATION
+     * questions, the two types the learner can draw on -- snapshots the current annotation objects
+     * as {@link #annotationBaseline} so {@link #leaveQuestion(AtlasQuiz, int)} can later tell which
+     * ones the learner added while answering.
+     */
+    private void afterSlideReady(QuizQuestion q) {
+        QuPathViewer viewer = qupath.getViewer();
+        if (viewer == null)
+            return;
+        QuizQuestion.Viewport vp = q.getViewport();
+        if (vp != null)
+            viewer.setDownsampleFactor(vp.downsample, vp.centerX, vp.centerY);
+        if (q.getType() == QuizType.ANNOTATION || q.getType() == QuizType.NAVIGATION)
+            annotationBaseline = currentAnnotations(viewer);
     }
 
     /** "Göster": reveal the answer/explanation area for the current question. Idempotent. */
@@ -291,13 +358,159 @@ public class QuizRunnerWindow {
                 String model = q.getModelAnswer() == null ? "" : q.getModelAnswer();
                 revealAnswerLabel.setText("Model cevap: " + model);
             }
-            default -> {
-                // slice 2: ANNOTATION/NAVIGATION input + reveal + viewport navigation
-                revealAnswerLabel.setText("(Bu soru tipi için gösterim bir sonraki sürümde)");
+            case ANNOTATION -> {
+                ROI roi = parseGeometrySafely(q.getReferenceGeometryGeoJson());
+                if (roi != null) {
+                    showRevealOverlay(roi);
+                    revealAnswerLabel.setText("Referans bölge slayt üzerinde gösteriliyor.");
+                } else {
+                    revealAnswerLabel.setText("Referans geometri mevcut değil.");
+                }
+            }
+            case NAVIGATION -> {
+                ROI roi = parseGeometrySafely(q.getTargetGeometryGeoJson());
+                if (roi != null) {
+                    showRevealOverlay(roi);
+                    QuPathViewer viewer = qupath.getViewer();
+                    if (viewer != null) {
+                        double cx = roi.getBoundsX() + roi.getBoundsWidth() / 2.0;
+                        double cy = roi.getBoundsY() + roi.getBoundsHeight() / 2.0;
+                        viewer.setDownsampleFactor(viewer.getDownsampleFactor(), cx, cy);
+                    }
+                    revealAnswerLabel.setText("Hedef bölgeye gidildi.");
+                } else {
+                    revealAnswerLabel.setText("Hedef geometri mevcut değil.");
+                }
             }
         }
         revealExplanationLabel.setText(q.getExplanation() == null ? "" : q.getExplanation());
         setRevealVisible(true);
+    }
+
+    /**
+     * Parse {@code geoJson} into a ROI, defensively: {@link QuizGeometry#fromGeoJson} returns
+     * {@code null} on blank input and throws (at least) {@code JsonSyntaxException} and
+     * {@code IllegalArgumentException} on malformed input -- both are caught here (as a broad
+     * {@code Exception} catch, since a third-party Gson adapter's exact failure modes are not part
+     * of its documented contract) so a bad geometry in a hand-edited quiz pack shows an alert
+     * instead of crashing the runner. The {@link ImagePlane} argument is accepted only for
+     * signature symmetry with {@link QuizGeometry#fromGeoJson}; the GeoJSON always encodes its own
+     * plane (see that method's Javadoc), so {@link ImagePlane#getDefaultPlane()} is passed here
+     * without loss.
+     */
+    private ROI parseGeometrySafely(String geoJson) {
+        if (geoJson == null || geoJson.isBlank())
+            return null;
+        try {
+            return QuizGeometry.fromGeoJson(geoJson, ImagePlane.getDefaultPlane());
+        } catch (Exception ex) {
+            logger.warn("Failed to parse quiz reveal geometry: {}", ex.getMessage());
+            Alert alert = new Alert(Alert.AlertType.ERROR,
+                    "Referans/hedef geometri okunamadı:\n\n" + ex.getMessage());
+            if (stage != null)
+                alert.initOwner(stage);
+            alert.showAndWait();
+            return null;
+        }
+    }
+
+    /**
+     * Add a {@link QuizRevealOverlay} for {@code roi} to the active viewer, replacing any reveal
+     * overlay already showing (so repeated Göster clicks -- or a NAVIGATION reveal that recentres
+     * the same viewer -- never stack up duplicate overlays).
+     */
+    private void showRevealOverlay(ROI roi) {
+        QuPathViewer viewer = qupath.getViewer();
+        if (viewer == null)
+            return;
+        removeRevealOverlay();
+        QuizRevealOverlay overlay = new QuizRevealOverlay(viewer.getOverlayOptions(), roi);
+        viewer.getCustomOverlayLayers().add(overlay);
+        revealOverlay = overlay;
+        revealOverlayViewer = viewer;
+        viewer.repaint();
+    }
+
+    /** Remove the currently-showing reveal overlay, if any, from the viewer it was added to. */
+    private void removeRevealOverlay() {
+        if (revealOverlay == null)
+            return;
+        try {
+            if (revealOverlayViewer != null) {
+                revealOverlayViewer.getCustomOverlayLayers().remove(revealOverlay);
+                revealOverlayViewer.repaint();
+            }
+        } catch (Exception ex) {
+            logger.debug("Could not remove quiz reveal overlay: {}", ex.getMessage());
+        } finally {
+            revealOverlay = null;
+            revealOverlayViewer = null;
+        }
+    }
+
+    /**
+     * The hierarchy's current annotation objects for {@code viewer}'s image, or an empty set if
+     * there is no image/hierarchy. Used both to snapshot {@link #annotationBaseline} and to diff
+     * against it in {@link #clearTransientAnnotations()}.
+     */
+    private Set<PathObject> currentAnnotations(QuPathViewer viewer) {
+        try {
+            ImageData<BufferedImage> imageData = viewer == null ? null : viewer.getImageData();
+            if (imageData == null)
+                return new HashSet<>();
+            return new HashSet<>(imageData.getHierarchy().getAnnotationObjects());
+        } catch (Exception ex) {
+            logger.debug("Could not read quiz annotation objects: {}", ex.getMessage());
+            return new HashSet<>();
+        }
+    }
+
+    /**
+     * Remove annotation objects added to the hierarchy since {@link #annotationBaseline} was last
+     * captured (in {@link #afterSlideReady(QuizQuestion)}) -- i.e. drawn by the learner while the
+     * just-left ANNOTATION/NAVIGATION question was on screen. Anything present before the question
+     * was shown (including annotations from an earlier, un-cleared MCQ/FREETEXT question -- those
+     * types never trigger this cleanup, since they carry no draw instruction) is left untouched, so
+     * this can never discard a learner's or the atlas author's pre-existing work.
+     */
+    private void clearTransientAnnotations() {
+        QuPathViewer viewer = qupath.getViewer();
+        try {
+            ImageData<BufferedImage> imageData = viewer == null ? null : viewer.getImageData();
+            if (imageData == null)
+                return;
+            PathObjectHierarchy hierarchy = imageData.getHierarchy();
+            Set<PathObject> toRemove = new HashSet<>(hierarchy.getAnnotationObjects());
+            toRemove.removeAll(annotationBaseline);
+            if (!toRemove.isEmpty()) {
+                hierarchy.removeObjects(toRemove, true);
+                hierarchy.fireHierarchyChangedEvent(this);
+            }
+        } catch (Exception ex) {
+            logger.debug("Could not clear transient quiz annotations: {}", ex.getMessage());
+        }
+    }
+
+    /**
+     * Clean up whatever question was on screen before navigating away from it: remove the reveal
+     * overlay (regardless of question type -- it is only ever non-null for a just-left
+     * ANNOTATION/NAVIGATION question, so this is always safe) and, for ANNOTATION/NAVIGATION
+     * questions specifically, clear the learner's transient answer annotations (see
+     * {@link #clearTransientAnnotations()}).
+     * <p>
+     * Callers pass the quiz/index describing the question being left <em>explicitly</em>, evaluated
+     * before any field reassignment, rather than reading {@link #quiz}/{@link #currentIndex} here --
+     * {@link #promptLoad()} reassigns {@link #quiz} before advancing to the new pack's first
+     * question, so resolving against live fields at that point could look up a stale index in the
+     * new (possibly shorter) pack.
+     */
+    private void leaveQuestion(AtlasQuiz q, int index) {
+        if (q == null || index < 1 || index > q.getQuestions().size())
+            return;
+        removeRevealOverlay();
+        QuizQuestion previous = q.getQuestions().get(index - 1);
+        if (previous.getType() == QuizType.ANNOTATION || previous.getType() == QuizType.NAVIGATION)
+            clearTransientAnnotations();
     }
 
     /** The 0-based index of the learner's selected MCQ radio button, or null if none picked. */
@@ -313,8 +526,11 @@ public class QuizRunnerWindow {
         if (quiz == null || opening)
             return;
         int target = Math.max(1, currentIndex - 1);
-        if (target != currentIndex)
+        if (target != currentIndex) {
+            // Evaluated against the still-current quiz/currentIndex, before showQuestion moves on.
+            leaveQuestion(quiz, currentIndex);
             showQuestion(target);
+        }
     }
 
     /** "Sonraki": no-op at the last question; otherwise show i+1. */
@@ -323,8 +539,11 @@ public class QuizRunnerWindow {
             return;
         int n = quiz.getQuestions().size();
         int target = Math.min(n, currentIndex + 1);
-        if (target != currentIndex)
+        if (target != currentIndex) {
+            // Evaluated against the still-current quiz/currentIndex, before showQuestion moves on.
+            leaveQuestion(quiz, currentIndex);
             showQuestion(target);
+        }
     }
 
     private void setRevealVisible(boolean visible) {
