@@ -86,6 +86,22 @@ self-study quiz — no project and no server required. Four question types are s
 
 ---
 
+## Compare a case's stains
+
+**Extensions → Bu vakanın boyalarını karşılaştır…** opens every stain of the case shown in the
+active viewer — H&E plus any IHC / special stains — into QuPath's native multi-viewer grid, with
+pan/zoom linked across all of them (QuPath's built-in **synchronize viewers** behavior), so you can
+scroll one panel and have the others follow to the same field. The grid size (1×2 up to 2×3) is
+picked to fit the number of stains; cases with more than six stains only show the first six. If the
+active viewer isn't showing a cataloged atlas slide, or the slide's case has no other stains, you
+get a message instead of a grid.
+
+**Extensions → Tek görünüme dön** turns synchronization off and collapses the grid back to a
+single viewer, closing the other panels (prompting to save first if any of them have unsaved
+edits, exactly like QuPath's own close-viewer action).
+
+---
+
 ## Requirements
 
 - **QuPath 0.6.x** (built against the 0.6 API; runs on Java 21).

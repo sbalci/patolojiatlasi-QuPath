@@ -1,12 +1,33 @@
 package com.patolojiatlasi.qupath;
 
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+
+import javafx.application.Platform;
+import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.patolojiatlasi.qupath.dzi.DziImageServer;
+
+import qupath.lib.gui.QuPathGUI;
+import qupath.lib.gui.viewer.QuPathViewer;
+import qupath.lib.images.ImageData;
+import qupath.lib.images.servers.ImageServer;
 
 /** Opens all stains of one atlas case into QuPath's synchronized multi-viewer grid. */
 public final class CaseCompare {
+
+    private static final Logger logger = LoggerFactory.getLogger(CaseCompare.class);
+
+    /** Grid tops out at 2x3 ({@link #gridFor(int)}), so at most this many stains are opened. */
+    private static final int MAX_PANELS = 6;
 
     private CaseCompare() {}
 
@@ -62,5 +83,191 @@ public final class CaseCompare {
             return "";
         int q = url.indexOf('?');
         return q >= 0 ? url.substring(0, q) : url;
+    }
+
+    /**
+     * Opens every stain of the atlas case currently shown in {@code qupath}'s active viewer into
+     * QuPath's synchronized multi-viewer grid — one viewer per stain, pan/zoom linked. Must be
+     * called on the JavaFX application thread (e.g. from a menu action); only the DZI network
+     * build for each stain runs off-thread.
+     * <p>
+     * No-ops (with an informational alert) if the active viewer isn't showing a cataloged atlas
+     * slide, or if that slide's case has only one stain. If the active viewer's image has
+     * unsaved changes, asks for confirmation first since the compare grid replaces the content of
+     * every viewer in it. Stains beyond {@link #MAX_PANELS} are dropped (logged how many); a
+     * per-stain open failure is logged, but does not abort the other panels.
+     * <p>
+     * Viewer fill order follows {@link qupath.lib.gui.viewer.ViewerManager#getAllViewers()}, which
+     * grows column-major as the grid is resized (e.g. a 2x2 fills top-left, bottom-left, top-right,
+     * bottom-right) — so the open slide (always first from {@link #siblingStains}) reliably lands
+     * in the first viewer, but sibling stains do not necessarily read left-to-right, top-to-bottom.
+     */
+    public static void compareCurrentCase(QuPathGUI qupath) {
+        if (qupath == null)
+            return;
+
+        QuPathViewer active = qupath.getViewer();
+        ImageData<BufferedImage> activeData = active == null ? null : active.getImageData();
+        if (activeData == null) {
+            infoAlert("Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
+            return;
+        }
+
+        String openUrl = firstUri(activeData);
+        if (openUrl == null || openUrl.isBlank()) {
+            infoAlert("Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
+            return;
+        }
+
+        List<AtlasCase> stains = siblingStains(AtlasCatalog.loadBundled(), openUrl);
+        if (stains.isEmpty()) {
+            infoAlert("Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
+            return;
+        }
+        if (stains.size() == 1) {
+            infoAlert("Bu vakada karşılaştırılacak başka boya yok.");
+            return;
+        }
+
+        if (isChangedSafe(activeData)) {
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                    "Karşılaştırma görünümü, görüntüleyicideki görüntülerin yerini alır; "
+                    + "kaydedilmemiş değişiklikler kaybolabilir. Devam edilsin mi?",
+                    ButtonType.OK, ButtonType.CANCEL);
+            confirm.setHeaderText(null);
+            Optional<ButtonType> result = confirm.showAndWait();
+            if (result.isEmpty() || result.get() != ButtonType.OK)
+                return;
+        }
+
+        int dropped = 0;
+        if (stains.size() > MAX_PANELS) {
+            dropped = stains.size() - MAX_PANELS;
+            stains = new ArrayList<>(stains.subList(0, MAX_PANELS));
+        }
+
+        int[] grid = gridFor(stains.size());
+        boolean resized = qupath.getViewerManager().setGridSize(grid[0], grid[1]);
+        if (!resized) {
+            // QuPath itself already shows a warning notification (e.g. too many open viewers
+            // for the requested grid); bail out before touching sync/opening panels into what
+            // would still be the old, unrelated grid layout.
+            logger.warn("Case compare: setGridSize({}, {}) did not resize the viewer grid; aborting.",
+                    grid[0], grid[1]);
+            return;
+        }
+
+        List<QuPathViewer> viewers = qupath.getViewerManager().getAllViewers();
+        int n = Math.min(stains.size(), viewers.size());
+        for (int i = 0; i < n; i++) {
+            openInto(viewers.get(i), stains.get(i));
+        }
+
+        qupath.getViewerManager().setSynchronizeViewers(true);
+        if (!viewers.isEmpty())
+            qupath.getViewerManager().setActiveViewer(viewers.get(0));
+
+        if (dropped > 0) {
+            logger.info("Case compare: {} stain(s) dropped, grid caps at {} panels.", dropped, MAX_PANELS);
+        }
+    }
+
+    /**
+     * Collapses the multi-viewer grid back to a single viewer and turns off pan/zoom sync.
+     * <p>
+     * {@link qupath.lib.gui.viewer.ViewerManager#resetGridSize()} only redistributes divider
+     * <em>positions</em> — it does not remove rows/columns — so an actual collapse requires
+     * closing every viewer except the active one first (via {@link QuPathGUI#closeViewer}, which
+     * prompts to save unsaved changes exactly as QuPath's own "close viewer" action does), and
+     * only then resizing the grid to 1x1. If the user cancels a save-changes prompt for one of
+     * the other viewers, the collapse stops there — sync stays off, but the grid is left as-is
+     * rather than force-closing unsaved work.
+     */
+    public static void backToSingle(QuPathGUI qupath) {
+        if (qupath == null)
+            return;
+        qupath.getViewerManager().setSynchronizeViewers(false);
+
+        QuPathViewer keep = qupath.getViewerManager().getActiveViewer();
+        List<QuPathViewer> viewers = new ArrayList<>(qupath.getViewerManager().getAllViewers());
+        if (keep == null && !viewers.isEmpty())
+            keep = viewers.get(0);
+
+        for (QuPathViewer v : viewers) {
+            if (v == keep)
+                continue;
+            if (!qupath.closeViewer(v)) {
+                logger.warn("Case compare: user cancelled closing a viewer; grid left as-is (sync off).");
+                return;
+            }
+        }
+        qupath.getViewerManager().setGridSize(1, 1);
+    }
+
+    /**
+     * Opens {@code c} into {@code viewer} on a background daemon thread, mirroring
+     * {@code AtlasBrowser}'s no-project open path: builds the {@link DziImageServer} +
+     * {@link ImageData} off the JavaFX thread, then hands the result to {@code viewer} inside
+     * {@link Platform#runLater}. A failure at either stage is logged; it does not affect any
+     * other viewer's open.
+     */
+    private static void openInto(QuPathViewer viewer, AtlasCase c) {
+        Thread t = new Thread(() -> {
+            try {
+                DziImageServer server = new DziImageServer(c.getDziURI());
+                ImageData<BufferedImage> imageData = new ImageData<>(server, c.getImageType());
+                Platform.runLater(() -> {
+                    try {
+                        viewer.setImageData(imageData);
+                    } catch (Exception ex) {
+                        reportOpenFailure(c, ex);
+                    }
+                });
+            } catch (Exception ex) {
+                Platform.runLater(() -> reportOpenFailure(c, ex));
+            }
+        }, "atlas-compare-open-" + c.getReponame());
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Logs a failed per-stain open. Runs on the FX thread (called only from within Platform.runLater). */
+    private static void reportOpenFailure(AtlasCase c, Exception ex) {
+        logger.error("Case compare: failed to open {} ({}): {}", c.getTitle(), c.getReponame(), ex.getMessage(), ex);
+    }
+
+    /**
+     * The active viewer's server's first URI as a string, or {@code null} if the image data, its
+     * server, or its URIs are unavailable.
+     */
+    private static String firstUri(ImageData<BufferedImage> data) {
+        try {
+            ImageServer<BufferedImage> server = data.getServer();
+            if (server == null)
+                return null;
+            var uris = server.getURIs();
+            if (uris == null || uris.isEmpty())
+                return null;
+            return uris.iterator().next().toString();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * {@link ImageData#isChanged()}, swallowing any exception to {@code false} — used only to
+     * decide whether to show the unsaved-changes confirmation, so an unexpected failure here
+     * should fail open (skip the extra prompt) rather than block the compare.
+     */
+    private static boolean isChangedSafe(ImageData<BufferedImage> d) {
+        try {
+            return d.isChanged();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void infoAlert(String message) {
+        new Alert(Alert.AlertType.INFORMATION, message).showAndWait();
     }
 }

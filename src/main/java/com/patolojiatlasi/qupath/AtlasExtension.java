@@ -56,6 +56,12 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem quizAuthorItem = new MenuItem("Sınav/quiz hazırla…");
             quizAuthorItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizAuthorWindow.show(qupath));
             menu.getItems().addAll(quizTakeItem, quizAuthorItem);
+            // Open a case's stains side by side in QuPath's synchronized multi-viewer grid.
+            MenuItem compareItem = new MenuItem("Bu vakanın boyalarını karşılaştır…");
+            compareItem.setOnAction(e -> com.patolojiatlasi.qupath.CaseCompare.compareCurrentCase(qupath));
+            MenuItem singleItem = new MenuItem("Tek görünüme dön");
+            singleItem.setOnAction(e -> com.patolojiatlasi.qupath.CaseCompare.backToSingle(qupath));
+            menu.getItems().addAll(compareItem, singleItem);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
