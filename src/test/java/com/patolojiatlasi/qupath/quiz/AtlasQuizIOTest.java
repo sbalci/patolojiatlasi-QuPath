@@ -101,4 +101,40 @@ class AtlasQuizIOTest {
         quiz.getQuestions().add(freetext());
         AtlasQuizIO.validate(quiz); // must not throw
     }
+
+    @Test
+    void nullTitleReadsAsEmpty() throws IOException {
+        // An explicit JSON "title": null passes validation (title isn't checked), and Gson sets
+        // AtlasQuiz.title to null directly -- bypassing setTitle's null-guard. getTitle() must
+        // still come back empty, not null, so callers like QuizRunnerWindow can safely call
+        // .isBlank() on it.
+        AtlasQuiz quiz = new AtlasQuiz();
+        quiz.setTitle("Will be nulled");
+        quiz.getQuestions().add(mcq());
+        File f = tempFile();
+        AtlasQuizIO.write(quiz, f);
+        String json = Files.readString(f.toPath());
+        assertTrue(json.contains("\"Will be nulled\""));
+        json = json.replace("\"Will be nulled\"", "null");
+        Files.writeString(f.toPath(), json);
+
+        AtlasQuiz back = AtlasQuizIO.read(f);
+        assertEquals("", back.getTitle());
+    }
+
+    @Test
+    void trailingGarbageThrowsIOException() throws IOException {
+        // Gson reports valid-JSON-plus-trailing-garbage as JsonIOException, not
+        // JsonSyntaxException -- both extend JsonParseException, which is what
+        // AtlasQuizIO.read must catch for this to surface as a checked IOException rather than
+        // escaping as an unchecked exception on the caller.
+        AtlasQuiz quiz = new AtlasQuiz();
+        quiz.getQuestions().add(mcq());
+        File f = tempFile();
+        AtlasQuizIO.write(quiz, f);
+        String json = Files.readString(f.toPath());
+        Files.writeString(f.toPath(), json + "\nGARBAGE");
+
+        assertThrows(IOException.class, () -> AtlasQuizIO.read(f));
+    }
 }

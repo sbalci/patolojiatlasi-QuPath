@@ -7,7 +7,7 @@ import java.nio.file.Files;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonSyntaxException;
+import com.google.gson.JsonParseException;
 
 /** Read/write/validate a quiz-pack JSON file. UI-free and unit-tested. */
 public final class AtlasQuizIO {
@@ -30,7 +30,7 @@ public final class AtlasQuizIO {
         AtlasQuiz quiz;
         try {
             quiz = GSON.fromJson(json, AtlasQuiz.class);
-        } catch (JsonSyntaxException e) {
+        } catch (JsonParseException e) {
             throw new IOException("Not a valid quiz file: " + e.getMessage(), e);
         }
         if (quiz == null)

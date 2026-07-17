@@ -160,12 +160,15 @@ public class QuizRunnerWindow {
         File file = fc.showOpenDialog(stage);
         if (file == null)
             return;
+        // The try wraps ONLY the read: state (this.quiz/currentIndex/titleLabel) is assigned
+        // below, after a fully-successful read+validate, so a failed load can never leave the
+        // runner half-mutated (stale quiz reference with an unmoved question/index, or vice
+        // versa). AtlasQuizIO.read wraps all Gson parse failures (including trailing-garbage
+        // input, which Gson reports as JsonIOException rather than JsonSyntaxException) as a
+        // checked IOException, so no beyond-spec RuntimeException catch is needed here.
+        AtlasQuiz loaded;
         try {
-            AtlasQuiz loaded = AtlasQuizIO.read(file);
-            // Only mutate state once the read+validate has fully succeeded.
-            this.quiz = loaded;
-            titleLabel.setText(loaded.getTitle().isBlank() ? file.getName() : loaded.getTitle());
-            showQuestion(1);
+            loaded = AtlasQuizIO.read(file);
         } catch (IOException ex) {
             logger.warn("Failed to load quiz pack {}: {}", file, ex.getMessage());
             Alert alert = new Alert(Alert.AlertType.ERROR,
@@ -174,19 +177,11 @@ public class QuizRunnerWindow {
                 alert.initOwner(stage);
             alert.showAndWait();
             // Current state (previously-loaded quiz, if any) is left untouched.
-        } catch (RuntimeException ex) {
-            // Defensive: AtlasQuizIO.read only declares IOException, but Gson can throw an
-            // unchecked JsonIOException (not a JsonSyntaxException) for some malformed input
-            // (e.g. valid JSON followed by trailing garbage) that AtlasQuizIO does not currently
-            // catch. Without this, a bad pack would escape as an uncaught exception on the FX
-            // thread from a plain file pick — so it's handled here rather than left to crash.
-            logger.warn("Unexpected error loading quiz pack {}: {}", file, ex.getMessage(), ex);
-            Alert alert = new Alert(Alert.AlertType.ERROR,
-                    "Sınav dosyası okunamadı (beklenmeyen hata):\n\n" + ex.getMessage());
-            if (stage != null)
-                alert.initOwner(stage);
-            alert.showAndWait();
+            return;
         }
+        this.quiz = loaded;
+        titleLabel.setText(loaded.getTitle().isBlank() ? file.getName() : loaded.getTitle());
+        showQuestion(1);
     }
 
     /**
