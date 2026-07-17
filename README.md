@@ -174,6 +174,29 @@ from the current `list.yaml`. The live **Refresh list** button always overrides 
 
 ---
 
+## Focus heatmap
+
+**Extensions → Odak ısı haritası** adds a dwell/attention heatmap that records where you look on a
+slide. While tracking is on, the active viewer's visible region is sampled a few times a second and
+accumulated into a per-slide grid shown as a translucent overlay — focused high-magnification viewing
+heats an area far faster than a zoomed-out browse, so the map doubles as a *"did I review the whole
+slide?"* check and as a way to study where readers focus.
+
+Menu items:
+
+- **Görünür — izlemeyi aç/kapat** — start/stop tracking and show/hide the overlay.
+- **Temizle** — reset the current slide's map.
+- **Kaydet…** — save the current map now to a folder you pick.
+- **Oturumdan sonra sakla (kalıcı)** — when **off** (default), maps live only for the session and
+  are discarded; when **on**, each slide's map is auto-saved (on slide change, close, or stopping) to
+  `~/QuPath-atlas-focus-maps/` so it can be analysed later.
+
+Each saved map is a `<slide>__<user>__<timestamp>.json` (plus a `.png` preview). The JSON carries the
+slide name/URI, the user (OS login), image and grid dimensions, sample count, and the row-major
+`grid` of dwell values — enough to aggregate focus across readers offline.
+
+---
+
 ## Citation
 
 If you use this software, please cite it using the metadata in [`CITATION.cff`](CITATION.cff)

@@ -6,6 +6,8 @@ import javafx.scene.control.MenuItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.patolojiatlasi.qupath.focus.FocusHeatmap;
+
 import qupath.lib.common.Version;
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.extensions.QuPathExtension;
@@ -41,6 +43,8 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem item = new MenuItem("Browse Patoloji Atlası...");
             item.setOnAction(e -> AtlasBrowser.show(qupath));
             menu.getItems().add(item);
+            // Focus (dwell) heatmap — tracks where the reader looks; optional persistence.
+            menu.getItems().add(new FocusHeatmap(qupath).buildMenu());
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
