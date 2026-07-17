@@ -92,10 +92,10 @@ public final class CaseCompare {
      * build for each stain runs off-thread.
      * <p>
      * No-ops (with an informational alert) if the active viewer isn't showing a cataloged atlas
-     * slide, or if that slide's case has only one stain. If the active viewer's image has
-     * unsaved changes, asks for confirmation first since the compare grid replaces the content of
-     * every viewer in it. Stains beyond {@link #MAX_PANELS} are dropped (logged how many); a
-     * per-stain open failure is logged, but does not abort the other panels.
+     * slide, or if that slide's case has only one stain. If <b>any</b> currently-open viewer holds
+     * an image with unsaved changes, asks for confirmation first, since the compare grid replaces
+     * the content of every viewer in it. Stains beyond {@link #MAX_PANELS} are dropped (logged how
+     * many); a per-stain open failure is logged, but does not abort the other panels.
      * <p>
      * Viewer fill order follows {@link qupath.lib.gui.viewer.ViewerManager#getAllViewers()}, which
      * grows column-major as the grid is resized (e.g. a 2x2 fills top-left, bottom-left, top-right,
