@@ -41,6 +41,11 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem item = new MenuItem("Browse Patoloji Atlası...");
             item.setOnAction(e -> AtlasBrowser.show(qupath));
             menu.getItems().add(item);
+            // Arbitrary view rotation (not just 90°/flips) for the active viewer.
+            RotationControl rotation = new RotationControl(qupath);
+            MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
+            rotationItem.setOnAction(e -> rotation.show());
+            menu.getItems().add(rotationItem);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
