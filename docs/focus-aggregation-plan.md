@@ -70,8 +70,21 @@ Per `slideKey`:
 6. **Emit static assets:** `focus/<hash(slideKey)>.json` (aggregate grid + `readers` + dims) and an
    optional `focus/<hash(slideKey)>.png` heat preview, committed to / served by the static site.
 
-A ~100-line Python or Node script covers this; it can run in a GitHub Action (option A/C) or inside
-the serverless function on a schedule (option B).
+**Implemented:** [`tools/aggregate-focus.py`](../tools/aggregate-focus.py) does exactly this — pure
+standard library (no numpy/Pillow), so a maintainer just runs it:
+
+```bash
+python tools/aggregate-focus.py \
+    --in  ~/QuPath-atlas-focus-maps/contributions \
+    --out site/focus \
+    --min-readers 5
+```
+
+It groups by `slideKey`, **de-duplicates by `sessionId`** (a session that contributed a slide twice
+counts once), normalises each contribution by its max, averages, enforces the min-readers threshold,
+and writes `<hash>.json` + `<hash>.png` (heat preview, same colormap as the extension) + an
+`index.json` mapping `slideKey → {hash, readers, dims}` for the viewer to look up. `hash =
+sha1(slideKey)[:16]`. Runs in a GitHub Action (option A/C) or inside the serverless function (option B).
 
 ## Phase 3 — display on the atlas viewer
 
@@ -97,7 +110,7 @@ Reuse it, fed by the *aggregate* grid instead of the live session:
 ## Checklist to go live
 
 - [ ] Choose Phase 1 option (start with **A. manual/batch**).
-- [ ] Write the Phase 2 aggregation script (`slideKey` group → normalise → sum → assets).
+- [x] Write the Phase 2 aggregation script → [`tools/aggregate-focus.py`](../tools/aggregate-focus.py).
 - [ ] Add the Phase 3 overlay toggle + fetch to the viewer template.
 - [ ] (If option B) stand up the receiver, then set `UPLOAD_ENABLED = true` + `UPLOAD_ENDPOINT` in
       `FocusHeatmap.java` and cut a new extension release.
