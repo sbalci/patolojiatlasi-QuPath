@@ -112,7 +112,16 @@ public class AtlasCase {
      * (or the user) to type.
      */
     public ImageData.ImageType getImageType() {
-        String s = image.toLowerCase(Locale.ROOT);
+        return imageTypeForImageName(this.image);
+    }
+
+    /**
+     * Shared stain→type heuristic behind {@link #getImageType()}, factored out so other callers
+     * (e.g. the quiz slide opener, which only has a slide URL and no {@code AtlasCase}) can infer
+     * a type from an image basename without duplicating the H&amp;E / special-stain logic.
+     */
+    public static ImageData.ImageType imageTypeForImageName(String imageBasename) {
+        String s = (imageBasename == null ? "" : imageBasename).toLowerCase(Locale.ROOT);
         if (s.matches("h[&-]?e[0-9]*") || s.contains("hematoxylin"))
             return ImageData.ImageType.BRIGHTFIELD_H_E;
         if (isSpecialStain(s))
