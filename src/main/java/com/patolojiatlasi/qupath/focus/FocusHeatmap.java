@@ -57,8 +57,18 @@ public final class FocusHeatmap {
     private static final int REFRESH_EVERY = 4;   // rebuild the overlay every N samples (~1s)
     private static final double OVERLAY_OPACITY = 0.5;
 
+    // Research contribution (anonymous, opt-in). Uploading is DISABLED until the atlas website
+    // has a receiver — see docs/focus-aggregation-plan.md. Until then "Contribute" only writes an
+    // anonymised file locally that can be shared later. To enable: set UPLOAD_ENABLED = true and
+    // point UPLOAD_ENDPOINT at the receiver.
+    private static final boolean UPLOAD_ENABLED = false;
+    private static final String UPLOAD_ENDPOINT = "";
+    private static final String CONTRIBUTION_SCHEMA = "atlas-focus-contribution/1";
+
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
+    /** Anonymous per-session id — lets contributions be de-duplicated/weighted without identifying anyone. */
+    private final String sessionId = java.util.UUID.randomUUID().toString();
 
     private boolean active;
     private boolean keepMaps;
@@ -88,11 +98,15 @@ public final class FocusHeatmap {
         MenuItem saveItem = new MenuItem("Kaydet…");
         saveItem.setOnAction(e -> saveDialog());
 
+        MenuItem contributeItem = new MenuItem("Araştırmaya katkıda bulun…");
+        contributeItem.setOnAction(e -> contribute());
+
         CheckMenuItem keepItem = new CheckMenuItem("Oturumdan sonra sakla (kalıcı)");
         keepItem.selectedProperty().addListener((obs, was, now) -> keepMaps = now);
 
         Menu menu = new Menu("Odak ısı haritası");
-        menu.getItems().addAll(trackItem, clearItem, saveItem, new SeparatorMenuItem(), keepItem);
+        menu.getItems().addAll(trackItem, clearItem, saveItem, contributeItem,
+                new SeparatorMenuItem(), keepItem);
         return menu;
     }
 
@@ -243,6 +257,95 @@ public final class FocusHeatmap {
         m.put("savedAt", LocalDateTime.now().toString());
         m.put("grid", map.getGrid().clone());
         return new GsonBuilder().create().toJson(m);
+    }
+
+    // --- research contribution (anonymous, opt-in; upload gated off) ---------
+
+    /**
+     * Contribute the current slide's focus map to the aggregate research/education dataset. The
+     * contribution is <b>anonymised</b> (no user name — only a random session id, a stable slide
+     * key for grouping, and a date), written locally under {@code contributions/}. Uploading is
+     * disabled until the atlas website has a receiver; until then the file can be shared manually.
+     */
+    private void contribute() {
+        if (currentMap == null || currentMap.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "Henüz odak verisi yok — önce izlemeyi açın.").showAndWait();
+            return;
+        }
+        final String json = buildContributionJson(currentUri, currentMap);
+        final File dir = new File(defaultDir(), "contributions");
+        final String base = "focus-contribution__" + safe(slideKey(currentUri)) + "__"
+                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        final File file = new File(dir, base + ".json");
+        writeTextAsync(file, json);
+        if (UPLOAD_ENABLED && !UPLOAD_ENDPOINT.isBlank()) {
+            uploadAsync(json);
+        } else {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Katkınız yerel olarak (anonim) kaydedildi:\n" + file
+                    + "\n\nAtlas sunucusu henüz hazır değil; paylaşım açıldığında bu dosyayı gönderebilirsiniz.")
+                    .showAndWait();
+        }
+    }
+
+    /** Anonymised contribution payload: no user name; a stable slide key + random session id + date. */
+    private String buildContributionJson(String uri, FocusMap map) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("schema", CONTRIBUTION_SCHEMA);
+        m.put("slideKey", slideKey(uri));       // stable across readers → server groups by this
+        m.put("sessionId", sessionId);          // anonymous, not a user identity
+        m.put("imageWidth", map.getImageWidth());
+        m.put("imageHeight", map.getImageHeight());
+        m.put("gridWidth", map.getGridWidth());
+        m.put("gridHeight", map.getGridHeight());
+        m.put("sampleCount", map.getSampleCount());
+        m.put("date", java.time.LocalDate.now().toString());   // date only (no time) for privacy
+        m.put("grid", map.getGrid().clone());   // raw dwell counts; the server normalises
+        return new GsonBuilder().create().toJson(m);
+    }
+
+    /** Stable per-slide key for aggregation: the DZI URL without any query (e.g. no {@code ?mpp=}). */
+    private static String slideKey(String uri) {
+        if (uri == null || uri.isBlank())
+            return "unknown";
+        int q = uri.indexOf('?');
+        return q >= 0 ? uri.substring(0, q) : uri;
+    }
+
+    private void writeTextAsync(File file, String text) {
+        Thread t = new Thread(() -> {
+            try {
+                File dir = file.getParentFile();
+                if (dir != null && !dir.exists())
+                    dir.mkdirs();
+                java.nio.file.Files.writeString(file.toPath(), text, java.nio.charset.StandardCharsets.UTF_8);
+                logger.info("Saved focus contribution to {}", file);
+            } catch (Exception e) {
+                logger.error("Failed to save focus contribution: {}", e.getMessage(), e);
+            }
+        }, "focus-contribution-save");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** POST a contribution to the atlas receiver. Only invoked when {@link #UPLOAD_ENABLED}. */
+    private void uploadAsync(String json) {
+        Thread t = new Thread(() -> {
+            try {
+                var client = java.net.http.HttpClient.newHttpClient();
+                var req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(UPLOAD_ENDPOINT))
+                        .header("Content-Type", "application/json")
+                        .POST(java.net.http.HttpRequest.BodyPublishers.ofString(json,
+                                java.nio.charset.StandardCharsets.UTF_8))
+                        .build();
+                client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                logger.info("Uploaded focus contribution to {}", UPLOAD_ENDPOINT);
+            } catch (Exception e) {
+                logger.error("Focus contribution upload failed: {}", e.getMessage());
+            }
+        }, "focus-contribution-upload");
+        t.setDaemon(true);
+        t.start();
     }
 
     private static File defaultDir() {

@@ -187,13 +187,18 @@ Menu items:
 - **Görünür — izlemeyi aç/kapat** — start/stop tracking and show/hide the overlay.
 - **Temizle** — reset the current slide's map.
 - **Kaydet…** — save the current map now to a folder you pick.
+- **Araştırmaya katkıda bulun…** — save an **anonymised** contribution (no user name; a random
+  session id + stable slide key + date) under `~/QuPath-atlas-focus-maps/contributions/`, for the
+  planned per-slide *crowd attention map*. **Uploading is disabled** until the atlas website has a
+  receiver — until then the file is only written locally and can be shared manually.
 - **Oturumdan sonra sakla (kalıcı)** — when **off** (default), maps live only for the session and
   are discarded; when **on**, each slide's map is auto-saved (on slide change, close, or stopping) to
   `~/QuPath-atlas-focus-maps/` so it can be analysed later.
 
 Each saved map is a `<slide>__<user>__<timestamp>.json` (plus a `.png` preview). The JSON carries the
 slide name/URI, the user (OS login), image and grid dimensions, sample count, and the row-major
-`grid` of dwell values — enough to aggregate focus across readers offline.
+`grid` of dwell values — enough to aggregate focus across readers offline. The plan for pooling
+contributions into a website overlay is in [docs/focus-aggregation-plan.md](docs/focus-aggregation-plan.md).
 
 ---
 
