@@ -107,7 +107,33 @@ public class QuizRunnerWindow {
     // annotations NOT in this set (i.e. drawn by the learner while the question was shown) are
     // removed -- anything present before the question was shown, including annotations from an
     // earlier question that were never cleared (see leaveQuestion's Javadoc), is left alone.
+    //
+    // The baseline is pinned to a specific viewer + ImageData (annotationBaselineViewer /
+    // annotationBaselineImageData / annotationBaselineValid below), mirroring how showRevealOverlay
+    // pins revealOverlayViewer, rather than being re-resolved against qupath.getViewer() live. That
+    // live-read pattern is what the pinning replaces: without it, closing this window while a
+    // slide is still loading, or the user switching the active viewer in a multi-viewer layout,
+    // would make clearTransientAnnotations() diff against a stale/wrong-slide baseline and delete
+    // unrelated annotations.
     private Set<PathObject> annotationBaseline = new HashSet<>();
+
+    // The viewer annotationBaseline was captured against (see afterSlideReady). Read only via this
+    // pinned reference in clearTransientAnnotations() -- never qupath.getViewer() live there.
+    private QuPathViewer annotationBaselineViewer;
+
+    // The ImageData that was showing in annotationBaselineViewer at capture time.
+    // clearTransientAnnotations() refuses to touch anything if the pinned viewer's *current*
+    // ImageData no longer matches this reference (the slide underneath it changed since capture).
+    private ImageData<BufferedImage> annotationBaselineImageData;
+
+    // Whether annotationBaseline/annotationBaselineViewer/annotationBaselineImageData currently
+    // describe a real, usable baseline. Cleared to false (with the pinned refs nulled) whenever a
+    // new question starts being shown -- before its slide has finished loading -- so that reaching
+    // clearTransientAnnotations() before afterSlideReady() has run for that question (e.g. the
+    // window is closed mid-load) is a safe no-op rather than a diff against a stale baseline. Set
+    // true only once afterSlideReady() has captured a fresh baseline for an ANNOTATION/NAVIGATION
+    // question.
+    private boolean annotationBaselineValid = false;
 
     private QuizRunnerWindow(QuPathGUI qupath) {
         this.qupath = qupath;
@@ -235,6 +261,16 @@ public class QuizRunnerWindow {
         currentIndex = Math.max(1, Math.min(i, n));
         QuizQuestion q = quiz.getQuestions().get(currentIndex - 1);
 
+        // Entering a new question invalidates any previously-captured annotation baseline: this
+        // question's slide has not finished loading yet (that only happens in afterSlideReady,
+        // below, via applySlide), so there is nothing valid to diff against until then. Without
+        // this, a window close (or any other path into clearTransientAnnotations()) that lands
+        // between here and afterSlideReady() running would otherwise diff against a stale baseline
+        // captured for a *different* question/slide.
+        annotationBaselineValid = false;
+        annotationBaselineViewer = null;
+        annotationBaselineImageData = null;
+
         progressLabel.setText("Soru " + currentIndex + " / " + n);
         promptLabel.setText(q.getPrompt());
         setRevealVisible(false);
@@ -320,9 +356,12 @@ public class QuizRunnerWindow {
      * was already open, or from {@link QuizSlide#openAsync}'s {@code onDone} callback) -- i.e.
      * exactly the point at which the hierarchy underneath the viewer reflects {@code q}'s slide.
      * Applies the question's {@link QuizQuestion.Viewport}, if any, and -- for ANNOTATION/NAVIGATION
-     * questions, the two types the learner can draw on -- snapshots the current annotation objects
-     * as {@link #annotationBaseline} so {@link #leaveQuestion(AtlasQuiz, int)} can later tell which
-     * ones the learner added while answering.
+     * questions, the two types the learner can draw on -- pins {@link #annotationBaselineViewer}/
+     * {@link #annotationBaselineImageData} to the viewer/image actually used to show {@code q}, and
+     * snapshots its current annotation objects as {@link #annotationBaseline} (marking it valid via
+     * {@link #annotationBaselineValid}), so {@link #clearTransientAnnotations()} can later tell
+     * which ones the learner added while answering -- against the *pinned* viewer/slide, not
+     * whatever {@code qupath.getViewer()} happens to return at that later point.
      */
     private void afterSlideReady(QuizQuestion q) {
         QuPathViewer viewer = qupath.getViewer();
@@ -331,8 +370,12 @@ public class QuizRunnerWindow {
         QuizQuestion.Viewport vp = q.getViewport();
         if (vp != null)
             viewer.setDownsampleFactor(vp.downsample, vp.centerX, vp.centerY);
-        if (q.getType() == QuizType.ANNOTATION || q.getType() == QuizType.NAVIGATION)
+        if (q.getType() == QuizType.ANNOTATION || q.getType() == QuizType.NAVIGATION) {
+            annotationBaselineViewer = viewer;
+            annotationBaselineImageData = viewer.getImageData();
             annotationBaseline = currentAnnotations(viewer);
+            annotationBaselineValid = true;
+        }
     }
 
     /** "Göster": reveal the answer/explanation area for the current question. Idempotent. */
@@ -450,8 +493,10 @@ public class QuizRunnerWindow {
 
     /**
      * The hierarchy's current annotation objects for {@code viewer}'s image, or an empty set if
-     * there is no image/hierarchy. Used both to snapshot {@link #annotationBaseline} and to diff
-     * against it in {@link #clearTransientAnnotations()}.
+     * there is no image/hierarchy. Used by {@link #afterSlideReady(QuizQuestion)} to snapshot
+     * {@link #annotationBaseline}; {@link #clearTransientAnnotations()} reads the pinned
+     * {@link #annotationBaselineViewer}'s hierarchy directly instead, since by that point it also
+     * needs the {@link PathObjectHierarchy} reference to call {@code removeObjects} on.
      */
     private Set<PathObject> currentAnnotations(QuPathViewer viewer) {
         try {
@@ -472,20 +517,37 @@ public class QuizRunnerWindow {
      * was shown (including annotations from an earlier, un-cleared MCQ/FREETEXT question -- those
      * types never trigger this cleanup, since they carry no draw instruction) is left untouched, so
      * this can never discard a learner's or the atlas author's pre-existing work.
+     * <p>
+     * Acts <em>only</em> on the pinned {@link #annotationBaselineViewer}/
+     * {@link #annotationBaselineImageData} -- never {@code qupath.getViewer()} live -- and only when
+     * {@link #annotationBaselineValid} is still {@code true} and the pinned viewer's current image
+     * data still matches what was captured. This is what makes both of the unrelated-deletion paths
+     * safe: closing the window (or otherwise reaching here) before {@link #afterSlideReady} has run
+     * for the current question finds {@code annotationBaselineValid == false} and does nothing;
+     * the user switching the active viewer in a multi-viewer layout still resolves against the
+     * viewer the baseline was actually captured against, and if that viewer's slide itself changed
+     * in the meantime the image-data check below bails out instead of diffing against the new slide.
      */
     private void clearTransientAnnotations() {
-        QuPathViewer viewer = qupath.getViewer();
         try {
-            ImageData<BufferedImage> imageData = viewer == null ? null : viewer.getImageData();
-            if (imageData == null)
+            if (!annotationBaselineValid || annotationBaselineViewer == null)
                 return;
+            ImageData<BufferedImage> imageData = annotationBaselineViewer.getImageData();
+            if (imageData == null || imageData != annotationBaselineImageData) {
+                // The pinned viewer's slide changed since the baseline was captured (or was closed) --
+                // diffing against it would compare the wrong slide's annotations, so do not touch it.
+                annotationBaselineValid = false;
+                return;
+            }
             PathObjectHierarchy hierarchy = imageData.getHierarchy();
             Set<PathObject> toRemove = new HashSet<>(hierarchy.getAnnotationObjects());
             toRemove.removeAll(annotationBaseline);
             if (!toRemove.isEmpty()) {
+                // removeObjects(coll, true) already fires the hierarchy-changed event internally --
+                // no separate fireHierarchyChangedEvent call is needed.
                 hierarchy.removeObjects(toRemove, true);
-                hierarchy.fireHierarchyChangedEvent(this);
             }
+            annotationBaselineValid = false;
         } catch (Exception ex) {
             logger.debug("Could not clear transient quiz annotations: {}", ex.getMessage());
         }

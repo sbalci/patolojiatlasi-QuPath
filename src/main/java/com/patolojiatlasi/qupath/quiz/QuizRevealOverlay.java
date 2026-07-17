@@ -22,12 +22,17 @@ import qupath.lib.roi.interfaces.ROI;
  * grid, so there is no rasterization/resolution tradeoff to manage -- {@link ROI#getShape()}
  * already gives a full-resolution {@link java.awt.Shape} that can be drawn directly.
  * <p>
- * {@link #paintOverlay} receives {@code g2d} in the viewer's current downsampled/component space.
- * To draw the ROI's full-resolution shape correctly at any zoom level, a scratch copy of the
- * graphics context is scaled by {@code 1.0 / downsampleFactor} before drawing, and the stroke
- * width is scaled by {@code downsampleFactor} in the opposite direction so the on-screen line
- * width stays constant regardless of zoom (a 1px-wide full-res stroke would be invisible when
- * zoomed far out, and a fixed-width stroke drawn before the scale would balloon when zoomed in).
+ * {@link #paintOverlay} receives {@code g2d} already transformed by QuPath into full-resolution
+ * image space (the viewer applies the downsample scale to the {@link Graphics2D} before invoking
+ * this method -- confirmed against QuPath's built-in overlays, e.g. {@code GridOverlay} /
+ * {@code HierarchyOverlay}, which draw full-resolution coordinates directly with no additional
+ * {@code Graphics2D.scale} call). So {@link ROI#getShape()} -- itself already in full-resolution
+ * image coordinates -- is drawn as-is, with no extra scaling of the graphics context; applying
+ * {@code 1.0 / downsampleFactor} on top would double-apply the transform and push the shape off
+ * canvas at any non-1:1 zoom. Only the stroke width needs adjusting: it is specified on-screen
+ * (component-space) but drawn in image space, so it is multiplied by {@code downsampleFactor} (a
+ * bigger downsample means more image pixels per screen pixel, i.e. zoomed out, so the stroke needs
+ * to be wider in image px to keep a constant on-screen width).
  */
 public class QuizRevealOverlay extends AbstractOverlay {
 
@@ -59,7 +64,6 @@ public class QuizRevealOverlay extends AbstractOverlay {
         Graphics2D g = (Graphics2D) g2d.create();
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g.scale(1.0 / downsampleFactor, 1.0 / downsampleFactor);
             g.setStroke(new BasicStroke((float) (STROKE_WIDTH_PX * downsampleFactor)));
             g.setColor(STROKE_COLOR);
             g.draw(roi.getShape());
