@@ -483,6 +483,17 @@ public class QuizAuthorWindow {
                 errorLabel.setText("Önce slayt üzerinde bir anotasyon seçin.");
                 return;
             }
+            // The Add/Edit dialog is only window-modal to the author window, not to QuPath's main
+            // window -- the instructor can switch the viewer's slide (or open a different one)
+            // after "Geçerli slayta bağla" but before clicking this button. Refuse a capture whose
+            // live slide no longer matches the one this question is bound to, rather than silently
+            // storing geometry from the wrong slide.
+            String liveUrl = QuizSlide.currentSlideUrl(viewer);
+            if (boundSlideUrl != null && !boundSlideUrl.isBlank() && !boundSlideUrl.equals(liveUrl)) {
+                errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaydı açın "
+                        + "ya da yeniden bağlayın.");
+                return;
+            }
             capturedGeometryGeoJson = QuizGeometry.toGeoJson(roi);
             lastCapturedRoi = roi;
             errorLabel.setText("");

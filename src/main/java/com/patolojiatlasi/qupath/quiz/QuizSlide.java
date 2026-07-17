@@ -3,6 +3,7 @@ package com.patolojiatlasi.qupath.quiz;
 import java.awt.image.BufferedImage;
 import java.net.URI;
 import java.util.Locale;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 import javafx.application.Platform;
@@ -38,13 +39,27 @@ public final class QuizSlide {
      * {@link DziImageServer} + {@link ImageData} off the FX thread, then hands the result to the
      * viewer inside {@link Platform#runLater}. Calls {@code onDone} on success or
      * {@code onError} on failure — both always on the FX thread.
+     *
+     * @param stillWanted re-checked on the FX thread immediately before the load result is applied
+     *                    to the viewer (before {@code viewer.setImageData(...)}, and so before
+     *                    {@code onDone}/the {@code setImageData}-failure {@code onError} too); if
+     *                    it returns {@code false} the load is silently dropped without touching the
+     *                    viewer. Lets a caller cancel a stale, still-in-flight load — e.g. one
+     *                    issued by a runner window instance that has since closed or moved on to a
+     *                    different slide. Pass {@code null} to never cancel (always apply). Does
+     *                    not gate the earlier, off-FX-thread build failure path (the slide/server
+     *                    itself could not be constructed at all), which always reports via
+     *                    {@code onError}.
      */
-    public static void openAsync(QuPathGUI qupath, String slideUrl, Runnable onDone, Consumer<Exception> onError) {
+    public static void openAsync(QuPathGUI qupath, String slideUrl, Runnable onDone, Consumer<Exception> onError,
+            BooleanSupplier stillWanted) {
         Thread t = new Thread(() -> {
             try {
                 DziImageServer server = new DziImageServer(URI.create(slideUrl));
                 ImageData<BufferedImage> imageData = new ImageData<>(server, inferType(slideUrl));
                 Platform.runLater(() -> {
+                    if (stillWanted != null && !stillWanted.getAsBoolean())
+                        return;
                     try {
                         qupath.getViewer().setImageData(imageData);
                         onDone.run();

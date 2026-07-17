@@ -12,6 +12,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.RadioButton;
@@ -74,6 +75,26 @@ public class QuizRunnerWindow {
     // openAsync while the first is still resolving. Touched only on the JavaFX thread, mirroring
     // AtlasBrowser's "opening" / ProjectBuilderDialog's "building" guard.
     private boolean opening = false;
+
+    // Set true once the learner has confirmed (or the viewer held nothing risky in the first
+    // place) replacing whatever was in the active viewer with a quiz slide. Checked/set only in
+    // applySlide, before the FIRST QuizSlide.openAsync call of this runner window's lifetime --
+    // every swap after that one only ever replaces a previous quiz slide (whose only content is
+    // the learner's own transient drawings, already handled by leaveQuestion), so it needs no
+    // further prompting. FX-thread only.
+    private boolean confirmedViewerReplace = false;
+
+    // Incremented at the start of every applySlide call; the token captured at that point is
+    // passed to QuizSlide.openAsync as part of its stillWanted check, so a load superseded by a
+    // later question navigation (Önceki/Sonraki/promptLoad, each of which calls applySlide again
+    // before the previous load resolves) becomes a no-op instead of clobbering the newer state.
+    // FX-thread only.
+    private int loadToken = 0;
+
+    // Set true from the stage's setOnHidden handler; combined into the same stillWanted check so
+    // a load still in flight when the window closes can't call viewer.setImageData on a window
+    // instance that is no longer showing anything. FX-thread only.
+    private boolean closed = false;
 
     private final Label titleLabel = new Label("Sınav yüklenmedi");
     private final Label progressLabel = new Label("");
@@ -204,6 +225,7 @@ public class QuizRunnerWindow {
             // reveal overlay removed and its transient annotations cleared, same as Önceki/Sonraki,
             // so nothing leaks into the shared viewer once this window instance is discarded.
             leaveQuestion(quiz, currentIndex);
+            closed = true;
             stage = null;
         });
         return s;
@@ -323,12 +345,37 @@ public class QuizRunnerWindow {
      * thread); when the slide already matches, the controls are simply left enabled.
      */
     private void applySlide(QuizQuestion q) {
+        // Captured before any early return, so every applySlide call -- including one that turns
+        // out not to need a reload at all -- advances the token; the only thing that matters is
+        // that a load actually started under an OLDER token stops being "wanted" once a newer one
+        // has been issued (see the stillWanted supplier passed to openAsync below).
+        final int myToken = ++loadToken;
+
         String current = QuizSlide.currentSlideUrl(qupath.getViewer());
         if (q.getSlideUrl() != null && q.getSlideUrl().equals(current)) {
             setControlsDisabled(false);
             afterSlideReady(q);
             return;
         }
+
+        if (!confirmedViewerReplace) {
+            QuPathViewer v = qupath.getViewer();
+            ImageData<BufferedImage> open = (v == null) ? null : v.getImageData();
+            boolean risky = open != null && (isChangedSafe(open) || qupath.getProject() != null);
+            if (risky) {
+                Alert a = new Alert(Alert.AlertType.CONFIRMATION,
+                        "Sınav slaytları görüntüleyicideki görüntünün yerini alır; kaydedilmemiş "
+                        + "değişiklikler kaybolabilir. Devam edilsin mi?", ButtonType.OK, ButtonType.CANCEL);
+                a.setHeaderText(null);
+                if (stage != null)
+                    a.initOwner(stage);
+                java.util.Optional<ButtonType> r = a.showAndWait();
+                if (r.isEmpty() || r.get() != ButtonType.OK)
+                    return;   // abort this slide load; leave the viewer as-is
+            }
+            confirmedViewerReplace = true;
+        }
+
         opening = true;
         progress.setVisible(true);
         setControlsDisabled(true);
@@ -348,7 +395,21 @@ public class QuizRunnerWindow {
                     if (stage != null)
                         alert.initOwner(stage);
                     alert.showAndWait();
-                });
+                },
+                () -> !closed && myToken == loadToken);
+    }
+
+    /**
+     * {@link ImageData#isChanged()}, swallowing any exception to {@code false} -- used only to
+     * decide whether to show the unsaved-changes confirmation in {@link #applySlide}, so an
+     * unexpected failure here should fail open (skip the extra prompt) rather than block the quiz.
+     */
+    private static boolean isChangedSafe(ImageData<BufferedImage> d) {
+        try {
+            return d.isChanged();
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**

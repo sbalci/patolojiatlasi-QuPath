@@ -66,7 +66,15 @@ public class QuizRevealOverlay extends AbstractOverlay {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g.setStroke(new BasicStroke((float) (STROKE_WIDTH_PX * downsampleFactor)));
             g.setColor(STROKE_COLOR);
-            g.draw(roi.getShape());
+            try {
+                g.draw(roi.getShape());
+            } catch (UnsupportedOperationException noShape) {
+                // Points-type ROIs have no AWT shape -- draw a small marker at each point (full-res coords).
+                double r = 5.0 * downsampleFactor;
+                for (qupath.lib.geom.Point2 p : roi.getAllPoints()) {
+                    g.draw(new java.awt.geom.Ellipse2D.Double(p.getX() - r, p.getY() - r, 2 * r, 2 * r));
+                }
+            }
         } finally {
             g.dispose();
         }
