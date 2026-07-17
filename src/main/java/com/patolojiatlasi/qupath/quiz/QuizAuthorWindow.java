@@ -36,6 +36,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import qupath.lib.gui.QuPathGUI;
+import qupath.lib.objects.PathObject;
+import qupath.lib.roi.interfaces.ROI;
 
 /**
  * In-QuPath author for a quiz pack ({@link AtlasQuiz}/{@link AtlasQuizIO}): edit the pack's
@@ -49,9 +51,9 @@ import qupath.lib.gui.QuPathGUI;
  * (file read/write, dialog build) is quick synchronous work, so — per the task spec — everything
  * runs directly on the JavaFX application thread; no background {@code Thread} is spawned.
  * <p>
- * This slice authors MCQ and FREETEXT questions only; see the {@code slice 2} seams in
- * {@link #show(QuPathGUI)}, {@link QuestionDialog}, and {@link #editQuestion()} for where
- * ANNOTATION/NAVIGATION authoring (draw-a-reference-geometry capture) will slot in.
+ * All four {@link QuizType} values can be authored here, including ANNOTATION/NAVIGATION, whose
+ * reference/target geometry is captured from the currently-selected annotation on the open slide
+ * (see {@link QuestionDialog#captureReference()}) rather than drawn inside this dialog itself.
  */
 public class QuizAuthorWindow {
 
@@ -83,7 +85,6 @@ public class QuizAuthorWindow {
         QuizAuthorWindow author = new QuizAuthorWindow(qupath);
         stage = author.buildStage();
         stage.show();
-        // slice 2: ANNOTATION/NAVIGATION types + draw-reference capture
     }
 
     private Stage buildStage() {
@@ -252,25 +253,11 @@ public class QuizAuthorWindow {
         listView.getSelectionModel().select(result);
     }
 
-    /**
-     * "Düzenle": open the sub-dialog on the selected question. ANNOTATION/NAVIGATION questions
-     * (possible in a mixed pack loaded via "Aç…", even though "Ekle" can never create one in this
-     * slice) cannot yet be edited here -- refuse with an explanation rather than mis-editing them.
-     */
+    /** "Düzenle": open the sub-dialog on the selected question, of any {@link QuizType}. */
     private void editQuestion() {
         QuizQuestion selected = listView.getSelectionModel().getSelectedItem();
         if (selected == null)
             return;
-        if (selected.getType() == QuizType.ANNOTATION || selected.getType() == QuizType.NAVIGATION) {
-            // slice 2: ANNOTATION/NAVIGATION types + draw-reference capture
-            Alert alert = new Alert(Alert.AlertType.INFORMATION,
-                    "\"" + selected.getType() + "\" tipi sorular bu sürümde düzenlenemiyor "
-                            + "— bir sonraki sürümde eklenecek.");
-            if (stage != null)
-                alert.initOwner(stage);
-            alert.showAndWait();
-            return;
-        }
         // QuestionDialog mutates `selected` in place on OK (same object identity), so the list
         // itself needs no splice -- only the ListView's cells need to redraw.
         QuizQuestion result = QuestionDialog.show(stage, qupath, selected);
@@ -322,10 +309,8 @@ public class QuizAuthorWindow {
         private final QuizQuestion result;
         private boolean confirmed = false;
 
-        // slice 2: ANNOTATION/NAVIGATION types + draw-reference capture -- this ChoiceBox is
-        // deliberately limited to the two slice-1 types.
-        private final ChoiceBox<QuizType> typeChoice =
-                new ChoiceBox<>(FXCollections.observableArrayList(QuizType.MCQ, QuizType.FREETEXT));
+        private final ChoiceBox<QuizType> typeChoice = new ChoiceBox<>(FXCollections.observableArrayList(
+                QuizType.MCQ, QuizType.FREETEXT, QuizType.ANNOTATION, QuizType.NAVIGATION));
         private final TextArea promptArea = new TextArea();
         private final TextArea explanationArea = new TextArea();
         private final Label slideLabel = new Label();
@@ -335,10 +320,23 @@ public class QuizAuthorWindow {
         private final ToggleGroup correctGroup = new ToggleGroup();
         private final List<OptionRow> optionRows = new ArrayList<>();
         private final TextArea modelAnswerArea = new TextArea();
+        private final TextArea instructionArea = new TextArea();
+        private final Label geometryStatusLabel = new Label();
         private final VBox typeSpecificBox = new VBox(6);
 
         private String boundSlideUrl;
         private String boundSlideTitle;
+
+        // ANNOTATION stores its capture in referenceGeometryGeoJson, NAVIGATION in
+        // targetGeometryGeoJson -- but "Referansı slayttan al" is the same button/action for both,
+        // so the freshly-captured (or, when editing, pre-existing) GeoJSON is held in this one
+        // field until onOk() commits it to whichever of the two the chosen type owns.
+        private String capturedGeometryGeoJson;
+        // Set only by a successful captureReference() click *in this dialog session* -- used to
+        // show bounds/type detail in geometryStatusLabel. Left null when capturedGeometryGeoJson
+        // was instead seeded from an existing question's stored geometry (edit case): the brief
+        // only asks for a plain "already stored" indicator there, not a re-rendered geometry.
+        private ROI lastCapturedRoi;
 
         private QuestionDialog(Stage owner, QuPathGUI qupath, QuizQuestion existing) {
             this.qupath = qupath;
@@ -382,6 +380,10 @@ public class QuizAuthorWindow {
             modelAnswerArea.setWrapText(true);
             modelAnswerArea.setPrefRowCount(4);
 
+            instructionArea.setPromptText("Yönerge, ör: \"Tüm mitozları işaretleyin\"");
+            instructionArea.setWrapText(true);
+            instructionArea.setPrefRowCount(2);
+
             // Pre-fill type-specific state from the existing question, before the first
             // rebuildTypeSpecific() render.
             if (existing != null && existing.getType() == QuizType.MCQ) {
@@ -393,6 +395,11 @@ public class QuizAuthorWindow {
                     optionRows.get(ci).radio.setSelected(true);
             } else if (existing != null && existing.getType() == QuizType.FREETEXT) {
                 modelAnswerArea.setText(existing.getModelAnswer() == null ? "" : existing.getModelAnswer());
+            } else if (existing != null && existing.getType() == QuizType.ANNOTATION) {
+                instructionArea.setText(existing.getInstruction() == null ? "" : existing.getInstruction());
+                capturedGeometryGeoJson = existing.getReferenceGeometryGeoJson();
+            } else if (existing != null && existing.getType() == QuizType.NAVIGATION) {
+                capturedGeometryGeoJson = existing.getTargetGeometryGeoJson();
             }
             if (optionRows.isEmpty()) {
                 addOptionRow("");
@@ -434,14 +441,66 @@ public class QuizAuthorWindow {
         /** Swap the type-specific area's content to match the current {@link #typeChoice} value. */
         private void rebuildTypeSpecific() {
             typeSpecificBox.getChildren().clear();
-            if (typeChoice.getValue() == QuizType.FREETEXT) {
+            QuizType type = typeChoice.getValue();
+            if (type == QuizType.FREETEXT) {
                 typeSpecificBox.getChildren().addAll(new Label("Model cevap:"), modelAnswerArea);
+            } else if (type == QuizType.ANNOTATION) {
+                Button captureBtn = new Button("Referansı slayttan al");
+                captureBtn.setOnAction(e -> captureReference());
+                updateGeometryStatusLabel();
+                typeSpecificBox.getChildren().addAll(
+                        new Label("Yönerge:"), instructionArea,
+                        captureBtn, geometryStatusLabel);
+            } else if (type == QuizType.NAVIGATION) {
+                Button captureBtn = new Button("Referansı slayttan al");
+                captureBtn.setOnAction(e -> captureReference());
+                updateGeometryStatusLabel();
+                typeSpecificBox.getChildren().addAll(captureBtn, geometryStatusLabel);
             } else {
                 // MCQ is the default for a null/unrecognized value too.
                 Button addOptionBtn = new Button("Seçenek ekle");
                 addOptionBtn.setOnAction(e -> addOptionRow(""));
                 typeSpecificBox.getChildren().addAll(
                         new Label("Seçenekler (doğru olanı işaretleyin):"), optionsBox, addOptionBtn);
+            }
+        }
+
+        /**
+         * "Referansı slayttan al": read the ROI of the currently-selected annotation on the open
+         * slide (same viewer/selection API as {@code AtlasBrowser}/{@code ProjectBuilderDialog}'s
+         * sibling dialogs use for selection state, but here against the hierarchy's
+         * {@code PathObjectSelectionModel} rather than a JavaFX list/tree selection). Refuses --
+         * leaving any previous capture untouched -- when no slide is open, nothing is selected, or
+         * the selected object has no ROI (e.g. a TMA core parent with no shape of its own).
+         */
+        private void captureReference() {
+            var viewer = qupath.getViewer();
+            var imageData = viewer == null ? null : viewer.getImageData();
+            var hierarchy = imageData == null ? null : imageData.getHierarchy();
+            PathObject selected = hierarchy == null ? null : hierarchy.getSelectionModel().getSelectedObject();
+            ROI roi = selected == null ? null : selected.getROI();
+            if (roi == null) {
+                errorLabel.setText("Önce slayt üzerinde bir anotasyon seçin.");
+                return;
+            }
+            capturedGeometryGeoJson = QuizGeometry.toGeoJson(roi);
+            lastCapturedRoi = roi;
+            errorLabel.setText("");
+            updateGeometryStatusLabel();
+        }
+
+        /** Reflect {@link #capturedGeometryGeoJson}/{@link #lastCapturedRoi} in {@link #geometryStatusLabel}. */
+        private void updateGeometryStatusLabel() {
+            if (capturedGeometryGeoJson == null || capturedGeometryGeoJson.isBlank()) {
+                geometryStatusLabel.setText("Referans yok — slayt üzerinde bir anotasyon seçip yukarıdaki "
+                        + "düğmeyle yakalayın.");
+            } else if (lastCapturedRoi != null) {
+                geometryStatusLabel.setText(String.format(Locale.US,
+                        "Referans alındı ✓ (%s, %.1f×%.1f px)",
+                        lastCapturedRoi.getRoiName(), lastCapturedRoi.getBoundsWidth(),
+                        lastCapturedRoi.getBoundsHeight()));
+            } else {
+                geometryStatusLabel.setText("Referans mevcut ✓");
             }
         }
 
@@ -543,6 +602,9 @@ public class QuizAuthorWindow {
             List<String> options = null;
             Integer correctIndex = null;
             String modelAnswer = null;
+            String instruction = null;
+            String referenceGeom = null;
+            String targetGeom = null;
 
             if (type == QuizType.MCQ) {
                 options = new ArrayList<>();
@@ -558,8 +620,21 @@ public class QuizAuthorWindow {
                     return;
                 }
                 correctIndex = selected;
-            } else { // FREETEXT
+            } else if (type == QuizType.FREETEXT) {
                 modelAnswer = modelAnswerArea.getText() == null ? "" : modelAnswerArea.getText();
+            } else if (type == QuizType.ANNOTATION) {
+                if (capturedGeometryGeoJson == null || capturedGeometryGeoJson.isBlank()) {
+                    errorLabel.setText("Önce \"Referansı slayttan al\" ile bir referans bölge yakalayın.");
+                    return;
+                }
+                referenceGeom = capturedGeometryGeoJson;
+                instruction = instructionArea.getText() == null ? "" : instructionArea.getText();
+            } else { // NAVIGATION
+                if (capturedGeometryGeoJson == null || capturedGeometryGeoJson.isBlank()) {
+                    errorLabel.setText("Önce \"Referansı slayttan al\" ile bir hedef bölge yakalayın.");
+                    return;
+                }
+                targetGeom = capturedGeometryGeoJson;
             }
 
             if (result.getId() == null || result.getId().isBlank())
@@ -572,6 +647,9 @@ public class QuizAuthorWindow {
             result.setOptions(options);
             result.setCorrectIndex(correctIndex);
             result.setModelAnswer(modelAnswer);
+            result.setInstruction(instruction);
+            result.setReferenceGeometryGeoJson(referenceGeom);
+            result.setTargetGeometryGeoJson(targetGeom);
 
             confirmed = true;
             stage.close();
