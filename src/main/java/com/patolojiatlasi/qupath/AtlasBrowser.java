@@ -139,14 +139,18 @@ public class AtlasBrowser {
         aboutBtn.setTooltip(new javafx.scene.control.Tooltip("About this extension and the atlas websites"));
         aboutBtn.setOnAction(e -> showAbout());
 
-        // Spacer pushes the About button to the far right of the bar.
-        Region spacer = new Region();
-        HBox.setHgrow(spacer, Priority.ALWAYS);
-
         createProjectBtn.setDisable(true);
         createProjectBtn.setOnAction(e -> openProjectBuilder());
 
-        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn, status, spacer, aboutBtn);
+        // Never truncate the buttons: pin each to its preferred (full-label) width. The status
+        // text is the flexible element instead — it grows to push About to the right and ellipsizes
+        // when the window is narrow, so a long status can never clip the button labels.
+        for (Button b : new Button[] {openBtn, addSelBtn, webBtn, createProjectBtn, aboutBtn})
+            b.setMinWidth(Region.USE_PREF_SIZE);
+        status.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(status, Priority.ALWAYS);
+
+        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn, status, aboutBtn);
         bottom.setPadding(new Insets(8));
 
         BorderPane root = new BorderPane();
@@ -158,7 +162,7 @@ public class AtlasBrowser {
         rebuildTree();
         status.setText(allCases.size() + " images (bundled snapshot)");
 
-        s.setScene(new Scene(root, 720, 660));
+        s.setScene(new Scene(root, 860, 660));
         s.setOnHidden(e -> stage = null);
         return s;
     }
