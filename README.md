@@ -29,7 +29,7 @@ to these sites:
 
 ## What it does
 
-- Adds **Extensions → Browse Patoloji Atlası…**, opening a searchable window that lists every
+- Adds **Extensions → Patoloji Atlası → Slaytlara gözat…**, opening a searchable window that lists every
   image grouped by category (Gastrointestinal, Pancreatobiliary, Neuropathology, …), with a
   thumbnail preview and a **Published only** filter.
 - Each entry is a single stain of a case, so multi-stain cases (H&E plus IHC / special stains
@@ -122,7 +122,7 @@ QuPath 0.6+ can install and update this extension from its catalog:
    ```
 3. Open **Extensions → Manage extensions**, find **QuPath Patoloji Atlası extension**, and click
    **Install**. QuPath downloads the latest release JAR for you.
-4. Restart QuPath, then open **Extensions → Browse Patoloji Atlası…**.
+4. Restart QuPath, then open **Extensions → Patoloji Atlası → Slaytlara gözat…**.
 
 ### Method B — manual (drag-and-drop)
 
@@ -131,7 +131,7 @@ QuPath 0.6+ can install and update this extension from its catalog:
 2. Start QuPath 0.6+.
 3. Drag the `.jar` onto the QuPath window (or copy it into the extensions directory:
    *Extensions → Installed extensions → open extensions directory*).
-4. Restart QuPath when prompted, then open **Extensions → Browse Patoloji Atlası…**.
+4. Restart QuPath when prompted, then open **Extensions → Patoloji Atlası → Slaytlara gözat…**.
 
 ---
 
