@@ -102,6 +102,31 @@ edits, exactly like QuPath's own close-viewer action).
 
 ---
 
+## Bench-side reference
+
+Open an atlas case in a **second viewer beside your own slide** — handy for comparing your own
+case against a known reference while you work, without losing what's already open. Two ways to
+launch it:
+
+- **Browser right-click** — in **Slaytlara gözat…**, right-click a case and choose **Referans
+  olarak yanında aç**.
+- **Extensions → Patoloji Atlası → Referans → Referans slayt aç…** — a search-and-pick dialog
+  (filter by title, organ, or stain) with a **Yanında aç** button (or double-click a row).
+
+Either way, the reference slide streams into a new viewer added next to your active one; if
+nothing is open yet, it opens directly into that single viewer instead (there's nothing to be
+"beside" yet). When both slides carry a known pixel size (µm/px), the reference viewer's zoom is
+matched automatically to show the same on-screen scale as yours. A small floating **Referans**
+window appears alongside it with:
+
+- **Büyütmeyi eşle** — re-match magnification on demand.
+- **Kaydırmayı da eşle (tam senkron)** — toggle full pan/zoom sync between the two viewers
+  (QuPath's built-in synchronize-viewers behavior).
+- **Referansı kapat** — closes the reference viewer (prompting to save first if it has unsaved
+  edits) and collapses the grid back to a single viewer.
+
+---
+
 ## Requirements
 
 - **QuPath 0.6.x** (built against the 0.6 API; runs on Java 21).
@@ -183,6 +208,8 @@ connection is needed for the first build.
 | Registers `.dzi` URLs with QuPath | `dzi/DziImageServerBuilder.java` + `META-INF/services/qupath.lib.images.servers.ImageServerBuilder` |
 | Catalogue (bundled snapshot + live `list.yaml`) | `AtlasCatalog.java`, `AtlasCase.java`, `catalog.json` |
 | Browser window | `AtlasBrowser.java` |
+| Bench-side reference (second viewer + magnification match + control window) | `BenchReference.java` |
+| Reference picker dialog | `ReferencePickerDialog.java` |
 | Menu entry point | `AtlasExtension.java` |
 
 **Catalogue source.** The atlas maintains `lists/list.yaml`, one record per stain, with fields
