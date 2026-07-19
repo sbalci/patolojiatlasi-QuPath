@@ -75,7 +75,7 @@ public class AtlasExtension implements QuPathExtension {
             Menu referenceMenu = new Menu("Referans");
             referenceMenu.getItems().add(refPickItem);
 
-            // Citation group — cite the slide currently open in the active viewer.
+            // Citation group — cite the slide currently open in the active viewer, or a selected region.
             MenuItem citeOpenItem = new MenuItem("Açık slaytı alıntıla…");
             citeOpenItem.setOnAction(e -> {
                 AtlasCase open = resolveOpenCase(qupath);
@@ -85,8 +85,10 @@ public class AtlasExtension implements QuPathExtension {
                 }
                 CitationDialog.show(qupath, open);
             });
+            MenuItem citeRegionItem = new MenuItem("Bu bölgeyi alıntıla…");
+            citeRegionItem.setOnAction(e -> FigureCitationDialog.show(qupath));
             Menu citationMenu = new Menu("Atıf");
-            citationMenu.getItems().add(citeOpenItem);
+            citationMenu.getItems().addAll(citeOpenItem, citeRegionItem);
 
             // Quiz group — self-study quiz: take / author.
             MenuItem quizTakeItem = new MenuItem("Çöz…");
@@ -114,8 +116,11 @@ public class AtlasExtension implements QuPathExtension {
      * approach {@link CaseCompare#siblingStains} uses for its own active-viewer lookup. Returns
      * {@code null} if there's no active viewer/image, or the shown slide isn't a cataloged atlas
      * slide.
+     * <p>
+     * Package-visible so {@link FigureCitationDialog} can reuse the same active-viewer→catalogue
+     * match for the "cite this region" action.
      */
-    private static AtlasCase resolveOpenCase(QuPathGUI qupath) {
+    static AtlasCase resolveOpenCase(QuPathGUI qupath) {
         if (qupath == null)
             return null;
         try {

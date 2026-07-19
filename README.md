@@ -316,6 +316,31 @@ contributions into a website overlay is in [docs/focus-aggregation-plan.md](docs
 
 ---
 
+## Provenance & citation
+
+Beyond citing the extension itself (see **Citation** below), the atlas menu can generate
+ready-to-use citations and export files for the slides you actually used — image + extension +
+QuPath references together, so a figure or methods section always carries full provenance.
+
+- **Cite a slide.** Right-click a case in **Slaytlara gözat…** and choose **Bu slaytı alıntıla…**,
+  or use **Extensions → Patoloji Atlası → Atıf → Açık slaytı alıntıla…** with the slide open in the
+  active viewer. Produces BibTeX / RIS / plain-text citations for the atlas image, this extension,
+  and QuPath (Bankhead et al. 2017), with copy-to-clipboard and save-to-file actions.
+- **Export a cohort manifest.** In the project-builder dialog (from the browser's selection
+  basket), click **Künye / manifest dışa aktar…** and pick a folder — writes `atlas-manifest.csv`,
+  `atlas-manifest.md`, and `atlas-methods.txt` for every slide in the current selection. This does
+  **not** create a project; it only records provenance for the slides you've gathered.
+- **Cite a region.** Select an annotation on an open atlas slide, then use
+  **Extensions → Patoloji Atlası → Atıf → Bu bölgeyi alıntıla…**. Produces a figure-citation card —
+  the slide citation, the viewport framing (downsample + center), an editable caption, and the
+  region's geometry as GeoJSON — with the same copy/save actions.
+
+All three add a best-effort catalogue commit SHA (from a lightweight, unauthenticated GitHub API
+call) and this extension's version to the exported provenance, without blocking the UI while that
+network lookup runs.
+
+---
+
 ## Citation
 
 If you use this software, please cite it — GitHub renders a **"Cite this repository"** button from

@@ -60,6 +60,7 @@ public class ProjectBuilderDialog {
     private File location;
     private Button createBtn;
     private Button cancelBtn;
+    private Button manifestBtn;
     private Stage stage;
     private boolean building;
 
@@ -121,11 +122,13 @@ public class ProjectBuilderDialog {
         createBtn.setOnAction(e -> runBuild());
         cancelBtn = new Button("Cancel");
         cancelBtn.setOnAction(e -> stage.close());
+        manifestBtn = new Button("Künye / manifest dışa aktar…");
+        manifestBtn.setOnAction(e -> exportManifest());
         progress.setVisible(false);
         progress.setPrefSize(18, 18);
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
-        HBox actions = new HBox(6, statusLabel, progress, spacer, cancelBtn, createBtn);
+        HBox actions = new HBox(6, statusLabel, progress, spacer, manifestBtn, cancelBtn, createBtn);
 
         VBox rootBox = new VBox(10,
                 new Label("Selected images:"), listView, listButtons,
@@ -153,6 +156,48 @@ public class ProjectBuilderDialog {
         basket.clear();
         onSelectionChanged.run();
         updateStatus();
+    }
+
+    /**
+     * "Künye / manifest dışa aktar…": writes a cohort manifest (CSV + Markdown + methods
+     * paragraph, see {@link ProvenanceService#saveManifest}) for the same case list the dialog
+     * displays ({@link #items}) — independent of the Create/Cancel project-build flow below; no
+     * project is created or required. The SHA-lookup context resolution and the file writes run
+     * on a background daemon thread, with the resulting confirmation/error alert shown back on
+     * the FX thread.
+     */
+    private void exportManifest() {
+        List<AtlasCase> cases = new ArrayList<>(items);
+        if (cases.isEmpty()) {
+            new Alert(Alert.AlertType.INFORMATION, "Dışa aktarılacak görüntü seçilmedi.").showAndWait();
+            return;
+        }
+        DirectoryChooser dc = new DirectoryChooser();
+        dc.setTitle("Künye / manifest için klasör seçin");
+        File dir = dc.showDialog(stage);
+        if (dir == null)
+            return;
+
+        manifestBtn.setDisable(true);
+        Thread t = new Thread(() -> {
+            try {
+                AtlasCitation.CitationContext ctx = ProvenanceService.resolveContext();
+                ProvenanceService.saveManifest(dir, cases, ctx);
+                Platform.runLater(() -> {
+                    manifestBtn.setDisable(false);
+                    new Alert(Alert.AlertType.INFORMATION,
+                            "Künye kaydedildi: " + dir.getAbsolutePath()).showAndWait();
+                });
+            } catch (java.io.IOException ex) {
+                logger.error("Manifest export failed: {}", ex.getMessage(), ex);
+                Platform.runLater(() -> {
+                    manifestBtn.setDisable(false);
+                    new Alert(Alert.AlertType.ERROR, "Künye kaydedilemedi:\n" + ex.getMessage()).showAndWait();
+                });
+            }
+        }, "atlas-manifest-export");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void chooseLocation() {
