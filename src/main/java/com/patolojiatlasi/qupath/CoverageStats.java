@@ -24,23 +24,28 @@ final class CoverageStats {
     }
 
     private static final Pattern CD_MARKER = Pattern.compile("\\bcd\\d+\\b");
+    // H&E with an optional digit suffix (HE1/HE2/HE3/HE4 slide-naming convention).
+    private static final Pattern HE_DIGIT = Pattern.compile("\\bhe\\d*\\b");
 
     private static final String[] SPECIAL_KEYS = {
         "pas", "pasd", "giemsa", "mgg", "congo", "amyloid", "crystal", "trichrome", "masson",
         "reticulin", "mucicarmine", "warthin", "grocott", "gms", "ziehl", "afb", "verhoeff",
-        "vvg", "elastic", "perls", "prussian", "iron", "alcian", "silver", "pap", "trypsin",
+        "vvg", "elastic", "perls", "prussian", "iron", "alcian", "silver", "trypsin",
         "fontana"
     };
+    // Whole-token SPECIAL keywords (short/ambiguous — must not match inside a larger word).
+    private static final String[] SPECIAL_TOKENS = { "pap" };
     // Substring IHC keywords (safe — no short ambiguous tokens here).
     private static final String[] IHC_KEYS = {
         "ihc", "immuno", "ki67", "ki-67", "p53", "p63", "p40", "p16", "ttf", "napsin",
         "chromogranin", "synaptophysin", "s100", "sox", "melan", "hmb", "desmin", "actin",
         "vimentin", "panck", "ck7", "ck20", "ck5", "cytokeratin", "keratin", "her2", "estrogen",
         "progesterone", "gata", "pax", "wt1", "calretinin", "inhibin", "dog1", "ckit", "c-kit",
-        "mib", "bcl", "alk", "pdl1", "pd-l1", "mart", "cea", "psa", "tdt", "mpo"
+        "mib", "bcl", "alk", "pdl1", "pd-l1", "mart", "cea", "psa", "tdt", "mpo",
+        "gfap", "cdx2", "heppar", "ae1", "ae3", "oscar", "catenin"
     };
     // Whole-token IHC keywords (short/ambiguous — must not match inside a larger word).
-    private static final String[] IHC_TOKENS = { "sma", "syn", "er", "pr" };
+    private static final String[] IHC_TOKENS = { "sma", "syn", "er", "pr", "ema", "chr", "nfp" };
     // H&E whole-token names.
     private static final String[] HE_TOKENS = { "he", "h&e", "hande", "h and e", "h e" };
     private static final String[] HE_SUBSTR = { "hematox", "haematox" };
@@ -49,8 +54,9 @@ final class CoverageStats {
         String hay = ((image == null ? "" : image) + " " + (stainname == null ? "" : stainname))
                 .toLowerCase(Locale.ROOT).trim();
         if (hay.isEmpty()) return StainBucket.OTHER;
-        if (hasToken(hay, HE_TOKENS) || contains(hay, HE_SUBSTR)) return StainBucket.HE;
-        if (contains(hay, SPECIAL_KEYS)) return StainBucket.SPECIAL;
+        if (hasToken(hay, HE_TOKENS) || contains(hay, HE_SUBSTR) || HE_DIGIT.matcher(hay).find())
+            return StainBucket.HE;
+        if (contains(hay, SPECIAL_KEYS) || hasToken(hay, SPECIAL_TOKENS)) return StainBucket.SPECIAL;
         if (CD_MARKER.matcher(hay).find() || contains(hay, IHC_KEYS) || hasToken(hay, IHC_TOKENS))
             return StainBucket.IHC;
         return StainBucket.OTHER;

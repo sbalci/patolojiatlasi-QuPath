@@ -1,7 +1,6 @@
 package com.patolojiatlasi.qupath;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.LocalDate;
@@ -42,6 +41,50 @@ class CoverageStatsTest {
         assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("synovial", ""));
         // an H&E token must not match a word merely containing "he"
         assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("heart", ""));
+    }
+
+    @Test
+    void stainBucketHandlesHeDigitSuffix() {
+        // Real slide-naming convention: HE1..HE4 (49/288 real slides use this form).
+        assertEquals(StainBucket.HE, CoverageStats.stainBucket("HE1", ""));
+        assertEquals(StainBucket.HE, CoverageStats.stainBucket("HE4", ""));
+        // real catalog slug form, e.g. reponame-prefixed stainname
+        assertEquals(StainBucket.HE, CoverageStats.stainBucket("BS1-HE1", ""));
+        // the digit-suffix regex must still respect word boundaries
+        assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("heart", ""));
+        assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("the", ""));
+    }
+
+    @Test
+    void stainBucketPapIsWholeTokenNotSubstring() {
+        // "pap" alone (Papanicolaou) still classifies SPECIAL.
+        assertEquals(StainBucket.SPECIAL, CoverageStats.stainBucket("pap", ""));
+        assertEquals(StainBucket.SPECIAL, CoverageStats.stainBucket("pap smear", ""));
+        // Real catalog record: reponame "pancreas-solid-pseudopapillary", image
+        // "betacatenine", stainname "pancreas-solid-pseudopapillary-betacatenine" — a
+        // beta-catenin IHC slide that used to wrongly land in SPECIAL because "pap" was
+        // a substring key matching inside "pseudopapillary". mirrors compute()'s call
+        // shape: stainBucket(getImage(), getStainname()).
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket(
+                "betacatenine", "pancreas-solid-pseudopapillary-betacatenine"));
+    }
+
+    @Test
+    void stainBucketRecognizesNewlyAddedMarkers() {
+        // Distinctive substring markers.
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("GFAP", ""));
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("CDX2", ""));
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("HepPar1", ""));
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("AE1AE3", ""));
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("OSCAR", ""));
+        // Short/ambiguous markers — must match only as a whole token.
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("EMA", ""));
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("CHR", ""));
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("NFP", ""));
+        // Shadow guards: "ema" is a substring of "hematoma", "chr" of "chronic" — neither
+        // is a whole token there, so both must stay OTHER.
+        assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("hematoma", ""));
+        assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("chronic", ""));
     }
 
     @Test
