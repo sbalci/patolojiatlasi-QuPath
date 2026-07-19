@@ -145,15 +145,11 @@ is a one-time manual download if you'd rather not add a catalog.
 You add the catalog **once**; afterwards QuPath installs and updates the extension from it.
 
 1. In QuPath, open **Extensions → Manage extension catalogs**.
-2. Click **Add** and paste this repository URL:
+2. Click **Add**, paste this repository URL, and confirm:
    ```
    https://github.com/sbalci/patolojiatlasi-QuPath
    ```
-   QuPath finds the `catalog.json` in the repository for you. Give the catalog any name you like
-   (e.g. `Patoloji Atlası`) and confirm.
-
-   *If a QuPath version ever rejects the repository URL, use the direct catalog link instead:*
-   `https://raw.githubusercontent.com/sbalci/patolojiatlasi-QuPath/master/catalog.json`
+   QuPath finds the `catalog.json` in the repository for you.
 3. Open **Extensions → Manage extensions**. Under the catalog you just added you'll see
    **QuPath Patoloji Atlası extension** — click **Install**. QuPath downloads the matching
    release JAR for you (no manual file handling).
