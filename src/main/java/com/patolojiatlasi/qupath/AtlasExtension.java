@@ -54,6 +54,11 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem browseItem = new MenuItem("Slaytlara gözat…");
             browseItem.setOnAction(e -> AtlasBrowser.show(qupath));
 
+            // Catalogue coverage & QC dashboard — a read-only category x stain matrix, opt-in
+            // link check, and drill-down into the project builder.
+            MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
+            coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
+
             // View group — reorientation + the focus (dwell) heatmap sub-menu.
             RotationControl rotation = new RotationControl(qupath);
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
@@ -104,6 +109,7 @@ public class AtlasExtension implements QuPathExtension {
 
             atlas.getItems().addAll(
                     browseItem,
+                    coverageItem,
                     new SeparatorMenuItem(),
                     viewMenu, compareMenu, referenceMenu, citationMenu, quizMenu);
 
