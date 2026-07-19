@@ -25,6 +25,8 @@ final class CoverageStats {
 
     private static final Pattern CD_MARKER = Pattern.compile("\\bcd\\d+\\b");
     // H&E with an optional digit suffix (HE1/HE2/HE3/HE4 slide-naming convention).
+    // NOTE: also swallows "HE4" if a future record uses it as the ovarian IHC biomarker
+    // (Human Epididymis protein 4) rather than an H&E level. All current HE4 records are H&E.
     private static final Pattern HE_DIGIT = Pattern.compile("\\bhe\\d*\\b");
 
     private static final String[] SPECIAL_KEYS = {
@@ -41,11 +43,11 @@ final class CoverageStats {
         "chromogranin", "synaptophysin", "s100", "sox", "melan", "hmb", "desmin", "actin",
         "vimentin", "panck", "ck7", "ck20", "ck5", "cytokeratin", "keratin", "her2", "estrogen",
         "progesterone", "gata", "pax", "wt1", "calretinin", "inhibin", "dog1", "ckit", "c-kit",
-        "mib", "bcl", "alk", "pdl1", "pd-l1", "mart", "cea", "psa", "tdt", "mpo",
+        "mib", "bcl", "pdl1", "pd-l1", "mart", "cea", "psa", "tdt", "mpo",
         "gfap", "cdx2", "heppar", "ae1", "ae3", "oscar", "catenin"
     };
     // Whole-token IHC keywords (short/ambiguous — must not match inside a larger word).
-    private static final String[] IHC_TOKENS = { "sma", "syn", "er", "pr", "ema", "chr", "nfp" };
+    private static final String[] IHC_TOKENS = { "sma", "syn", "er", "pr", "ema", "chr", "nfp", "alk" };
     // H&E whole-token names.
     private static final String[] HE_TOKENS = { "he", "h&e", "hande", "h and e", "h e" };
     private static final String[] HE_SUBSTR = { "hematox", "haematox" };

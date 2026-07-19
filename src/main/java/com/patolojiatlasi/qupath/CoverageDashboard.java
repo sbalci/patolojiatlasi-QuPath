@@ -18,6 +18,7 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Separator;
+import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableRow;
 import javafx.scene.control.TableView;
@@ -45,11 +46,13 @@ import qupath.lib.gui.QuPathGUI;
  * with an opt-in best-effort DZI link check, a double-click drill-down into the project builder
  * for a category's slice, and CSV/Markdown export for a data-availability statement.
  * <p>
- * Non-modal, matching {@link CitationDialog}'s dialog style. The catalogue load and matrix
- * computation are pure/offline (no network), so they run directly on the calling (FX) thread; only
- * the opt-in link check does network I/O, and that runs on a background daemon thread with every
- * UI mutation marshalled back via {@link Platform#runLater} and guarded by
- * {@code stage.isShowing()} so a closed dashboard is never touched by a late callback.
+ * Intentionally non-modal (unlike most other dialogs in this package, e.g. {@link CitationDialog},
+ * which are window-modal) so the dashboard can stay open while the user drills down into the
+ * project builder. The catalogue load and matrix computation are pure/offline (no network), so
+ * they run directly on the calling (FX) thread; only the opt-in link check does network I/O, and
+ * that runs on a background daemon thread with every UI mutation marshalled back via
+ * {@link Platform#runLater} and guarded by {@code stage.isShowing()} so a closed dashboard is
+ * never touched by a late callback.
  */
 public final class CoverageDashboard {
 
@@ -175,12 +178,17 @@ public final class CoverageDashboard {
         casesCol.setCellValueFactory(cd -> new SimpleIntegerProperty(cd.getValue().cases()));
         casesCol.setPrefWidth(70);
 
-        TableColumn<CategoryRow, String> pubCol = new TableColumn<>("Yayın %");
-        pubCol.setCellValueFactory(cd -> new SimpleStringProperty(cd.getValue().publishedPct() + "%"));
+        // Backed by the raw integer (not a "NN%" string) so clicking the header sorts numerically
+        // (9 < 67 < 100) rather than lexicographically ("100%" < "67%" < "9%"); the cellFactory
+        // below appends "%" purely for display.
+        TableColumn<CategoryRow, Number> pubCol = new TableColumn<>("Yayın %");
+        pubCol.setCellValueFactory(cd -> new SimpleIntegerProperty(cd.getValue().publishedPct()));
+        pubCol.setCellFactory(col -> percentCell());
         pubCol.setPrefWidth(80);
 
-        TableColumn<CategoryRow, String> mppCol = new TableColumn<>("mpp %");
-        mppCol.setCellValueFactory(cd -> new SimpleStringProperty(cd.getValue().mppKnownPct() + "%"));
+        TableColumn<CategoryRow, Number> mppCol = new TableColumn<>("mpp %");
+        mppCol.setCellValueFactory(cd -> new SimpleIntegerProperty(cd.getValue().mppKnownPct()));
+        mppCol.setCellFactory(col -> percentCell());
         mppCol.setPrefWidth(80);
 
         table.getColumns().addAll(List.of(catCol, heCol, ihcCol, specialCol, otherCol,
@@ -195,6 +203,17 @@ public final class CoverageDashboard {
         col.setCellValueFactory(cd -> new SimpleIntegerProperty(cd.getValue().counts()[bucket.ordinal()]));
         col.setPrefWidth(75);
         return col;
+    }
+
+    /** Renders an integer cell value with a trailing "%" while leaving the sort key numeric. */
+    private static TableCell<CategoryRow, Number> percentCell() {
+        return new TableCell<>() {
+            @Override
+            protected void updateItem(Number value, boolean empty) {
+                super.updateItem(value, empty);
+                setText(empty || value == null ? "" : value.intValue() + "%");
+            }
+        };
     }
 
     /**

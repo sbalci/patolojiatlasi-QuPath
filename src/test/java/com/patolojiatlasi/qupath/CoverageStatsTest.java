@@ -41,6 +41,13 @@ class CoverageStatsTest {
         assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("synovial", ""));
         // an H&E token must not match a word merely containing "he"
         assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("heart", ""));
+        // "alk" (ALK IHC marker) must not match inside "stalk". Real catalog record: reponame
+        // "tubularadenoma", stainname "tubularadenoma-tubular-adenoma-with-stalk" — an H&E colon
+        // polyp that used to wrongly land in IHC because "alk" was a substring key matching
+        // inside "stalk".
+        assertEquals(StainBucket.OTHER, CoverageStats.stainBucket("tubular-adenoma-with-stalk", ""));
+        // the marker must still classify IHC as a whole token.
+        assertEquals(StainBucket.IHC, CoverageStats.stainBucket("ALK", ""));
     }
 
     @Test
