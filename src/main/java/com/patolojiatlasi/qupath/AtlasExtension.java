@@ -64,6 +64,12 @@ public class AtlasExtension implements QuPathExtension {
             Menu compareMenu = new Menu("Karşılaştır");
             compareMenu.getItems().addAll(compareItem, singleItem);
 
+            // Reference group — open an atlas case as a bench-side reference beside your own slide.
+            MenuItem refPickItem = new MenuItem("Referans slayt aç…");
+            refPickItem.setOnAction(e -> com.patolojiatlasi.qupath.ReferencePickerDialog.show(qupath));
+            Menu referenceMenu = new Menu("Referans");
+            referenceMenu.getItems().add(refPickItem);
+
             // Quiz group — self-study quiz: take / author.
             MenuItem quizTakeItem = new MenuItem("Çöz…");
             quizTakeItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizRunnerWindow.show(qupath));
@@ -75,7 +81,7 @@ public class AtlasExtension implements QuPathExtension {
             atlas.getItems().addAll(
                     browseItem,
                     new SeparatorMenuItem(),
-                    viewMenu, compareMenu, quizMenu);
+                    viewMenu, compareMenu, referenceMenu, quizMenu);
 
             qupath.getMenu("Extensions", true).getItems().add(atlas);
             logger.info("Patoloji Atlası extension installed");

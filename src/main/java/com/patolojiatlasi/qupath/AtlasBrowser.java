@@ -115,7 +115,9 @@ public class AtlasBrowser {
 
         MenuItem addToSelectionItem = new MenuItem("Add to selection");
         addToSelectionItem.setOnAction(e -> addToSelection());
-        tree.setContextMenu(new ContextMenu(addToSelectionItem));
+        MenuItem referenceItem = new MenuItem("Referans olarak yanında aç");
+        referenceItem.setOnAction(e -> openAsReference());
+        tree.setContextMenu(new ContextMenu(addToSelectionItem, referenceItem));
 
         // Preview pane
         thumbView.setFitWidth(220);
@@ -283,6 +285,16 @@ public class AtlasBrowser {
         else
             status.setText("Already in selection: " + c.getTitle());
         updateSelectionCount();
+    }
+
+    /** Context-menu action: open the selected case as a bench-side reference (see {@link BenchReference}). */
+    private void openAsReference() {
+        AtlasCase c = getSelectedCase();
+        if (c == null) {
+            status.setText("Select a case first");
+            return;
+        }
+        BenchReference.openBeside(qupath, c);
     }
 
     private void updateSelectionCount() {
