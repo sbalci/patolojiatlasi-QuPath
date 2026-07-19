@@ -30,7 +30,13 @@ public final class BenchReference {
 
     private static final Logger logger = LoggerFactory.getLogger(BenchReference.class);
 
-    /** Single floating control window, lazily built and rebound on every {@link #openBeside}. */
+    /**
+     * The single active reference session's control window, or {@code null} if no reference is
+     * currently open. Doubles as the "is a reference session active?" flag consulted at the top
+     * of {@link #openBeside}: non-null from the moment the reference viewer's control window is
+     * first shown until the session is torn down (either via "Referansı kapat" or the window
+     * being closed via the window manager), at which point it is set back to {@code null}.
+     */
     private static ReferenceControlWindow controlWindow;
 
     private BenchReference() {}
@@ -63,9 +69,16 @@ public final class BenchReference {
      * {@code addColumn} adds one new viewer per existing row — only the first of those is picked
      * up as {@code refViewer}, the rest are added to the grid but left unmanaged by this control
      * window. A pre-existing multi-<b>column</b>, single-row grid is unaffected (there is exactly
-     * one new viewer either way). Re-running {@link #openBeside} while a reference is already
-     * open similarly rebinds the single control window to the newest pair, leaving any earlier
-     * reference viewer open but no longer reachable from a "Referansı kapat" button.
+     * one new viewer either way).
+     * <p>
+     * Only <b>one reference session is allowed at a time</b>. If a reference is already open
+     * (the control window exists and hasn't been torn down), this method does <em>not</em>
+     * re-derive an anchor from {@code qupath.getViewer()} — once the user has clicked into the
+     * reference viewer, that call would return the reference itself rather than the user's own
+     * slide, which previously caused a wrong magnification-match anchor, a control-window rebind
+     * to the wrong pair, and the user's real slide becoming an orphaned, unreachable panel.
+     * Instead, the existing control window is brought to front with a hint and nothing else
+     * changes; the caller must close the current reference first.
      * <p>
      * Must be called on the JavaFX application thread (e.g. from a menu action or dialog); only
      * the DZI network build for the reference slide runs off-thread.
@@ -73,6 +86,14 @@ public final class BenchReference {
     public static void openBeside(QuPathGUI qupath, AtlasCase ref) {
         if (qupath == null || ref == null)
             return;
+
+        if (controlWindow != null) {
+            // A reference session is already active: refuse the second open rather than
+            // re-deriving the anchor from qupath.getViewer(), which may now be the reference
+            // viewer itself if the user clicked into it.
+            controlWindow.bringToFrontWithHint("Bir referans zaten açık — önce 'Referansı kapat' deyin.");
+            return;
+        }
 
         QuPathViewer active = qupath.getViewer();
         if (active == null) {
@@ -204,10 +225,13 @@ public final class BenchReference {
     }
 
     /**
-     * The small non-modal control window shown beside a just-opened reference viewer. A single
-     * instance is reused across calls (see {@link #controlWindow}): each {@link #bindAndShow}
-     * rebinds it to whichever (your, reference) viewer pair the latest {@link #openBeside} call
-     * produced, so re-opening a reference reuses the same window rather than stacking new ones.
+     * The small non-modal control window shown beside a just-opened reference viewer. Exactly one
+     * instance is live per reference session (see {@link #controlWindow}): a fresh instance is
+     * created only when no session is currently active, and it is discarded when the session is
+     * torn down. A second {@link #openBeside} call made while a session is active never reaches
+     * {@link #bindAndShow} — it is refused up front and routed to {@link #bringToFrontWithHint}
+     * on the existing instance instead, so this window is never rebound to a different viewer
+     * pair mid-session.
      */
     private static final class ReferenceControlWindow {
 
@@ -218,6 +242,15 @@ public final class BenchReference {
         private QuPathGUI qupath;
         private QuPathViewer yourViewer;
         private QuPathViewer refViewer;
+
+        /**
+         * Set once the session has been torn down (reference viewer closed, sync turned off,
+         * grid collapsed) via either {@link #closeReference()} (the "Referansı kapat" button) or
+         * {@code setOnHidden} (a window-manager close). Guards against running that teardown
+         * twice, since {@link #closeReference()} itself calls {@code stage.close()}, which also
+         * fires {@code setOnHidden}.
+         */
+        private boolean disposed;
 
         ReferenceControlWindow() {
             Button matchButton = new Button("Büyütmeyi eşle");
@@ -239,6 +272,23 @@ public final class BenchReference {
             stage.setResizable(false);
             stage.setScene(new Scene(root));
             stage.setOnHidden(e -> {
+                // If the window was closed via the window manager (X / Alt+F4) rather than the
+                // "Referansı kapat" button, closeReference() never ran — tear the session down
+                // here instead, so the reference viewer and grid don't linger orphaned. The
+                // `disposed` guard means this is a no-op when the button path already handled it
+                // (that path also ends in stage.close(), which fires this same handler).
+                if (!disposed) {
+                    if (qupath != null) {
+                        try {
+                            qupath.closeViewer(refViewer);
+                        } catch (Exception ignore) {
+                            // best-effort; the window is gone either way
+                        }
+                        qupath.getViewerManager().setSynchronizeViewers(false);
+                        qupath.getViewerManager().setGridSize(1, 1);
+                    }
+                    disposed = true;
+                }
                 if (controlWindow == this)
                     controlWindow = null;
             });
@@ -249,6 +299,7 @@ public final class BenchReference {
             this.qupath = qupath;
             this.yourViewer = yourViewer;
             this.refViewer = refViewer;
+            this.disposed = false;
             // Reflect whatever sync state QuPath is actually in (e.g. left on from an earlier
             // reference session) rather than defaulting the checkbox to unchecked and lying.
             syncCheck.setSelected(qupath.getViewerManager().getSynchronizeViewers());
@@ -258,10 +309,22 @@ public final class BenchReference {
         }
 
         /**
-         * Turns sync off, closes the reference viewer (prompting to save if it has unsaved
-         * changes), then closes this window — unless the user cancels the save prompt, in which
-         * case the reference viewer stays open and this window is left open too, so the user
-         * isn't stranded without a way to retry or resync.
+         * Brings this already-active control window to the front and shows a hint explaining why
+         * a second "open reference" request was refused. Touches no viewer state.
+         */
+        void bringToFrontWithHint(String hint) {
+            statusLabel.setText(hint);
+            stage.show();
+            stage.toFront();
+        }
+
+        /**
+         * Closes the reference viewer first (prompting to save if it has unsaved changes); only
+         * if that succeeds does it turn sync off, collapse the grid, mark the session disposed,
+         * and close this window. If the user cancels the save prompt, {@code closeViewer} returns
+         * {@code false} and this method returns immediately — the reference viewer stays open,
+         * sync is left exactly as it was, and this window stays open too, so nothing is lost and
+         * the user isn't stranded without a way to retry or resync.
          * <p>
          * {@link QuPathGUI#closeViewer} only clears the viewer's image data (it calls
          * {@code viewer.resetImageData()}) — it does not remove the now-empty panel from the
@@ -273,10 +336,14 @@ public final class BenchReference {
          */
         private void closeReference() {
             if (qupath != null) {
+                if (!qupath.closeViewer(refViewer)) {
+                    // User cancelled the save prompt: leave the reference viewer open, the sync
+                    // state untouched, and this window open so nothing is lost and they can
+                    // retry (or resync) once ready.
+                    return;
+                }
                 qupath.getViewerManager().setSynchronizeViewers(false);
                 syncCheck.setSelected(false);
-                if (!qupath.closeViewer(refViewer))
-                    return;
                 if (!qupath.getViewerManager().setGridSize(1, 1)) {
                     // Only refuses if other open (servered) viewers remain beyond this pair (e.g.
                     // a pre-existing multi-viewer grid) — QuPath shows its own notification in
@@ -285,6 +352,7 @@ public final class BenchReference {
                             + "after closing the reference viewer; leaving the grid as-is.");
                 }
             }
+            disposed = true;
             stage.close();
         }
     }
