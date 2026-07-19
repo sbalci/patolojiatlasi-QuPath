@@ -121,7 +121,9 @@ class AtlasCitationTest {
     void methodsParagraphHasCountsVersionAndDois() {
         String m = AtlasCitation.methodsParagraph(List.of(CASE, CASE), CTX);
         assertTrue(m.contains("2 whole-slide images"));
-        assertTrue(m.contains("1 cases"));                   // same reponame -> 1 distinct case
+        assertFalse(m.contains("2 whole-slide image "));    // images side genuinely pluralizes on 2 (not "image ")
+        assertTrue(m.contains("1 case)"));                   // same reponame -> 1 distinct case, singular noun
+        assertFalse(m.contains("1 cases"));                  // must not read "1 cases" (this is what old code emitted)
         assertTrue(m.contains("v0.1.0"));
         assertTrue(m.contains("2026-07-19"));
         assertTrue(m.contains(ATLAS_DOI));

@@ -58,7 +58,10 @@ public final class FigureCitationDialog {
 
         AtlasCase c = AtlasExtension.resolveOpenCase(qupath);
         if (c == null) {
-            new Alert(Alert.AlertType.INFORMATION, "Açık slayt atlas kataloğunda bulunamadı.").showAndWait();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Açık slayt atlas kataloğunda bulunamadı.");
+            if (qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
             return;
         }
 
@@ -68,7 +71,10 @@ public final class FigureCitationDialog {
         PathObject selected = hierarchy == null ? null : hierarchy.getSelectionModel().getSelectedObject();
         ROI roi = selected == null ? null : selected.getROI();
         if (roi == null) {
-            new Alert(Alert.AlertType.INFORMATION, "Önce slayt üzerinde bir bölge (anotasyon) seçin.").showAndWait();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Önce slayt üzerinde bir bölge (anotasyon) seçin.");
+            if (qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
             return;
         }
 

@@ -133,7 +133,10 @@ public final class ProvenanceService {
             Files.writeString(file.toPath(), content == null ? "" : content, StandardCharsets.UTF_8);
         } catch (IOException e) {
             logger.error("Failed to save {}: {}", file, e.getMessage(), e);
-            new Alert(Alert.AlertType.ERROR, "Dosya kaydedilemedi:\n" + e.getMessage()).showAndWait();
+            Alert alert = new Alert(Alert.AlertType.ERROR, "Dosya kaydedilemedi:\n" + e.getMessage());
+            if (owner != null)
+                alert.initOwner(owner);
+            alert.showAndWait();
         }
     }
 

@@ -80,7 +80,11 @@ public class AtlasExtension implements QuPathExtension {
             citeOpenItem.setOnAction(e -> {
                 AtlasCase open = resolveOpenCase(qupath);
                 if (open == null) {
-                    new Alert(Alert.AlertType.INFORMATION, "Açık slayt atlas kataloğunda bulunamadı.").showAndWait();
+                    Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                            "Açık slayt atlas kataloğunda bulunamadı.");
+                    if (qupath.getStage() != null)
+                        alert.initOwner(qupath.getStage());
+                    alert.showAndWait();
                     return;
                 }
                 CitationDialog.show(qupath, open);

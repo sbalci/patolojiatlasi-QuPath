@@ -195,7 +195,8 @@ public final class AtlasCitation {
     public static String methodsParagraph(List<AtlasCase> cases, CitationContext ctx) {
         long ncases = cases.stream().map(AtlasCase::getReponame).distinct().count();
         StringBuilder sb = new StringBuilder()
-                .append(cases.size()).append(" whole-slide images (").append(ncases).append(" cases) from the ")
+                .append(cases.size()).append(" whole-slide ").append(plural(cases.size(), "image"))
+                .append(" (").append(ncases).append(" ").append(plural(ncases, "case")).append(") from the ")
                 .append("Patoloji Atlası (Balcı S, https://doi.org/").append(ATLAS_DOI)
                 .append(") were reviewed in QuPath (Bankhead et al. 2017, https://doi.org/").append(QUPATH_DOI)
                 .append(") via the qupath-extension-atlas");
@@ -210,7 +211,7 @@ public final class AtlasCitation {
     public static String figureCitationCard(AtlasCase c, CitationContext ctx, Viewport vp,
                                             String captionStub, String roiGeoJson) {
         StringBuilder sb = new StringBuilder(slideText(c, ctx)).append("\n");
-        sb.append(String.format(Locale.US, "Region: center (%.0f, %.0f) px, downsample %.2f.%n",
+        sb.append(String.format(Locale.US, "Region: center (%.0f, %.0f) px, downsample %.2f.\n",
                 vp.centerX(), vp.centerY(), vp.downsample()));
         if (has(captionStub))
             sb.append("Caption: ").append(captionStub).append("\n");
@@ -221,6 +222,8 @@ public final class AtlasCitation {
 
     // --- helpers ----------------------------------------------------------------------------------
     private static boolean has(String s) { return s != null && !s.isBlank(); }
+    /** {@code n == 1 ? noun : noun + "s"} — both nouns used here ("image", "case") pluralize with a plain "s". */
+    private static String plural(long n, String noun) { return n == 1 ? noun : noun + "s"; }
     /**
      * {@link AtlasCase#getTitle()} already appends {@code " (image)"} when the stain isn't implied by
      * the title (non-H&amp;E stains). Templates here re-add that suffix explicitly, so this strips a

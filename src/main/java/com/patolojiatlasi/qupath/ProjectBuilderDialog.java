@@ -169,7 +169,9 @@ public class ProjectBuilderDialog {
     private void exportManifest() {
         List<AtlasCase> cases = new ArrayList<>(items);
         if (cases.isEmpty()) {
-            new Alert(Alert.AlertType.INFORMATION, "Dışa aktarılacak görüntü seçilmedi.").showAndWait();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Dışa aktarılacak görüntü seçilmedi.");
+            alert.initOwner(stage);
+            alert.showAndWait();
             return;
         }
         DirectoryChooser dc = new DirectoryChooser();
@@ -183,16 +185,27 @@ public class ProjectBuilderDialog {
             try {
                 AtlasCitation.CitationContext ctx = ProvenanceService.resolveContext();
                 ProvenanceService.saveManifest(dir, cases, ctx);
+                // The dialog may have been closed while this background export was running -- only
+                // re-enable the button / pop the confirmation if it's still on screen. The file
+                // write above already completed regardless of the dialog's state.
                 Platform.runLater(() -> {
+                    if (!stage.isShowing())
+                        return;
                     manifestBtn.setDisable(false);
-                    new Alert(Alert.AlertType.INFORMATION,
-                            "Künye kaydedildi: " + dir.getAbsolutePath()).showAndWait();
+                    Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                            "Künye kaydedildi: " + dir.getAbsolutePath());
+                    alert.initOwner(stage);
+                    alert.showAndWait();
                 });
             } catch (java.io.IOException ex) {
                 logger.error("Manifest export failed: {}", ex.getMessage(), ex);
                 Platform.runLater(() -> {
+                    if (!stage.isShowing())
+                        return;
                     manifestBtn.setDisable(false);
-                    new Alert(Alert.AlertType.ERROR, "Künye kaydedilemedi:\n" + ex.getMessage()).showAndWait();
+                    Alert alert = new Alert(Alert.AlertType.ERROR, "Künye kaydedilemedi:\n" + ex.getMessage());
+                    alert.initOwner(stage);
+                    alert.showAndWait();
                 });
             }
         }, "atlas-manifest-export");
