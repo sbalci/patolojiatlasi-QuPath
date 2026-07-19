@@ -23,12 +23,14 @@ QuPath installs (and later updates) the extension for you.
 ### Method A — add the catalog to QuPath (recommended)
 
 1. In QuPath: **Extensions → Manage extension catalogs → Add**.
-2. Paste this **catalog URL** and give it any name (e.g. `Patoloji Atlası`):
+2. Paste this **repository URL** and give the catalog any name (e.g. `Patoloji Atlası`):
 
    ```
-   https://raw.githubusercontent.com/sbalci/patolojiatlasi-QuPath/master/catalog.json
+   https://github.com/sbalci/patolojiatlasi-QuPath
    ```
 
+   QuPath finds the catalog in the repository for you. *(If a QuPath version rejects the repo URL,
+   use the direct link `https://raw.githubusercontent.com/sbalci/patolojiatlasi-QuPath/master/catalog.json` instead.)*
 3. Open **Extensions → Manage extensions**, find **QuPath Patoloji Atlası extension**, and click
    **Install**. QuPath downloads the matching release JAR automatically.
 4. **Restart QuPath.** The extension appears under **Extensions → Patoloji Atlası**
