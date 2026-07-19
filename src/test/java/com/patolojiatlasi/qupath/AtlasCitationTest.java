@@ -14,6 +14,11 @@ import com.patolojiatlasi.qupath.AtlasCitation.Viewport;
 
 class AtlasCitationTest {
 
+    // DOIs from the two upstream CITATION.cff files + QuPath.
+    private static final String ATLAS_DOI = "10.5281/zenodo.6382734";
+    private static final String EXT_DOI = "10.5281/zenodo.21443833";
+    private static final String QUPATH_DOI = "10.1038/s41598-017-17204-5";
+
     private static AtlasCase c(String repo, String stain, String title, String organ, String dziUrl, double mpp) {
         return new AtlasCase(repo, stain, stain, title, "", organ, "GI", "published", dziUrl, "", mpp);
     }
@@ -26,39 +31,70 @@ class AtlasCitationTest {
             new CitationContext(LocalDate.of(2026, 7, 19), "0.1.0", null);
 
     @Test
-    void bibtexHasKeyTitleUrlNote() {
+    void bibtexHasImageExtensionAndQupathEntries() {
         String b = AtlasCitation.bibtex(CASE, CTX);
-        assertTrue(b.startsWith("@misc{atlas_celiac_he,"), b);
-        assertTrue(b.contains("Celiac disease (HE)"));
-        assertTrue(b.contains("https://images.x/celiac/HE.html"));   // viewer URL (.dzi -> .html)
+        assertTrue(b.contains("@misc{atlas_celiac_he,"), b);
+        assertTrue(b.contains("@software{qupath_extension_atlas,"));
+        assertTrue(b.contains("@article{bankhead2017qupath,"));
+        assertTrue(b.contains("Patoloji Atlası — Celiac disease (HE)"));
+        assertTrue(b.contains("Balcı, Serdar"));
+        assertTrue(b.contains(ATLAS_DOI));
+        assertTrue(b.contains(EXT_DOI));
+        assertTrue(b.contains(QUPATH_DOI));
+        assertTrue(b.contains("https://images.x/celiac/HE.html"));   // slide viewer URL (.dzi->.html)
         assertTrue(b.contains("Accessed 2026-07-19"));
         assertTrue(b.contains("catalog abc1234"));
-        assertTrue(b.contains("v0.1.0"));
-        assertTrue(b.trim().endsWith("}"));
+        assertTrue(b.contains("version = {0.1.0}"));
     }
 
     @Test
-    void risHasRequiredTags() {
+    void extensionBibtexOmitsVersionWhenUnknown() {
+        String withV = AtlasCitation.extensionBibtex(CTX);
+        assertTrue(withV.contains("version = {0.1.0}"));
+        String noV = AtlasCitation.extensionBibtex(new CitationContext(LocalDate.of(2026, 7, 19), null, null));
+        assertFalse(noV.contains("version ="));
+        assertTrue(noV.contains(EXT_DOI));
+    }
+
+    @Test
+    void risHasThreeRecordsWithDois() {
         String r = AtlasCitation.ris(CASE, CTX);
-        assertTrue(r.contains("TY  - ELEC"));
-        assertTrue(r.contains("TI  - Celiac disease (HE)"));
+        assertTrue(r.contains("TY  - ELEC"));   // image
+        assertTrue(r.contains("TY  - COMP"));   // extension
+        assertTrue(r.contains("TY  - JOUR"));   // QuPath
+        assertTrue(r.contains("DO  - " + ATLAS_DOI));
+        assertTrue(r.contains("DO  - " + EXT_DOI));
+        assertTrue(r.contains("DO  - " + QUPATH_DOI));
         assertTrue(r.contains("UR  - https://images.x/celiac/HE.html"));
         assertTrue(r.trim().endsWith("ER  -"));
     }
 
     @Test
-    void plainTextHasTitleUrlAccessed() {
+    void plainTextHasImageSoftwarePlatformLines() {
         String p = AtlasCitation.plainText(CASE, CTX);
-        assertTrue(p.contains("Celiac disease (HE)"));
-        assertTrue(p.contains("Gastrointestinal"));
-        assertTrue(p.contains("https://images.x/celiac/HE.html"));
+        assertTrue(p.contains("Image: "));
+        assertTrue(p.contains("Software: "));
+        assertTrue(p.contains("Platform: "));
+        assertTrue(p.contains("Patoloji Atlası — Celiac disease (HE)"));
+        assertTrue(p.contains("https://doi.org/" + ATLAS_DOI));
+        assertTrue(p.contains("https://doi.org/" + EXT_DOI));
+        assertTrue(p.contains("https://doi.org/" + QUPATH_DOI));
         assertTrue(p.contains("accessed 2026-07-19"));
     }
 
     @Test
-    void nullShaOmitsProvenanceLine() {
-        assertFalse(AtlasCitation.bibtex(CASE, CTX_NOSHA).contains("catalog "));
-        assertFalse(AtlasCitation.plainText(CASE, CTX_NOSHA).contains("catalog "));
+    void slideTextIsJustTheImageCitation() {
+        String s = AtlasCitation.slideText(CASE, CTX);
+        assertTrue(s.startsWith("Balcı S. Patoloji Atlası — Celiac disease (HE)."));
+        assertTrue(s.contains("https://doi.org/" + ATLAS_DOI));
+        assertTrue(s.contains("https://images.x/celiac/HE.html"));
+        assertFalse(s.contains(EXT_DOI), "the image line alone must not carry the extension DOI");
+    }
+
+    @Test
+    void nullShaOmitsCatalogLine() {
+        assertFalse(AtlasCitation.slideBibtex(CASE, CTX_NOSHA).contains("catalog "));
+        assertFalse(AtlasCitation.slideText(CASE, CTX_NOSHA).contains("catalog "));
     }
 
     @Test
@@ -73,27 +109,32 @@ class AtlasCitationTest {
     }
 
     @Test
-    void manifestMarkdownIsATable() {
+    void manifestMarkdownIsATableWithAtlasDoi() {
         String md = AtlasCitation.manifestMarkdown(List.of(CASE), CTX);
         assertTrue(md.contains("| title | stain |"));
         assertTrue(md.contains("| --- |"));
         assertTrue(md.contains("| Celiac disease |"));
+        assertTrue(md.contains(ATLAS_DOI));
     }
 
     @Test
-    void methodsParagraphHasCountsAndVersion() {
+    void methodsParagraphHasCountsVersionAndDois() {
         String m = AtlasCitation.methodsParagraph(List.of(CASE, CASE), CTX);
         assertTrue(m.contains("2 whole-slide images"));
-        assertTrue(m.contains("1 cases"));                   // same reponame → 1 distinct case
+        assertTrue(m.contains("1 cases"));                   // same reponame -> 1 distinct case
         assertTrue(m.contains("v0.1.0"));
         assertTrue(m.contains("2026-07-19"));
+        assertTrue(m.contains(ATLAS_DOI));
+        assertTrue(m.contains(EXT_DOI));
+        assertTrue(m.contains(QUPATH_DOI));
     }
 
     @Test
-    void figureCardHasCitationViewportAndGeoJson() {
+    void figureCardHasImageCitationViewportAndGeoJson() {
         String card = AtlasCitation.figureCitationCard(
                 CASE, CTX, new Viewport(4.0, 1000, 2000), "Villous atrophy", "{\"type\":\"Feature\"}");
-        assertTrue(card.contains("Celiac disease (HE)"));
+        assertTrue(card.contains("Patoloji Atlası — Celiac disease (HE)"));
+        assertTrue(card.contains("https://doi.org/" + ATLAS_DOI));
         assertTrue(card.contains("center (1000, 2000)"));
         assertTrue(card.contains("downsample 4.00"));
         assertTrue(card.contains("Villous atrophy"));

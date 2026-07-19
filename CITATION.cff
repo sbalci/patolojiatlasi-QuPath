@@ -12,7 +12,7 @@ type: software
 authors:
   - family-names: "Balcı"
     given-names: "Serdar"
-    email: "drserdarbalci@gmail.com"
+    email: "serdarbalci@serdarbalci.com"
     affiliation: "Memorial Pathology, Istanbul, Turkey"
     orcid: "https://orcid.org/0000-0002-7852-3851"
 license: MIT
