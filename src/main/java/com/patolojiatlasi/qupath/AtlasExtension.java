@@ -1,5 +1,8 @@
 package com.patolojiatlasi.qupath;
 
+import java.awt.image.BufferedImage;
+
+import javafx.scene.control.Alert;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
@@ -12,6 +15,8 @@ import com.patolojiatlasi.qupath.focus.FocusHeatmap;
 import qupath.lib.common.Version;
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.extensions.QuPathExtension;
+import qupath.lib.gui.viewer.QuPathViewer;
+import qupath.lib.images.ImageData;
 
 /**
  * QuPath extension that adds a browsable catalogue of whole-slide images from
@@ -70,6 +75,19 @@ public class AtlasExtension implements QuPathExtension {
             Menu referenceMenu = new Menu("Referans");
             referenceMenu.getItems().add(refPickItem);
 
+            // Citation group — cite the slide currently open in the active viewer.
+            MenuItem citeOpenItem = new MenuItem("Açık slaytı alıntıla…");
+            citeOpenItem.setOnAction(e -> {
+                AtlasCase open = resolveOpenCase(qupath);
+                if (open == null) {
+                    new Alert(Alert.AlertType.INFORMATION, "Açık slayt atlas kataloğunda bulunamadı.").showAndWait();
+                    return;
+                }
+                CitationDialog.show(qupath, open);
+            });
+            Menu citationMenu = new Menu("Atıf");
+            citationMenu.getItems().add(citeOpenItem);
+
             // Quiz group — self-study quiz: take / author.
             MenuItem quizTakeItem = new MenuItem("Çöz…");
             quizTakeItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizRunnerWindow.show(qupath));
@@ -81,12 +99,42 @@ public class AtlasExtension implements QuPathExtension {
             atlas.getItems().addAll(
                     browseItem,
                     new SeparatorMenuItem(),
-                    viewMenu, compareMenu, referenceMenu, quizMenu);
+                    viewMenu, compareMenu, referenceMenu, citationMenu, quizMenu);
 
             qupath.getMenu("Extensions", true).getItems().add(atlas);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Resolves the atlas case shown in {@code qupath}'s active viewer, matched by DZI URL
+     * (ignoring any {@code ?mpp=} query) against the bundled catalogue — the same matching
+     * approach {@link CaseCompare#siblingStains} uses for its own active-viewer lookup. Returns
+     * {@code null} if there's no active viewer/image, or the shown slide isn't a cataloged atlas
+     * slide.
+     */
+    private static AtlasCase resolveOpenCase(QuPathGUI qupath) {
+        if (qupath == null)
+            return null;
+        try {
+            QuPathViewer viewer = qupath.getViewer();
+            ImageData<BufferedImage> data = viewer == null ? null : viewer.getImageData();
+            if (data == null || data.getServer() == null)
+                return null;
+            var uris = data.getServer().getURIs();
+            if (uris == null || uris.isEmpty())
+                return null;
+            String openBase = CaseCompare.stripQuery(uris.iterator().next().toString());
+            for (AtlasCase c : AtlasCatalog.loadBundled()) {
+                if (CaseCompare.stripQuery(c.getDziUrl()).equals(openBase))
+                    return c;
+            }
+            return null;
+        } catch (Exception e) {
+            logger.debug("Could not resolve open atlas case: {}", e.getMessage());
+            return null;
         }
     }
 }

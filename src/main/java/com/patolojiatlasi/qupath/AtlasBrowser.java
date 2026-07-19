@@ -117,7 +117,9 @@ public class AtlasBrowser {
         addToSelectionItem.setOnAction(e -> addToSelection());
         MenuItem referenceItem = new MenuItem("Referans olarak yanında aç");
         referenceItem.setOnAction(e -> openAsReference());
-        tree.setContextMenu(new ContextMenu(addToSelectionItem, referenceItem));
+        MenuItem citeItem = new MenuItem("Bu slaytı alıntıla…");
+        citeItem.setOnAction(e -> citeSelected());
+        tree.setContextMenu(new ContextMenu(addToSelectionItem, referenceItem, citeItem));
 
         // Preview pane
         thumbView.setFitWidth(220);
@@ -295,6 +297,16 @@ public class AtlasBrowser {
             return;
         }
         BenchReference.openBeside(qupath, c);
+    }
+
+    /** Context-menu action: cite the selected case (see {@link CitationDialog}). */
+    private void citeSelected() {
+        AtlasCase c = getSelectedCase();
+        if (c == null) {
+            status.setText("Select a case first");
+            return;
+        }
+        CitationDialog.show(qupath, c);
     }
 
     private void updateSelectionCount() {
