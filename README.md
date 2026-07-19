@@ -227,6 +227,8 @@ connection is needed for the first build.
 | Browser window | `AtlasBrowser.java` |
 | Bench-side reference (second viewer + magnification match + control window) | `BenchReference.java` |
 | Reference picker dialog | `ReferencePickerDialog.java` |
+| Coverage & QC matrix (pure) + best-effort DZI link check | `CoverageStats.java`, `LinkCheck.java` |
+| Coverage & QC dashboard | `CoverageDashboard.java` |
 | Menu entry point | `AtlasExtension.java` |
 
 **Catalogue source.** The atlas maintains `lists/list.yaml`, one record per stain, with fields
@@ -313,6 +315,30 @@ Each saved map is a `<slide>__<user>__<timestamp>.json` (plus a `.png` preview).
 slide name/URI, the user (OS login), image and grid dimensions, sample count, and the row-major
 `grid` of dwell values — enough to aggregate focus across readers offline. The plan for pooling
 contributions into a website overlay is in [docs/focus-aggregation-plan.md](docs/focus-aggregation-plan.md).
+
+---
+
+## Coverage & QC dashboard
+
+**Extensions → Patoloji Atlası → Katalog kapsamı ve QC…** opens a read-only **category x stain**
+matrix computed from the bundled catalogue snapshot — for every category, how many slides and
+distinct cases fall into each of the four stain buckets (H&E / IHC / special stain / other), plus
+per-category **published%** and **mpp-known%** (pixel-size calibration coverage). A bold TOTAL
+strip under the table sums the whole catalogue.
+
+- **Bağlantıları denetle** — an opt-in, best-effort reachability check of every distinct DZI URL in
+  the catalogue (a `HEAD` request per URL, run off the UI thread with a progress bar). Any
+  unreachable slide is listed by title and URL underneath — nothing is checked automatically, since
+  this makes a batch of network calls.
+- **Drill down.** Double-click a category row to seed the project builder (the same dialog the
+  browser's selection basket uses) with every case in that category, ready to review and turn into
+  a project.
+- **Export.** Copy or save the matrix as **CSV** or **Markdown** — handy for pasting a
+  data-availability statement or tracking catalogue gaps over time.
+
+The classification (which stain bucket a slide falls into) is keyword-based, so the **Diğer**
+("other") / **Uncategorized** buckets are honest catch-alls rather than a guarantee of correctness
+— see `stainBucket()`/`normalizeCategory()` if you need to extend the keyword lists.
 
 ---
 

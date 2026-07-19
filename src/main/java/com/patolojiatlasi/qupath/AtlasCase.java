@@ -54,6 +54,10 @@ public class AtlasCase {
         return image;
     }
 
+    public String getStainname() {
+        return stainname;
+    }
+
     public String getOrganEN() {
         return organEN;
     }
