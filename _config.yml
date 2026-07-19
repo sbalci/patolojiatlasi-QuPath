@@ -1,0 +1,7 @@
+title: QuPath Patoloji Atlası
+description: >-
+  Browse and open the whole-slide images from patolojiatlasi.com directly inside
+  QuPath — streamed tile-by-tile as Deep Zoom (DZI), nothing to download.
+theme: jekyll-theme-cayman
+show_downloads: false
+lang: en
