@@ -16,8 +16,8 @@
 |---|---------|------|--------|
 | 1 | **Bench-Side Atlas Reference** | S | ✅ shipped (merged to master) |
 | 2 | **Research Provenance & Citation Suite** | M | ✅ shipped (merged f65bb7e, unpushed) |
-| 3 | **Catalogue Coverage & QC Dashboard** | M | ⏭ next |
-| 4 | **Related-Content Navigator** | S | queued |
+| 3 | **Catalogue Coverage & QC Dashboard** | M | ✅ shipped (merged to master, unpushed) |
+| 4 | **Related-Content Navigator** | S | ⏭ next |
 | 5 | **Portable Collections / Bookmarks-History** | S | queued |
 | 6 | **Guided Teaching Tour** | M | queued |
 | 7 | **Manual Stain-Alignment Curtain/Overlay** | M | queued |
