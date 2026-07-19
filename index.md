@@ -5,6 +5,7 @@ title: QuPath Patoloji Atlası extension
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/sbalci/patolojiatlasi-QuPath/blob/master/LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/sbalci/patolojiatlasi-QuPath)](https://github.com/sbalci/patolojiatlasi-QuPath/releases/latest)
 [![Build](https://github.com/sbalci/patolojiatlasi-QuPath/actions/workflows/build.yml/badge.svg)](https://github.com/sbalci/patolojiatlasi-QuPath/actions/workflows/build.yml)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21443834.svg)](https://doi.org/10.5281/zenodo.21443834)
 
 Browse the whole-slide images published on **[patolojiatlasi.com](https://www.patolojiatlasi.com/)**
 from inside **QuPath** and open any of them directly — the slides are streamed tile-by-tile over
@@ -88,7 +89,10 @@ pathologists. This extension brings that collection into QuPath for study and an
 
 If you use this software, please cite it using the metadata in
 [`CITATION.cff`](https://github.com/sbalci/patolojiatlasi-QuPath/blob/master/CITATION.cff)
-(GitHub renders a *"Cite this repository"* button from it).
+(GitHub renders a *"Cite this repository"* button from it). The release is archived on Zenodo:
+
+- **This version (v0.1.0):** [10.5281/zenodo.21443834](https://doi.org/10.5281/zenodo.21443834)
+- **All versions (latest):** [10.5281/zenodo.21443833](https://doi.org/10.5281/zenodo.21443833)
 
 Built on **QuPath** (Bankhead et al., *Sci Rep* 2017, [doi:10.1038/s41598-017-17204-5](https://doi.org/10.1038/s41598-017-17204-5)).
 
