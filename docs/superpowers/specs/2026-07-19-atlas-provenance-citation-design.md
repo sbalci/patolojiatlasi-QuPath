@@ -21,6 +21,16 @@ save-to-file** (no writable backend).
 
 ## 3. Pure core — `AtlasCitation` (no UI/network; unit-tested)
 
+> **Revised 2026-07-19 (user request):** citations honour the two upstream `CITATION.cff` files.
+> A slide citation reflects the atlas IMAGE dataset's CFF (`Balcı, Serdar`; title "Patoloji Atlası —
+> <slide> (<stain>)"; DOI `10.5281/zenodo.6382734`; the slide's viewer URL). Every
+> `bibtex`/`ris`/`plainText` ALSO emits the EXTENSION citation (DOI `10.5281/zenodo.21443833`,
+> version) and the QuPath platform citation (Bankhead 2017, DOI `10.1038/s41598-017-17204-5`) — the
+> extension's own CFF requires citing QuPath. The manifest markdown + methods paragraph carry the
+> DOIs. `slideText(...)` exposes the image-only line for the figure card. The DOIs/authors are kept
+> as constants mirroring the two CFF files. (Method signatures below are unchanged; the string
+> content is richer.)
+
 `record CitationContext(java.time.LocalDate accessDate, String extensionVersion, String catalogCommitSha)`
 (`catalogCommitSha` may be null/blank → that provenance line is omitted).
 
