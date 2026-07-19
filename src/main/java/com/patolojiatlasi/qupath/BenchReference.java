@@ -39,6 +39,18 @@ public final class BenchReference {
      */
     private static ReferenceControlWindow controlWindow;
 
+    /**
+     * True from the moment {@link #openBeside} commits to opening a second viewer (set
+     * immediately before {@code addColumn}) until that open either succeeds ({@link #controlWindow}
+     * gets set / shown) or fails (the empty second viewer is removed, or the open-failure handler
+     * runs). Guards the async gap — the background DZI load hasn't finished, so {@link
+     * #controlWindow} is still {@code null} — during which a second {@link #openBeside} call would
+     * otherwise slip past the {@code controlWindow} refuse-guard and add a leaked second column.
+     * Never set by the degenerate empty-active-viewer branch (that open is effectively synchronous
+     * and reuses the single existing viewer, so two rapid calls there are benign).
+     */
+    private static boolean opening;
+
     private BenchReference() {}
 
     /**
@@ -87,11 +99,18 @@ public final class BenchReference {
         if (qupath == null || ref == null)
             return;
 
-        if (controlWindow != null) {
-            // A reference session is already active: refuse the second open rather than
-            // re-deriving the anchor from qupath.getViewer(), which may now be the reference
-            // viewer itself if the user clicked into it.
-            controlWindow.bringToFrontWithHint("Bir referans zaten açık — önce 'Referansı kapat' deyin.");
+        if (controlWindow != null || opening) {
+            if (controlWindow != null) {
+                // A reference session is already active: refuse the second open rather than
+                // re-deriving the anchor from qupath.getViewer(), which may now be the reference
+                // viewer itself if the user clicked into it.
+                controlWindow.bringToFrontWithHint("Bir referans zaten açık — önce 'Referansı kapat' deyin.");
+            } else {
+                // A reference session is being opened but the background DZI load hasn't
+                // finished yet, so controlWindow is still null — refuse anyway rather than
+                // letting a second addColumn slip through and leak a column.
+                infoAlert("Referans yükleniyor, lütfen bekleyin.");
+            }
             return;
         }
 
@@ -109,6 +128,7 @@ public final class BenchReference {
         }
 
         Set<QuPathViewer> before = new HashSet<>(qupath.getViewerManager().getAllViewers());
+        opening = true;
         qupath.getViewerManager().addColumn(active);
         QuPathViewer refViewer = null;
         for (QuPathViewer v : qupath.getViewerManager().getAllViewers()) {
@@ -119,12 +139,14 @@ public final class BenchReference {
         }
         if (refViewer == null) {
             // addColumn refused (or the manager didn't grow) — nothing to open into.
+            opening = false;
             infoAlert("İkinci bir görüntüleyici açılamadı.");
             return;
         }
 
         QuPathViewer rv = refViewer;
         Runnable removeEmptyViewer = () -> {
+            opening = false;
             try {
                 qupath.closeViewer(rv);
             } catch (Exception ignore) {
@@ -215,6 +237,10 @@ public final class BenchReference {
     /** Shows (or rebinds + refocuses) the single floating "Referans" control window. FX thread. */
     private static void showControlWindow(QuPathGUI qupath, QuPathViewer yourViewer, QuPathViewer refViewer,
             String initialStatus) {
+        // The reference load that set `opening = true` has now succeeded — clear it right where
+        // controlWindow gets set / the control window is shown, so a subsequent openBeside is
+        // refused via controlWindow (not opening) from here on.
+        opening = false;
         if (controlWindow == null)
             controlWindow = new ReferenceControlWindow();
         controlWindow.bindAndShow(qupath, yourViewer, refViewer, initialStatus);
@@ -246,9 +272,12 @@ public final class BenchReference {
         /**
          * Set once the session has been torn down (reference viewer closed, sync turned off,
          * grid collapsed) via either {@link #closeReference()} (the "Referansı kapat" button) or
-         * {@code setOnHidden} (a window-manager close). Guards against running that teardown
-         * twice, since {@link #closeReference()} itself calls {@code stage.close()}, which also
-         * fires {@code setOnHidden}.
+         * {@code setOnCloseRequest} (a window-manager close). Guards against running that
+         * teardown twice: {@link #closeReference()} itself calls {@code stage.close()}, which
+         * fires {@code setOnHidden} (not {@code setOnCloseRequest}) — and {@code setOnHidden}
+         * only clears the {@link BenchReference#controlWindow} session flag, so it never re-runs
+         * viewer teardown regardless of which path set {@code disposed}. Also guards
+         * {@code setOnCloseRequest} itself against re-entry if it somehow fired twice.
          */
         private boolean disposed;
 
@@ -271,24 +300,37 @@ public final class BenchReference {
             stage.setTitle("Referans");
             stage.setResizable(false);
             stage.setScene(new Scene(root));
-            stage.setOnHidden(e -> {
-                // If the window was closed via the window manager (X / Alt+F4) rather than the
+            stage.setOnCloseRequest(e -> {
+                // If the window is closed via the window manager (X / Alt+F4) rather than the
                 // "Referansı kapat" button, closeReference() never ran — tear the session down
-                // here instead, so the reference viewer and grid don't linger orphaned. The
-                // `disposed` guard means this is a no-op when the button path already handled it
-                // (that path also ends in stage.close(), which fires this same handler).
-                if (!disposed) {
-                    if (qupath != null) {
-                        try {
-                            qupath.closeViewer(refViewer);
-                        } catch (Exception ignore) {
-                            // best-effort; the window is gone either way
-                        }
-                        qupath.getViewerManager().setSynchronizeViewers(false);
-                        qupath.getViewerManager().setGridSize(1, 1);
-                    }
-                    disposed = true;
+                // here instead, so the reference viewer and grid don't linger orphaned.
+                // setOnCloseRequest (unlike setOnHidden) fires BEFORE the stage is hidden, so
+                // consuming the event here can veto the close — required because closeViewer
+                // may prompt to save unsaved annotations, and a cancelled prompt must leave the
+                // reference viewer open and the session intact rather than clearing controlWindow
+                // out from under a viewer that never actually closed.
+                if (disposed)
+                    return;
+                if (qupath != null && !qupath.closeViewer(refViewer)) {
+                    // User cancelled the save prompt: veto the close entirely — same contract as
+                    // the button path in closeReference().
+                    e.consume();
+                    return;
                 }
+                if (qupath != null) {
+                    qupath.getViewerManager().setSynchronizeViewers(false);
+                    syncCheck.setSelected(false);
+                    qupath.getViewerManager().setGridSize(1, 1);
+                }
+                disposed = true;
+                // Not consumed: the close proceeds, hiding the stage and firing setOnHidden next.
+            });
+            stage.setOnHidden(e -> {
+                // By the time this fires, either setOnCloseRequest already ran the teardown above
+                // (X close) or closeReference() already ran it (button close, via stage.close(),
+                // which fires this handler but NOT setOnCloseRequest). Either way the reference
+                // viewer is already closed and torn down — this only needs to clear the session
+                // flag, and does so idempotently for both paths.
                 if (controlWindow == this)
                     controlWindow = null;
             });
