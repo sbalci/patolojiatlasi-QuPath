@@ -136,27 +136,45 @@ window appears alongside it with:
 
 ## Install
 
-### Method A — QuPath extension manager (recommended, no manual download)
+Two ways to install, both needing only **QuPath 0.6 or newer**. **Method A is recommended** — you
+add the catalog once and QuPath installs the extension and offers future updates for you. Method B
+is a one-time manual download if you'd rather not add a catalog.
 
-QuPath 0.6+ can install and update this extension from its catalog:
+### Method A — add the catalog to QuPath (recommended)
 
-1. **Extensions → Manage extension catalogs → Add**
-2. Paste this catalog URL:
-   ```
-   https://raw.githubusercontent.com/sbalci/patolojiatlasi-QuPath/master/catalog.json
-   ```
-3. Open **Extensions → Manage extensions**, find **QuPath Patoloji Atlası extension**, and click
-   **Install**. QuPath downloads the latest release JAR for you.
-4. Restart QuPath, then open **Extensions → Patoloji Atlası → Slaytlara gözat…**.
+You add the catalog **once**; afterwards QuPath installs and updates the extension from it.
 
-### Method B — manual (drag-and-drop)
+1. In QuPath, open **Extensions → Manage extension catalogs**.
+2. Click **Add** and fill in the dialog:
+   - **URL** — paste this exact address:
+     ```
+     https://raw.githubusercontent.com/sbalci/patolojiatlasi-QuPath/master/catalog.json
+     ```
+   - **Name** — anything you like, e.g. `Patoloji Atlası`.
+   - Confirm/OK.
+3. Open **Extensions → Manage extensions**. Under the catalog you just added you'll see
+   **QuPath Patoloji Atlası extension** — click **Install**. QuPath downloads the matching
+   release JAR for you (no manual file handling).
+4. When prompted, **restart QuPath**. After it reopens, the extension lives under
+   **Extensions → Patoloji Atlası** (start with **Slaytlara gözat…** to browse the slides).
 
-1. Download `qupath-extension-atlas-<version>.jar` from the
-   [latest release](https://github.com/sbalci/patolojiatlasi-QuPath/releases/latest).
+**Updating later.** When a newer version is released, open **Extensions → Manage extensions** again
+and click **Update** next to the extension. If the update doesn't seem to take effect, fully quit
+and reopen QuPath — QuPath re-reads the catalog and loads the new JAR on the next launch.
+
+### Method B — download the JAR from Releases (manual)
+
+1. Go to the **[latest release](https://github.com/sbalci/patolojiatlasi-QuPath/releases/latest)**
+   and download the attached `qupath-extension-atlas-<version>.jar` (under **Assets**).
 2. Start QuPath 0.6+.
-3. Drag the `.jar` onto the QuPath window (or copy it into the extensions directory:
-   *Extensions → Installed extensions → open extensions directory*).
-4. Restart QuPath when prompted, then open **Extensions → Patoloji Atlası → Slaytlara gözat…**.
+3. **Drag the `.jar` onto the QuPath window** and confirm when asked to install it. (Alternatively,
+   copy it into QuPath's extensions directory: **Extensions → Installed extensions →
+   open extensions directory**, drop the JAR there.)
+4. **Restart QuPath** when prompted. The extension then appears under
+   **Extensions → Patoloji Atlası → Slaytlara gözat…**.
+
+> To update with Method B, download the newer JAR and repeat — replace the old JAR in the
+> extensions directory (or just drag the new one on and let QuPath overwrite it).
 
 ---
 
