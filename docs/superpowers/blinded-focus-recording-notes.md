@@ -39,7 +39,38 @@
   both spatial (which cells) and temporal (seconds per cell). Reuse the existing anonymized
   contribution machinery (no username; random sessionId; slideKey = DZI URL sans query).
 
+## Refinement (user, 2026-07-20): project-level "blinded tracking on by default"
+
+Rather than (only) a manual start/stop toggle, let a researcher **prepare a project where blinded
+focus recording is ON by default**, so a participant just opens the project and views slides while
+recording runs automatically — no per-session action, easiest study workflow.
+
+Design implications (to spec after #5):
+- **Project flag.** Persist a per-project setting "blinded focus recording = on". Store it where the
+  extension controls it — a sidecar file in the project dir (e.g. `atlas-research.json`,
+  `{schema, blindedTracking:true, studyId?}`) is simplest and avoids depending on QuPath project
+  metadata internals. (Confirm whether QuPath 0.6 `Project` exposes a usable key-value store; else
+  sidecar.)
+- **Auto-start hook.** The extension watches for a project opening — `QuPathGUI.projectProperty()`
+  ChangeListener (mirror how `RotationControl` listens to `viewerProperty()`); on a project with the
+  flag, silently start blinded recording (no overlay/window/status, per decision #1). Remove the
+  listener/stop cleanly on project close.
+- **Builder integration.** The curated-project builder (`ProjectBuilderDialog` / `AtlasProjectService`,
+  the About+builder feature) gets an option when creating a project:
+  "Araştırma projesi — kör odak kaydı (blinded) açık". Checking it writes the sidecar flag so the
+  handed-out project auto-records.
+- **Study workflow:** researcher builds a research project (blinded on) → hands out the tiny project
+  folder → participants open + view → anonymized spatial+temporal data collected automatically,
+  unbiased.
+
 ## Open items to resolve when writing the spec
+
+- **Consent/ethics of covert auto-on.** "Never show in-app" + "auto-on via project" = the participant
+  sees no indication recording is happening. For consented study participants this is the point
+  (unbiased), but consent must be handled — decide: a one-time "Bu proje araştırma için anonim
+  görüntüleme kaydı tutar" notice on first open of a research project, vs fully silent when consent
+  is obtained out-of-band. Align with OSF governance (opt-in, anonymous-by-construction, no PHI).
+  This is the researcher's/ethics call — surface it, don't hard-code.
 
 - Backward-compat of the JSON schema vs `tools/aggregate-focus.py` (Phase-2 aggregator reads the
   current schema) — decide: additive field (safe) vs version bump (update aggregator too).
