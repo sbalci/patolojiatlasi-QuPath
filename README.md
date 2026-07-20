@@ -147,6 +147,9 @@ button rebuilds on demand.
 `QuPathViewer.setImageData` bypasses QuPath's own save prompt, the navigator checks first: if the
 slide you're leaving has unsaved changes, you're asked to confirm before it's replaced.
 
+The swap targets the **active** viewer. If you have a Case-Compare grid open, only the active panel
+changes — use the navigator with a single viewer for the intended jump-to-related experience.
+
 ---
 
 ## Requirements

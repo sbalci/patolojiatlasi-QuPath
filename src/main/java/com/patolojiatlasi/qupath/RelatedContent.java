@@ -53,7 +53,10 @@ final class RelatedContent {
         return List.copyOf(result);
     }
 
-    /** The H&E stain of a case if present (via {@link CoverageStats#stainBucket}), else the first. */
+    /**
+     * The H&E stain of a case if present (via {@link CoverageStats#stainBucket}), else the first.
+     * When a case has more than one H&E-bucketed stain, the first in catalogue order is chosen.
+     */
     private static AtlasCase representative(List<AtlasCase> stains) {
         for (AtlasCase c : stains)
             if (CoverageStats.stainBucket(c.getImage(), c.getStainname()) == StainBucket.HE)
