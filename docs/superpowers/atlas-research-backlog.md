@@ -18,8 +18,13 @@
 | 2 | **Research Provenance & Citation Suite** | M | ✅ shipped (merged f65bb7e, unpushed) |
 | 3 | **Catalogue Coverage & QC Dashboard** | M | ✅ shipped (merged to master, unpushed) |
 | 4 | **Related-Content Navigator** | S | ✅ shipped (merged to master, unpushed) |
-| 5 | **Portable Collections / Bookmarks-History** | S | ⏭ next |
+| 5 | **Portable Collections / Bookmarks-History** | S | ✅ shipped (merged to master, unpushed) |
 | 6 | **Guided Teaching Tour** | M | queued |
+
+> **Out-of-band (user-requested 2026-07-20, ahead of #6):** blinded temporal focus recording —
+> record viewed areas + dwell time silently (no in-app heatmap) for unbiased research, with a
+> project-default "hidden tracking on" mode. Requirements captured in
+> `blinded-focus-recording-notes.md`; spec/build next.
 | 7 | **Manual Stain-Alignment Curtain/Overlay** | M | queued |
 | 8 | **Multi-Panel Figure Export** | S | queued |
 | 9 | **Shareable View Links** | M | queued (VERIFY: 0.6 viewer settable center/downsample) |
