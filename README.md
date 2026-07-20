@@ -152,6 +152,30 @@ changes — use the navigator with a single viewer for the intended jump-to-rela
 
 ---
 
+## Collections & favorites
+
+Build a selection in the browser (right-click a slide → **Add to selection**, or the **Add to
+selection** button), then:
+
+- **Koleksiyonu kaydet…** writes the current selection to a small, shareable `.json` file — send
+  it to a colleague, or keep it as your own case list. Refuses (with a status hint) if the
+  selection is empty.
+- **Koleksiyon yükle…** opens a `.json` collection and re-resolves each entry against the
+  currently-loaded catalog, adding whatever matches into the selection basket. The status line
+  reports how many slides loaded and how many are **no longer in the catalog** (e.g. renamed or
+  removed since the file was saved) — that part is safely ignored rather than failing the whole
+  load.
+- Right-click a slide → **★ Favori (aç/kapat)** to mark or unmark it as a favorite. Favorited
+  slides show a ★ prefix in the tree. Favorites persist automatically to
+  `~/QuPath-atlas-collections/favorites.json`, independent of any saved collection file.
+- **Favorileri yükle** adds every currently-catalogued favorite into the selection basket.
+
+Collections are portable: the `.json` file only needs the slide's DZI URL plus a bit of display
+metadata, so it resolves correctly even against a refreshed catalog — share it with a colleague
+running the same extension.
+
+---
+
 ## Requirements
 
 - **QuPath 0.6.x** (built against the 0.6 API; runs on Java 21).
