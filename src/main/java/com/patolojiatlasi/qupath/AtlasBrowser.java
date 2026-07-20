@@ -1,6 +1,8 @@
 package com.patolojiatlasi.qupath;
 
 import java.awt.image.BufferedImage;
+import java.io.File;
+import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 
@@ -18,6 +20,7 @@ import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextField;
+import javafx.scene.control.TreeCell;
 import javafx.scene.control.TreeItem;
 import javafx.scene.control.TreeView;
 import javafx.scene.image.Image;
@@ -27,6 +30,7 @@ import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import org.slf4j.Logger;
@@ -66,6 +70,11 @@ public class AtlasBrowser {
     private final java.util.LinkedHashSet<AtlasCase> selection = new java.util.LinkedHashSet<>();
     private final Label selectionCount = new Label("0 selected");
     private final Button createProjectBtn = new Button("Create project…");
+
+    // Favorites are a fixed-path collection persisted at Favorites.collectionsDir(); loaded once
+    // per browser window. Loading is itself fail-soft (see Favorites.load()), so this never
+    // breaks the window open.
+    private final Favorites favorites = Favorites.load();
 
     // Re-entrancy guard for openSelected(); touched only on the JavaFX thread.
     private boolean opening = false;
@@ -107,6 +116,24 @@ public class AtlasBrowser {
         HBox.setHgrow(searchField, Priority.ALWAYS);
 
         tree.setShowRoot(false);
+        // ★ prefix for favorited cases; category nodes (plain Strings) render via toString() as
+        // before. Refreshed explicitly (tree.refresh()) whenever a favorite is toggled, since the
+        // underlying TreeItem values don't change and so trigger no redraw on their own.
+        tree.setCellFactory(tv -> new TreeCell<>() {
+            @Override
+            protected void updateItem(Object item, boolean empty) {
+                super.updateItem(item, empty);
+                if (empty || item == null) {
+                    setText(null);
+                    setGraphic(null);
+                    return;
+                }
+                if (item instanceof AtlasCase c)
+                    setText((favorites.contains(c) ? "★ " : "") + c.toString());
+                else
+                    setText(item.toString());
+            }
+        });
         tree.setOnMouseClicked(e -> {
             if (e.getClickCount() == 2)
                 openSelected();
@@ -119,7 +146,9 @@ public class AtlasBrowser {
         referenceItem.setOnAction(e -> openAsReference());
         MenuItem citeItem = new MenuItem("Bu slaytı alıntıla…");
         citeItem.setOnAction(e -> citeSelected());
-        tree.setContextMenu(new ContextMenu(addToSelectionItem, referenceItem, citeItem));
+        MenuItem favoriteItem = new MenuItem("★ Favori (aç/kapat)");
+        favoriteItem.setOnAction(e -> toggleFavorite());
+        tree.setContextMenu(new ContextMenu(addToSelectionItem, referenceItem, citeItem, favoriteItem));
 
         // Preview pane
         thumbView.setFitWidth(220);
@@ -146,15 +175,24 @@ public class AtlasBrowser {
         createProjectBtn.setDisable(true);
         createProjectBtn.setOnAction(e -> openProjectBuilder());
 
+        Button saveCollBtn = new Button("Koleksiyonu kaydet…");
+        saveCollBtn.setOnAction(e -> saveCollection());
+        Button loadCollBtn = new Button("Koleksiyon yükle…");
+        loadCollBtn.setOnAction(e -> loadCollection());
+        Button loadFavBtn = new Button("Favorileri yükle");
+        loadFavBtn.setOnAction(e -> loadFavorites());
+
         // Never truncate the buttons: pin each to its preferred (full-label) width. The status
         // text is the flexible element instead — it grows to push About to the right and ellipsizes
         // when the window is narrow, so a long status can never clip the button labels.
-        for (Button b : new Button[] {openBtn, addSelBtn, webBtn, createProjectBtn, aboutBtn})
+        for (Button b : new Button[] {openBtn, addSelBtn, webBtn, createProjectBtn, saveCollBtn, loadCollBtn,
+                loadFavBtn, aboutBtn})
             b.setMinWidth(Region.USE_PREF_SIZE);
         status.setMaxWidth(Double.MAX_VALUE);
         HBox.setHgrow(status, Priority.ALWAYS);
 
-        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn, status, aboutBtn);
+        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn,
+                saveCollBtn, loadCollBtn, loadFavBtn, status, aboutBtn);
         bottom.setPadding(new Insets(8));
 
         BorderPane root = new BorderPane();
@@ -307,6 +345,85 @@ public class AtlasBrowser {
             return;
         }
         CitationDialog.show(qupath, c);
+    }
+
+    /** Context-menu action: toggle the selected case's favorite state and refresh the ★ prefix. */
+    private void toggleFavorite() {
+        AtlasCase c = getSelectedCase();
+        if (c == null) {
+            status.setText("Select a case first");
+            return;
+        }
+        boolean now = favorites.toggle(c);
+        tree.refresh();
+        status.setText(now ? "Favorilere eklendi: " + c.getTitle() : "Favorilerden çıkarıldı: " + c.getTitle());
+    }
+
+    /**
+     * "Koleksiyonu kaydet…": write the current selection basket to a portable {@code .json} file
+     * that a colleague can load back with {@link #loadCollection()} (see {@link AtlasCollection},
+     * {@link AtlasCollectionIO}). Refuses on an empty basket rather than saving an empty file.
+     */
+    private void saveCollection() {
+        if (selection.isEmpty()) {
+            status.setText("Önce koleksiyona slayt ekleyin");
+            return;
+        }
+        FileChooser fc = new FileChooser();
+        fc.setTitle("Koleksiyonu kaydet…");
+        Favorites.collectionsDir().mkdirs();
+        fc.setInitialDirectory(Favorites.collectionsDir());
+        fc.setInitialFileName("koleksiyon.json");
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("Atlas koleksiyonu (*.json)", "*.json"));
+        File file = fc.showSaveDialog(stage);
+        if (file == null)
+            return;
+        try {
+            AtlasCollectionIO.save(AtlasCollection.fromCases(baseName(file), selection), file);
+            status.setText("Koleksiyon kaydedildi: " + file.getName());
+        } catch (IOException ex) {
+            status.setText("Kaydedilemedi: " + ex.getMessage());
+        }
+    }
+
+    /**
+     * "Koleksiyon yükle…": read a {@code .json} collection file and re-resolve its entries
+     * against the currently-loaded catalog ({@link #allCases}), adding whatever matches into the
+     * selection basket. {@link AtlasCollectionIO#load} is fail-soft (returns {@code null} on an
+     * absent/corrupt/unsupported-version file) and is null-checked here <em>before</em> calling
+     * {@link AtlasCollection#resolve}, which does not itself guard against a null collection.
+     */
+    private void loadCollection() {
+        FileChooser fc = new FileChooser();
+        fc.setTitle("Koleksiyon yükle…");
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("Atlas koleksiyonu (*.json)", "*.json"));
+        File file = fc.showOpenDialog(stage);
+        if (file == null)
+            return;
+        AtlasCollection coll = AtlasCollectionIO.load(file);
+        if (coll == null) {
+            status.setText("Koleksiyon okunamadı");
+            return;
+        }
+        var r = AtlasCollection.resolve(coll, allCases);
+        selection.addAll(r.found());
+        updateSelectionCount();
+        status.setText(r.found().size() + " yüklendi, " + r.missing().size() + " artık katalogda yok");
+    }
+
+    /** "Favorileri yükle": add every currently-catalogued favorite into the selection basket. */
+    private void loadFavorites() {
+        var favCases = favorites.resolve(allCases);
+        selection.addAll(favCases);
+        updateSelectionCount();
+        status.setText(favCases.size() + " favori yüklendi");
+    }
+
+    /** The file's name with its extension stripped, used as a collection's display {@code name}. */
+    private static String baseName(File file) {
+        String name = file.getName();
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
     }
 
     private void updateSelectionCount() {
