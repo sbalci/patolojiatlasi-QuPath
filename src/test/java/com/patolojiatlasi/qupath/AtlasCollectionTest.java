@@ -65,5 +65,8 @@ class AtlasCollectionTest {
         File wrongVer = new File(dir, "v.json");
         Files.writeString(wrongVer.toPath(), "{\"formatVersion\":999,\"name\":\"x\",\"entries\":[]}");
         assertNull(AtlasCollectionIO.load(wrongVer));                             // future version
+        File nullEntry = new File(dir, "n.json");
+        Files.writeString(nullEntry.toPath(), "{\"formatVersion\":1,\"name\":\"x\",\"entries\":[null]}");
+        assertNull(AtlasCollectionIO.load(nullEntry));   // null element inside entries → must not NPE later
     }
 }

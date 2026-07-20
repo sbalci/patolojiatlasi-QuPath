@@ -371,8 +371,9 @@ public class AtlasBrowser {
         }
         FileChooser fc = new FileChooser();
         fc.setTitle("Koleksiyonu kaydet…");
-        Favorites.collectionsDir().mkdirs();
-        fc.setInitialDirectory(Favorites.collectionsDir());
+        File collDir = Favorites.collectionsDir();
+        collDir.mkdirs();
+        fc.setInitialDirectory(collDir);
         fc.setInitialFileName("koleksiyon.json");
         fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("Atlas koleksiyonu (*.json)", "*.json"));
         File file = fc.showSaveDialog(stage);

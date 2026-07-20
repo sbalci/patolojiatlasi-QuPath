@@ -34,7 +34,7 @@ public final class AtlasCollectionIO {
             String json = Files.readString(file.toPath(), StandardCharsets.UTF_8);
             AtlasCollection coll = GSON.fromJson(json, AtlasCollection.class);
             if (coll == null || coll.formatVersion() != AtlasCollection.FORMAT_VERSION
-                    || coll.entries() == null) {
+                    || coll.entries() == null || coll.entries().contains(null)) {
                 logger.warn("Ignoring collection {} (bad or unsupported format)", file);
                 return null;
             }
