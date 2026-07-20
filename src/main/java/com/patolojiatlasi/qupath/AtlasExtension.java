@@ -80,6 +80,11 @@ public class AtlasExtension implements QuPathExtension {
             Menu referenceMenu = new Menu("Referans");
             referenceMenu.getItems().add(refPickItem);
 
+            // Related-content navigator — companion window: the open case's other stains + other
+            // cases in the same category, auto-following the active viewer.
+            MenuItem relatedItem = new MenuItem("İlgili içerik…");
+            relatedItem.setOnAction(e -> RelatedContentNavigator.show(qupath));
+
             // Citation group — cite the slide currently open in the active viewer, or a selected region.
             MenuItem citeOpenItem = new MenuItem("Açık slaytı alıntıla…");
             citeOpenItem.setOnAction(e -> {
@@ -111,7 +116,7 @@ public class AtlasExtension implements QuPathExtension {
                     browseItem,
                     coverageItem,
                     new SeparatorMenuItem(),
-                    viewMenu, compareMenu, referenceMenu, citationMenu, quizMenu);
+                    viewMenu, compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
 
             qupath.getMenu("Extensions", true).getItems().add(atlas);
             logger.info("Patoloji Atlası extension installed");

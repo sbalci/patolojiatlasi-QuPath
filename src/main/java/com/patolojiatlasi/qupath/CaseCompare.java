@@ -211,7 +211,7 @@ public final class CaseCompare {
      * {@link Platform#runLater}. A failure at either stage is logged; it does not affect any
      * other viewer's open.
      */
-    private static void openInto(QuPathViewer viewer, AtlasCase c) {
+    static void openInto(QuPathViewer viewer, AtlasCase c) {
         Thread t = new Thread(() -> {
             try {
                 DziImageServer server = new DziImageServer(c.getDziURI());
@@ -259,7 +259,7 @@ public final class CaseCompare {
      * decide whether to show the unsaved-changes confirmation, so an unexpected failure here
      * should fail open (skip the extra prompt) rather than block the compare.
      */
-    private static boolean isChangedSafe(ImageData<BufferedImage> d) {
+    static boolean isChangedSafe(ImageData<BufferedImage> d) {
         try {
             return d.isChanged();
         } catch (Throwable t) {

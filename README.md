@@ -128,6 +128,30 @@ window appears alongside it with:
 
 ---
 
+## Related-content navigator
+
+**Extensions → Patoloji Atlası → İlgili içerik…** opens a companion window that, for the atlas
+slide currently open in the active viewer, shows two thumbnail filmstrips:
+
+- **Bu vakanın diğer boyaları** — the same case's other stains (H&E plus any IHC / special
+  stains), captioned by stain name.
+- **Aynı kategoriden vakalar** — other cases from the same category, one representative thumbnail
+  per case (its H&E stain if it has one, otherwise its first stain).
+
+The window **auto-follows the active viewer** — switch slides, open a different one, or close it,
+and both strips rebuild for whatever's now open, with no need to reopen the window. If the active
+viewer isn't showing a cataloged atlas slide, it shows a hint instead of strips. A **Yenile**
+button rebuilds on demand.
+
+**Click a thumbnail to swap the active viewer to that slide.** Because
+`QuPathViewer.setImageData` bypasses QuPath's own save prompt, the navigator checks first: if the
+slide you're leaving has unsaved changes, you're asked to confirm before it's replaced.
+
+The swap targets the **active** viewer. If you have a Case-Compare grid open, only the active panel
+changes — use the navigator with a single viewer for the intended jump-to-related experience.
+
+---
+
 ## Requirements
 
 - **QuPath 0.6.x** (built against the 0.6 API; runs on Java 21).
@@ -229,6 +253,8 @@ connection is needed for the first build.
 | Reference picker dialog | `ReferencePickerDialog.java` |
 | Coverage & QC matrix (pure) + best-effort DZI link check | `CoverageStats.java`, `LinkCheck.java` |
 | Coverage & QC dashboard | `CoverageDashboard.java` |
+| Case-stain compare (multi-viewer grid) | `CaseCompare.java` |
+| Related-content list building (pure) + navigator window | `RelatedContent.java`, `RelatedContentNavigator.java` |
 | Menu entry point | `AtlasExtension.java` |
 
 **Catalogue source.** The atlas maintains `lists/list.yaml`, one record per stain, with fields
