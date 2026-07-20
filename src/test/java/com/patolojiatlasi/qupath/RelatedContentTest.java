@@ -50,4 +50,14 @@ class RelatedContentTest {
         AtlasCase repC = res.stream().filter(c -> c.getReponame().equals("repoC")).findFirst().orElseThrow();
         assertEquals("CD20", repC.getImage());               // no HE -> first (only) stain
     }
+
+    @Test
+    void sameCategoryEmptyWhenOpenCaseIsUncategorized() {
+        // No organ/keyword match -> "Uncategorized", the catch-all bucket (~half the real catalogue).
+        AtlasCase openU  = mk("zeta1", "HE", "", "https://x/zeta1/HE.dzi");
+        AtlasCase otherU = mk("zeta2", "HE", "", "https://x/zeta2/HE.dzi");
+        assertEquals("Uncategorized", openU.getCategory());  // sanity: the guard's trigger condition
+        // Must NOT dump every other Uncategorized case into the strip.
+        assertEquals(0, RelatedContent.sameCategoryCases(List.of(openU, otherU), openU).size());
+    }
 }

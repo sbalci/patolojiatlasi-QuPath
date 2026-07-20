@@ -32,6 +32,10 @@ final class RelatedContent {
         if (catalog == null || open == null)
             return List.of();
         String category = open.getCategory();
+        // "Uncategorized" is a catch-all (~half the catalogue), not a meaningful shared category —
+        // treating it as one would dump most of the atlas into the strip. Show no same-category set.
+        if (category == null || category.isBlank() || "Uncategorized".equals(category))
+            return List.of();
         String openRepo = open.getReponame();
         // Group same-category, other-case slides by reponame, preserving first-seen order.
         Map<String, List<AtlasCase>> byRepo = new LinkedHashMap<>();
@@ -46,7 +50,7 @@ final class RelatedContent {
         List<AtlasCase> result = new ArrayList<>();
         for (List<AtlasCase> stains : byRepo.values())
             result.add(representative(stains));
-        return result;
+        return List.copyOf(result);
     }
 
     /** The H&E stain of a case if present (via {@link CoverageStats#stainBucket}), else the first. */
