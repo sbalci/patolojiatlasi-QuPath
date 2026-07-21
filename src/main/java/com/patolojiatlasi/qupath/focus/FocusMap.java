@@ -19,6 +19,7 @@ public final class FocusMap {
     private final int gridH;
     private final float[] grid;
     private long sampleCount;
+    private double totalWeight;
 
     /** Grid sized to the image aspect ratio, with the longer side at most {@code maxGridDim} cells. */
     public FocusMap(int imageWidth, int imageHeight, int maxGridDim) {
@@ -51,7 +52,12 @@ public final class FocusMap {
      * the region is empty or doesn't overlap the image.
      */
     public boolean deposit(double x, double y, double w, double h) {
-        if (w <= 0 || h <= 0)
+        return deposit(x, y, w, h, 1.0);
+    }
+
+    /** Deposit {@code weight} (e.g. dwell-milliseconds) spread over the covered cells. */
+    public boolean deposit(double x, double y, double w, double h, double weight) {
+        if (weight <= 0 || w <= 0 || h <= 0)
             return false;
         if (x + w <= 0 || y + h <= 0 || x >= imageWidth || y >= imageHeight)
             return false;
@@ -60,12 +66,25 @@ public final class FocusMap {
         int r0 = clamp((int) Math.floor(y / imageHeight * gridH), 0, gridH - 1);
         int r1 = clamp((int) Math.floor((y + h) / imageHeight * gridH), 0, gridH - 1);
         int n = (c1 - c0 + 1) * (r1 - r0 + 1);
-        float per = 1f / n;
+        float per = (float) (weight / n);
         for (int r = r0; r <= r1; r++)
             for (int c = c0; c <= c1; c++)
                 grid[r * gridW + c] += per;
         sampleCount++;
+        totalWeight += weight;
         return true;
+    }
+
+    public double getTotalWeight() { return totalWeight; }
+
+    /** Pure idle/Δt kernel: elapsed ms to credit this tick. Inactive → 0; else dt clamped to [0, cap]. */
+    public static long activeDwellMs(long nowMs, long lastTickMs, boolean active, long capMs) {
+        if (!active)
+            return 0L;
+        long dt = nowMs - lastTickMs;
+        if (dt <= 0)
+            return 0L;
+        return Math.min(dt, capMs);
     }
 
     public float max() {
@@ -79,6 +98,7 @@ public final class FocusMap {
     public void clear() {
         Arrays.fill(grid, 0f);
         sampleCount = 0;
+        totalWeight = 0;
     }
 
     /**
