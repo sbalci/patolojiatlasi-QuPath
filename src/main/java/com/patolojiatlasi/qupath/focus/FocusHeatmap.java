@@ -37,6 +37,8 @@ import javafx.util.Duration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.patolojiatlasi.qupath.research.BlindedResearch;
+
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.gui.viewer.overlays.BufferedImageOverlay;
@@ -68,6 +70,8 @@ public final class FocusHeatmap {
     private static final double OVERLAY_OPACITY = 0.5;
     /** Blinded-mode dt clamp: at most two sample intervals, so a stalled/late tick can't over-credit. */
     private static final long DT_CAP_MS = 2L * SAMPLE_MS;
+    /** Blinded-mode checkpoint cadence: every 120 ticks * SAMPLE_MS(250) = ~30s, for crash safety. */
+    private static final int CHECKPOINT_EVERY_TICKS = 120;
 
     // Research contribution (anonymous, opt-in). Uploading is DISABLED until the atlas website
     // has a receiver — see docs/focus-aggregation-plan.md. Until then "Contribute" only writes an
@@ -99,6 +103,23 @@ public final class FocusHeatmap {
     /** Blinded (research) recording: real per-tick dwell-ms, paused when idle/unfocused, no visuals. */
     private boolean blindedRecording;
     private long lastTickMs;
+    /**
+     * Where blinded fragments/checkpoints/zip for the <b>current</b> blinded session are written --
+     * {@code <projectDir>/atlas-focus} if a project was open when {@link #startBlinded()} ran, else
+     * the home-dir fallback. Captured once at {@code startBlinded()} and reused unchanged by every
+     * later write (checkpoint, per-slide promotion, shutdown flush, zip): a project switch stops the
+     * old blinded session first (see {@code AtlasExtension#onProjectChanged}), by which point {@code
+     * qupath.getProject()} already points at the *new* project, so re-resolving it at save time would
+     * misattribute the just-finished session's data to the wrong project.
+     */
+    private File blindedDir;
+    /** Ticks since the last blinded checkpoint write; reset in {@link #startBlinded()} and whenever a
+     *  fresh slide map is created while blinded (see {@link #switchTo}). */
+    private int blindedTicks;
+    /** Guards against registering {@link #flushOnShutdown()} more than once across repeated
+     *  start/stop cycles within the same JVM (a shutdown hook can't be usefully "un-added" per
+     *  session, so it's registered once and self-guards on {@link #blindedRecording} at fire time). */
+    private boolean shutdownHookAdded;
 
     private CheckMenuItem overlayItem;  // kept so blinded mode can disable/untick it
     private CheckMenuItem windowItem;   // kept so closing the window can untick it, and for blinded mode
@@ -247,6 +268,15 @@ public final class FocusHeatmap {
             contributeItem.setDisable(true);
         if (currentMap != null)
             currentMap.clear();
+        // Attribution capture: resolve the target dir once, here, from whichever project is open
+        // right now -- see the blindedDir field javadoc for why this must never be re-resolved later.
+        File projectDir = qupath.getProject() == null ? null : BlindedResearch.projectDir(qupath.getProject());
+        blindedDir = BlindedStore.blindedDir(projectDir, new File(defaultDir(), "contributions"));
+        blindedTicks = 0;
+        if (!shutdownHookAdded) {
+            Runtime.getRuntime().addShutdownHook(new Thread(this::flushOnShutdown, "atlas-blinded-shutdown"));
+            shutdownHookAdded = true;
+        }
         lastTickMs = System.currentTimeMillis();
         blindedRecording = true;
         // A pre-existing (visible-mode) map is reused here via clear(), not replaced with a `new
@@ -268,7 +298,22 @@ public final class FocusHeatmap {
             return;
         blindedRecording = false;
         if (currentMap != null && !currentMap.isEmpty())
-            saveBlinded(currentUri, currentMap);
+            saveBlindedSync(currentUri, currentMap);
+        // The final fragment above (if any) now carries whatever the checkpoint was tracking --
+        // remove the checkpoint so it doesn't linger as stale/duplicate data in blindedDir.
+        deleteCheckpoint();
+        // Best-effort: bundle every fragment written this session into one zip in the project
+        // folder (or the fallback dir) -- the single file to hand to the study coordinator. A zip
+        // failure must never prevent recording from stopping cleanly.
+        try {
+            String stamp = LocalDateTime.now().format(
+                    DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
+            String shortId = sessionId.length() >= 8 ? sessionId.substring(0, 8) : sessionId;
+            File zipParent = "atlas-focus".equals(blindedDir.getName()) ? blindedDir.getParentFile() : blindedDir;
+            BlindedStore.zipFragments(blindedDir, new File(zipParent, BlindedStore.zipName(stamp, shortId)));
+        } catch (Exception e) {
+            logger.debug("Blinded zip failed: {}", e.getMessage());
+        }
         // Clean slate: the blinded map is now persisted (or discarded if empty); drop it so no
         // stray keepMaps/save() path downstream (e.g. refreshTracking()'s stop-tracking save) can
         // ever touch it, and so a future visible session starts from a fresh, non-blinded map.
@@ -333,8 +378,77 @@ public final class FocusHeatmap {
             Shape shape = v.getDisplayedRegionShape();
             if (shape != null) {
                 Rectangle b = shape.getBounds();
-                currentMap.deposit(b.getX(), b.getY(), b.getWidth(), b.getHeight(), ms);
+                if (currentMap.deposit(b.getX(), b.getY(), b.getWidth(), b.getHeight(), ms)) {
+                    blindedTicks++;
+                    if (blindedTicks % CHECKPOINT_EVERY_TICKS == 0)
+                        checkpointBlinded();
+                }
             }
+        }
+    }
+
+    /**
+     * Crash-safety checkpoint: overwrite {@code <blindedDir>/session-<sessionId>.partial.json} with
+     * the current slide's accumulated dwell-ms, so a crash loses at most ~{@link
+     * #CHECKPOINT_EVERY_TICKS} ticks (~30s) of data instead of the whole slide. JSON-only, via the
+     * same anonymised {@link #buildBlindedJson} used for the final fragment — never a PNG. Best-effort:
+     * any failure is logged and swallowed, never thrown into the sampling timer.
+     */
+    private void checkpointBlinded() {
+        if (blindedDir == null || currentMap == null || currentMap.isEmpty())
+            return;
+        try {
+            final String json = buildBlindedJson(currentUri, currentMap);
+            writeTextAsync(new File(blindedDir, "session-" + sessionId + ".partial.json"), json);
+        } catch (Exception e) {
+            logger.debug("Blinded checkpoint failed: {}", e.getMessage());
+        }
+    }
+
+    /** Best-effort delete of the current session's checkpoint file (its data has just been promoted
+     *  into a final fragment). No-op / silent if it doesn't exist or can't be removed. */
+    private void deleteCheckpoint() {
+        try {
+            if (blindedDir != null)
+                new File(blindedDir, "session-" + sessionId + ".partial.json").delete();
+        } catch (Exception e) {
+            logger.debug("Could not remove blinded checkpoint: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * JVM-shutdown safety net, registered once from {@link #startBlinded()}. If QuPath is force-quit
+     * (or the process otherwise dies) while blinded recording is active and the current slide has
+     * unsaved dwell data, writes one last anonymised JSON fragment to {@link #blindedDir} so a hard
+     * crash loses at most ~{@link #CHECKPOINT_EVERY_TICKS} ticks — never a whole session. Self-guards
+     * on {@link #blindedRecording}: a shutdown hook can't be removed per start/stop cycle, but firing
+     * it while not blinded (or with nothing to save) is a harmless no-op.
+     * <p>
+     * Reads {@code currentMap} directly rather than snapshotting {@code currentMap.getGrid()} first:
+     * a shutdown hook runs on its own JVM-managed thread with no synchronization against the FX
+     * sampling thread, so in the rare case both run at the exact same instant, this accepts a tiny
+     * torn read of a few grid cells rather than adding a blocking hand-off to the FX thread — which
+     * could itself be unresponsive during shutdown and stall JVM exit. Writes synchronously on this
+     * hook's own thread (not via {@link #writeTextAsync}, which spawns a further daemon thread the
+     * JVM's shutdown sequence does not wait for) so the write actually completes before the process
+     * exits. Best-effort throughout: any failure is logged and swallowed, never thrown.
+     */
+    private void flushOnShutdown() {
+        try {
+            if (!blindedRecording || currentMap == null || currentMap.isEmpty() || blindedDir == null)
+                return;
+            String json = buildBlindedJson(currentUri, currentMap);
+            String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(currentUri))) + "__shutdown-"
+                    + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
+            if (!blindedDir.exists())
+                blindedDir.mkdirs();
+            java.nio.file.Files.writeString(new File(blindedDir, base + ".json").toPath(), json,
+                    java.nio.charset.StandardCharsets.UTF_8);
+            // The checkpoint this final flush supersedes would otherwise linger as stale/duplicate
+            // data in blindedDir; removal here is best-effort like everything else in this method.
+            new File(blindedDir, "session-" + sessionId + ".partial.json").delete();
+        } catch (Exception e) {
+            logger.debug("Blinded shutdown flush failed: {}", e.getMessage());
         }
     }
 
@@ -348,8 +462,12 @@ public final class FocusHeatmap {
             save(currentSlide, currentUri, currentMap, defaultDir());
         // Independent of keepMaps: while blinded, always persist the finished slide's real dwell
         // time before it's discarded — otherwise switching slides mid-session would silently lose it.
-        if (blindedRecording && currentMap != null && !currentMap.isEmpty())
+        if (blindedRecording && currentMap != null && !currentMap.isEmpty()) {
             saveBlinded(currentUri, currentMap);
+            // The fragment just written now carries whatever the checkpoint was tracking for the
+            // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
+            deleteCheckpoint();
+        }
         removeOverlay();
         currentViewer = v;
         currentImageData = id;
@@ -360,6 +478,8 @@ public final class FocusHeatmap {
             currentMapBlinded = blindedRecording;
             currentSlide = server.getMetadata().getName();
             currentUri = firstUri(server);
+            if (blindedRecording)
+                blindedTicks = 0;   // fresh slide map while blinded -> restart the checkpoint cadence
         } else {
             currentMap = null;
             currentMapBlinded = false;
@@ -587,18 +707,46 @@ public final class FocusHeatmap {
 
     /**
      * Persist a finished blinded-recording map: raw JSON only, <b>never</b> a PNG (no visual
-     * artifact of blinded viewing should ever be produced, on disk or otherwise). Written to the
-     * same {@code contributions/} folder as {@link #contribute()}, under schema/2.
+     * artifact of blinded viewing should ever be produced, on disk or otherwise). Written into
+     * {@link #blindedDir} -- the project's {@code atlas-focus/} folder if one was open when {@link
+     * #startBlinded()} ran, else the home-dir fallback -- under schema/2.
      */
     private void saveBlinded(String uri, FocusMap map) {
         final String json = buildBlindedJson(uri, map);
-        final File dir = new File(defaultDir(), "contributions");
+        final File dir = blindedDir;
         // Anonymized the same way as the JSON body's slideKey (see anonymizeSlideKey): a raw
         // file:// slideKey would otherwise carry the local path/username into the *filename*
         // even though the JSON payload itself is clean -- the identical leak, just relocated.
         final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(uri))) + "__"
-                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
         writeTextAsync(new File(dir, base + ".json"), json);
+    }
+
+    /**
+     * Synchronous twin of {@link #saveBlinded}: writes the final fragment on the <b>calling</b>
+     * thread before returning, instead of handing it to a fire-and-forget background thread. Used
+     * only by {@link #stopBlinded()}, which immediately reads {@link #blindedDir} back with {@link
+     * BlindedStore#zipFragments} -- with the async {@link #writeTextAsync} path, that read could
+     * race the write and silently ship a zip missing the last slide's data (a real risk for any
+     * slide viewed under {@link #CHECKPOINT_EVERY_TICKS}, i.e. before a checkpoint ever landed).
+     * {@link #switchTo} keeps using the async {@link #saveBlinded} for its promotion, since nothing
+     * reads the directory immediately afterward there. Same JSON-only, no-PNG contract; best-effort
+     * (logs and swallows any failure rather than throwing into the menu-toggle call site).
+     */
+    private void saveBlindedSync(String uri, FocusMap map) {
+        try {
+            final String json = buildBlindedJson(uri, map);
+            final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(uri))) + "__"
+                    + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
+            File dir = blindedDir;
+            if (!dir.exists())
+                dir.mkdirs();
+            File file = new File(dir, base + ".json");
+            java.nio.file.Files.writeString(file.toPath(), json, java.nio.charset.StandardCharsets.UTF_8);
+            logger.info("Saved focus contribution to {}", file);
+        } catch (Exception e) {
+            logger.error("Failed to save blinded focus map: {}", e.getMessage(), e);
+        }
     }
 
     /**
