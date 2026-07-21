@@ -284,24 +284,33 @@ public class ProjectBuilderDialog {
                     AtlasProjectService.BuildOutcome outcome =
                             AtlasProjectService.createProject(projectDir, cases);
                     Platform.runLater(() -> {
+                        // Must run before qupath.setProject(...) below: that call synchronously
+                        // fires AtlasExtension's projectProperty listener, which checks this same
+                        // sidecar flag to decide whether to auto-start blinded recording for the
+                        // session that's about to open. Written after, the listener would see an
+                        // unflagged project on this very first open.
+                        writeBlindedFlagIfChecked(outcome.project());
                         try {
                             qupath.setProject(outcome.project());
                         } catch (Throwable ex) {
                             logger.warn("Could not open new project: {}", ex.getMessage());
                         }
-                        finish(outcome.result(), outcome.project());
+                        finish(outcome.result());
                     });
                 } else {
                     Project<BufferedImage> project = qupath.getProject();
                     AtlasProjectService.BuildResult result =
                             AtlasProjectService.addCasesToProject(project, cases);
                     Platform.runLater(() -> {
+                        // setProject(...) is not called here (already the current project), so
+                        // the flag's write order relative to refreshProject() doesn't matter.
+                        writeBlindedFlagIfChecked(project);
                         try {
                             qupath.refreshProject();
                         } catch (Throwable ignore) {
                             // project already updated on disk
                         }
-                        finish(result, project);
+                        finish(result);
                     });
                 }
             } catch (Throwable ex) {
@@ -321,21 +330,27 @@ public class ProjectBuilderDialog {
         t.start();
     }
 
-    /** Runs on the FX thread after a build: keep failed cases for retry, drop the rest, report, close.
-     *  {@code project} is the project just created (new-project path) or added to (current-project
-     *  path); used only to resolve its directory for the blinded-research flag below. */
-    private void finish(AtlasProjectService.BuildResult result, Project<BufferedImage> project) {
+    /**
+     * Writes the blinded-research sidecar flag when the checkbox is checked; no-op otherwise, or
+     * if {@code project}'s directory can't be resolved (unsaved project). Callers must invoke
+     * this before {@code qupath.setProject(...)} in the new-project branch of {@link #runBuild()}
+     * -- see the call site for why; for the add-to-current-project branch (which never calls
+     * {@code setProject}), the call's position doesn't matter.
+     */
+    private void writeBlindedFlagIfChecked(Project<BufferedImage> project) {
+        if (!blindedCheckBox.isSelected())
+            return;
+        File dir = BlindedResearch.projectDir(project);
+        if (dir != null)
+            BlindedResearch.writeFlag(dir, true);
+        else
+            logger.warn("Could not resolve project directory for blinded-research flag");
+    }
+
+    /** Runs on the FX thread after a build: keep failed cases for retry, drop the rest, report, close. */
+    private void finish(AtlasProjectService.BuildResult result) {
         building = false;
         progress.setVisible(false);
-        // Write the blinded-research sidecar flag only when the checkbox was checked; the actual
-        // auto-start + one-time consent notice is AtlasExtension's project-open hook, not here.
-        if (blindedCheckBox.isSelected()) {
-            File dir = BlindedResearch.projectDir(project);
-            if (dir != null)
-                BlindedResearch.writeFlag(dir, true);
-            else
-                logger.warn("Could not resolve project directory for blinded-research flag");
-        }
         // Keep only the cases that failed to add, so the user can retry them without re-finding
         // them from the tree; succeeded and skipped (already-present) cases leave the selection.
         java.util.Set<AtlasCase> failed = new java.util.HashSet<>();

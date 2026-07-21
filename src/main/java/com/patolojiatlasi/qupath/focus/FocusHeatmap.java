@@ -545,6 +545,10 @@ public final class FocusHeatmap {
      * disabled until the atlas website has a receiver; until then the file can be shared manually.
      */
     private void contribute() {
+        // A blinded map is anonymised-JSON-only via saveBlinded; never re-contribute it under the
+        // schema/1 counts path (mirrors the identical guard at the top of save()).
+        if (currentMapBlinded)
+            return;
         if (currentMap == null || currentMap.isEmpty()) {
             new Alert(Alert.AlertType.INFORMATION, "Henüz odak verisi yok — önce izlemeyi açın.").showAndWait();
             return;
@@ -589,7 +593,10 @@ public final class FocusHeatmap {
     private void saveBlinded(String uri, FocusMap map) {
         final String json = buildBlindedJson(uri, map);
         final File dir = new File(defaultDir(), "contributions");
-        final String base = "focus-blinded__" + safe(slideKey(uri)) + "__"
+        // Anonymized the same way as the JSON body's slideKey (see anonymizeSlideKey): a raw
+        // file:// slideKey would otherwise carry the local path/username into the *filename*
+        // even though the JSON payload itself is clean -- the identical leak, just relocated.
+        final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(uri))) + "__"
                 + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
         writeTextAsync(new File(dir, base + ".json"), json);
     }
@@ -602,7 +609,7 @@ public final class FocusHeatmap {
     private String buildBlindedJson(String uri, FocusMap map) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("schema", CONTRIBUTION_SCHEMA_BLINDED);
-        m.put("slideKey", slideKey(uri));
+        m.put("slideKey", anonymizeSlideKey(slideKey(uri)));
         m.put("sessionId", sessionId);
         m.put("imageWidth", map.getImageWidth());
         m.put("imageHeight", map.getImageHeight());
@@ -622,6 +629,35 @@ public final class FocusHeatmap {
             return "unknown";
         int q = uri.indexOf('?');
         return q >= 0 ? uri.substring(0, q) : uri;
+    }
+
+    /**
+     * Anonymizes a {@code slideKey} for the blinded payload: a locally-opened slide's key can be a
+     * {@code file://} URI carrying an absolute local path -- and with it, the OS username. Atlas
+     * DZI slides are stable {@code https://} URLs and are the intended cross-reader grouping key,
+     * so those pass through unchanged. Anything else (any scheme other than {@code http(s)://}) is
+     * replaced with a stable, non-identifying {@code sha256:<hex>} hash of the original key: the
+     * same local slide always hashes the same, so grouping stays stable within/across a session
+     * without ever writing the path or username to disk.
+     */
+    private static String anonymizeSlideKey(String key) {
+        String lower = key.toLowerCase(java.util.Locale.ROOT);
+        if (lower.startsWith("http://") || lower.startsWith("https://"))
+            return key;
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(key.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash)
+                sb.append(String.format(java.util.Locale.US, "%02x", b));
+            return "sha256:" + sb;
+        } catch (java.security.NoSuchAlgorithmException e) {
+            // SHA-256 is guaranteed available on every JVM (see MessageDigest javadoc) --
+            // unreachable in practice. If it ever weren't, falling back to the raw key would
+            // defeat the whole point of this method, so use a fixed placeholder instead.
+            logger.warn("SHA-256 unavailable, cannot anonymize slide key: {}", e.getMessage());
+            return "sha256:unavailable";
+        }
     }
 
     private void writeTextAsync(File file, String text) {

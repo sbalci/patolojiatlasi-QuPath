@@ -83,6 +83,12 @@ public class AtlasExtension implements QuPathExtension {
             // recording on this same retained focusHeatmap instance, after a one-time consent
             // notice. Property fires on the FX thread, so the hook itself doesn't need to.
             qupath.projectProperty().addListener((obs, oldProj, newProj) -> onProjectChanged(oldProj, newProj));
+            // JavaFX ChangeListeners don't fire for the value already in place at registration
+            // time, so a project opened before this extension installed (or before this listener
+            // was attached) would never get its blinded-tracking flag checked. Evaluate it once,
+            // deferred via runLater so a consent dialog can't pop up synchronously during
+            // extension install; oldProj=null is correct here -- there's no outgoing project.
+            javafx.application.Platform.runLater(() -> onProjectChanged(null, qupath.getProject()));
 
             // Compare group — a case's stains in a synchronized multi-viewer grid.
             MenuItem compareItem = new MenuItem("Bu vakanın boyalarını karşılaştır…");
