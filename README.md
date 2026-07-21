@@ -384,9 +384,20 @@ opened afterwards, blinded recording starts automatically — after a **one-time
 explaining that anonymised viewing data (regions viewed + dwell time, no identity) is being
 recorded for research. Declining leaves recording off and the notice reappears next time the
 project opens; accepting is remembered so later sessions start recording immediately, no
-re-prompt. Closing or switching away from the project stops recording and saves the accumulated
-data as raw JSON (same `~/QuPath-atlas-focus-maps/` location, dwell-ms grid only — no PNG, no
-mislabeled visible-mode artifact).
+re-prompt.
+
+**Where the data goes.** When a project is open, every blinded write for that session goes into
+`<project>/atlas-focus/` (captured once when recording starts, so a later project switch can't
+misattribute a still-finishing session); with no project open it falls back to
+`~/QuPath-atlas-focus-maps/contributions/`. While recording, the current slide's map is
+checkpointed to a `session-<id>.partial.json` file roughly every **30 seconds**, so a crash or
+force-quit loses at most that much data — not the whole session. Switching slides or stopping
+promotes the checkpoint into a final per-slide JSON fragment and removes the `.partial.json`.
+Closing or switching away from the project stops recording, writes the last slide's fragment, and
+bundles every fragment from the session into a single
+`atlas-focus_<timestamp>_<session>.zip` in the project folder (or the fallback dir) — that one zip
+is what you hand to the study coordinator. Every artifact in this pipeline (checkpoint, fragment,
+zip) is JSON-only and anonymised: no PNG, no username, ever.
 
 ---
 
