@@ -13,6 +13,7 @@ import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressIndicator;
@@ -30,6 +31,8 @@ import javafx.stage.Stage;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.patolojiatlasi.qupath.research.BlindedResearch;
 
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.projects.Project;
@@ -55,6 +58,7 @@ public class ProjectBuilderDialog {
 
     private RadioButton newRadio;
     private RadioButton currentRadio;
+    private CheckBox blindedCheckBox;
     private TextField nameField;
     private Label locationLabel;
     private File location;
@@ -118,6 +122,11 @@ public class ProjectBuilderDialog {
         newBox.setPadding(new Insets(4, 0, 0, 20));
         newBox.disableProperty().bind(newRadio.selectedProperty().not());
 
+        // Blinded (research) tracking is a per-project sidecar flag (see BlindedResearch), not
+        // tied to new-vs-current — checking it here just writes the flag once the project is
+        // built/added to; AtlasExtension's project-open hook does the actual auto-start + consent.
+        blindedCheckBox = new CheckBox("Araştırma projesi — kör odak kaydı (blinded)");
+
         createBtn = new Button("Create");
         createBtn.setOnAction(e -> runBuild());
         cancelBtn = new Button("Cancel");
@@ -133,6 +142,7 @@ public class ProjectBuilderDialog {
         VBox rootBox = new VBox(10,
                 new Label("Selected images:"), listView, listButtons,
                 new Label("Target:"), newRadio, newBox, currentRadio,
+                blindedCheckBox,
                 actions);
         rootBox.setPadding(new Insets(12));
 
@@ -274,6 +284,12 @@ public class ProjectBuilderDialog {
                     AtlasProjectService.BuildOutcome outcome =
                             AtlasProjectService.createProject(projectDir, cases);
                     Platform.runLater(() -> {
+                        // Must run before qupath.setProject(...) below: that call synchronously
+                        // fires AtlasExtension's projectProperty listener, which checks this same
+                        // sidecar flag to decide whether to auto-start blinded recording for the
+                        // session that's about to open. Written after, the listener would see an
+                        // unflagged project on this very first open.
+                        writeBlindedFlagIfChecked(outcome.project());
                         try {
                             qupath.setProject(outcome.project());
                         } catch (Throwable ex) {
@@ -286,6 +302,9 @@ public class ProjectBuilderDialog {
                     AtlasProjectService.BuildResult result =
                             AtlasProjectService.addCasesToProject(project, cases);
                     Platform.runLater(() -> {
+                        // setProject(...) is not called here (already the current project), so
+                        // the flag's write order relative to refreshProject() doesn't matter.
+                        writeBlindedFlagIfChecked(project);
                         try {
                             qupath.refreshProject();
                         } catch (Throwable ignore) {
@@ -309,6 +328,23 @@ public class ProjectBuilderDialog {
         }, "atlas-project-build");
         t.setDaemon(true);
         t.start();
+    }
+
+    /**
+     * Writes the blinded-research sidecar flag when the checkbox is checked; no-op otherwise, or
+     * if {@code project}'s directory can't be resolved (unsaved project). Callers must invoke
+     * this before {@code qupath.setProject(...)} in the new-project branch of {@link #runBuild()}
+     * -- see the call site for why; for the add-to-current-project branch (which never calls
+     * {@code setProject}), the call's position doesn't matter.
+     */
+    private void writeBlindedFlagIfChecked(Project<BufferedImage> project) {
+        if (!blindedCheckBox.isSelected())
+            return;
+        File dir = BlindedResearch.projectDir(project);
+        if (dir != null)
+            BlindedResearch.writeFlag(dir, true);
+        else
+            logger.warn("Could not resolve project directory for blinded-research flag");
     }
 
     /** Runs on the FX thread after a build: keep failed cases for retry, drop the rest, report, close. */

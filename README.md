@@ -366,6 +366,28 @@ slide name/URI, the user (OS login), image and grid dimensions, sample count, an
 `grid` of dwell values — enough to aggregate focus across readers offline. The plan for pooling
 contributions into a website overlay is in [docs/focus-aggregation-plan.md](docs/focus-aggregation-plan.md).
 
+### Blinded research recording
+
+For studies that need real, unbiased dwell-time data — where seeing a live heatmap of your own
+viewing could change how you look — the same focus tracker has a **blinded** mode: it silently
+records which regions of the slide you looked at and for how long, with **no overlay, no window,
+and no on-screen indication of any kind** while it's active. It can't be toggled visible; the
+**Slayt üzerinde göster (ısı katmanı)** / **Ayrı pencerede göster** / **Temizle** / **Kaydet…** /
+**Araştırmaya katkıda bulun…** menu items are all disabled for the duration, so a session can't
+accidentally surface a heatmap or leak one to a file.
+
+You can turn it on for a single session from the menu (**Kör kayıt (araştırma)**), or make it the
+default for an entire study: check **"Araştırma projesi — kör odak kaydı (blinded)"** in the
+*Create project* dialog when building a project from the browser. That writes a small
+`atlas-research.json` sidecar next to the project's `.qpproj` file; every time the project is
+opened afterwards, blinded recording starts automatically — after a **one-time consent notice**
+explaining that anonymised viewing data (regions viewed + dwell time, no identity) is being
+recorded for research. Declining leaves recording off and the notice reappears next time the
+project opens; accepting is remembered so later sessions start recording immediately, no
+re-prompt. Closing or switching away from the project stops recording and saves the accumulated
+data as raw JSON (same `~/QuPath-atlas-focus-maps/` location, dwell-ms grid only — no PNG, no
+mislabeled visible-mode artifact).
+
 ---
 
 ## Coverage & QC dashboard
