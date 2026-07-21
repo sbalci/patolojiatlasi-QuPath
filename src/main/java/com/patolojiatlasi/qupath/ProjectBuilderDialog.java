@@ -61,6 +61,7 @@ public class ProjectBuilderDialog {
     private CheckBox blindedCheckBox;
     private TextField nameField;
     private Label locationLabel;
+    private Label targetLabel;
     private File location;
     private Button createBtn;
     private Button cancelBtn;
@@ -114,11 +115,16 @@ public class ProjectBuilderDialog {
 
         nameField = new TextField();
         nameField.setPromptText("Project name");
+        nameField.textProperty().addListener((obs, old, txt) -> updateTargetLabel());
         Button locationBtn = new Button("Choose location…");
         locationBtn.setOnAction(e -> chooseLocation());
         locationLabel = new Label("(no location chosen)");
         HBox locationRow = new HBox(6, locationBtn, locationLabel);
-        VBox newBox = new VBox(6, new Label("Project name:"), nameField, locationRow);
+        // Shows the resolved project folder (<location>/<name>) live, so it's clear the project
+        // goes into its OWN new subfolder — e.g. location "D:\" + name "deneme" → "D:\deneme".
+        targetLabel = new Label();
+        targetLabel.setWrapText(true);
+        VBox newBox = new VBox(6, new Label("Project name:"), nameField, locationRow, targetLabel);
         newBox.setPadding(new Insets(4, 0, 0, 20));
         newBox.disableProperty().bind(newRadio.selectedProperty().not());
 
@@ -230,7 +236,20 @@ public class ProjectBuilderDialog {
         if (dir != null) {
             location = dir;
             locationLabel.setText(dir.getAbsolutePath());
+            updateTargetLabel();
         }
+    }
+
+    /** Live preview of the resolved project folder: {@code <location>/<name>}. */
+    private void updateTargetLabel() {
+        if (targetLabel == null)
+            return;
+        String name = nameField.getText() == null ? "" : nameField.getText().trim();
+        if (location == null || name.isEmpty()) {
+            targetLabel.setText("");
+            return;
+        }
+        targetLabel.setText("Proje klasörü: " + new File(location, name).getAbsolutePath());
     }
 
     private void updateStatus() {
@@ -260,7 +279,8 @@ public class ProjectBuilderDialog {
             File candidate = new File(location, name);
             String[] existing = candidate.list();
             if (candidate.exists() && existing != null && existing.length > 0) {
-                statusLabel.setText("Folder exists and is not empty — choose another name");
+                statusLabel.setText(candidate.getAbsolutePath()
+                        + " zaten var ve boş değil — başka bir ad seçin");
                 return;
             }
             projectDir = candidate;
