@@ -103,6 +103,12 @@ public final class FocusHeatmap {
     private CheckMenuItem overlayItem;  // kept so blinded mode can disable/untick it
     private CheckMenuItem windowItem;   // kept so closing the window can untick it, and for blinded mode
     private CheckMenuItem blindedItem;  // kept so an externally-driven start/stop (Task 3) stays reflected
+    // Manual actions on the current map are also disabled while blinded: "Kaydet…" would otherwise
+    // write a PNG of the (ms) map, and "Araştırmaya katkıda bulun…" would mislabel ms values as the
+    // schema/1 "raw dwell counts" — both are exactly the artifact blinded recording must not produce.
+    private MenuItem clearItem;
+    private MenuItem saveItem;
+    private MenuItem contributeItem;
     private Stage window;
     private ImageView windowView;
 
@@ -128,13 +134,13 @@ public final class FocusHeatmap {
         windowItem = new CheckMenuItem("Ayrı pencerede göster");
         windowItem.selectedProperty().addListener((obs, was, now) -> setWindowVisible(now));
 
-        MenuItem clearItem = new MenuItem("Temizle");
+        clearItem = new MenuItem("Temizle");
         clearItem.setOnAction(e -> clear());
 
-        MenuItem saveItem = new MenuItem("Kaydet…");
+        saveItem = new MenuItem("Kaydet…");
         saveItem.setOnAction(e -> saveDialog());
 
-        MenuItem contributeItem = new MenuItem("Araştırmaya katkıda bulun…");
+        contributeItem = new MenuItem("Araştırmaya katkıda bulun…");
         contributeItem.setOnAction(e -> contribute());
 
         CheckMenuItem keepItem = new CheckMenuItem("Oturumdan sonra sakla (kalıcı)");
@@ -229,6 +235,14 @@ public final class FocusHeatmap {
             overlayItem.setDisable(true);
         if (windowItem != null)
             windowItem.setDisable(true);
+        // Also block manual actions on the map while blinded (see field comment): they'd otherwise
+        // let a click produce the exact PNG/mislabeled-file artifact blinded recording forbids.
+        if (clearItem != null)
+            clearItem.setDisable(true);
+        if (saveItem != null)
+            saveItem.setDisable(true);
+        if (contributeItem != null)
+            contributeItem.setDisable(true);
         if (currentMap != null)
             currentMap.clear();
         lastTickMs = System.currentTimeMillis();
@@ -250,6 +264,12 @@ public final class FocusHeatmap {
             overlayItem.setDisable(false);
         if (windowItem != null)
             windowItem.setDisable(false);
+        if (clearItem != null)
+            clearItem.setDisable(false);
+        if (saveItem != null)
+            saveItem.setDisable(false);
+        if (contributeItem != null)
+            contributeItem.setDisable(false);
         if (blindedItem != null && blindedItem.isSelected())
             blindedItem.setSelected(false);
         refreshTracking();
