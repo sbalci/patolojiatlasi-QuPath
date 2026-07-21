@@ -118,6 +118,8 @@ public final class FocusHeatmap {
     private QuPathViewer currentViewer;
     private ImageData<BufferedImage> currentImageData;
     private FocusMap currentMap;
+    /** True when {@code currentMap} was created while blinded recording — gates {@link #save}. */
+    private boolean currentMapBlinded;
     private String currentSlide;
     private String currentUri;
     private BufferedImageOverlay currentOverlay;
@@ -247,6 +249,13 @@ public final class FocusHeatmap {
             currentMap.clear();
         lastTickMs = System.currentTimeMillis();
         blindedRecording = true;
+        // A pre-existing (visible-mode) map is reused here via clear(), not replaced with a `new
+        // FocusMap(...)` — so the flag must be re-tagged explicitly: from this point on, every
+        // sample deposited into currentMap comes from tickBlinded(), so it must be treated as
+        // blinded for save()'s guard. (Placed after the overlay/window off-toggles above so their
+        // refreshTracking()-triggered legitimate visible-mode keepMaps save, if any, still sees the
+        // old false value and saves the still-visible data normally.)
+        currentMapBlinded = true;
         if (blindedItem != null && !blindedItem.isSelected())
             blindedItem.setSelected(true);
         refreshTracking();
@@ -260,6 +269,11 @@ public final class FocusHeatmap {
         blindedRecording = false;
         if (currentMap != null && !currentMap.isEmpty())
             saveBlinded(currentUri, currentMap);
+        // Clean slate: the blinded map is now persisted (or discarded if empty); drop it so no
+        // stray keepMaps/save() path downstream (e.g. refreshTracking()'s stop-tracking save) can
+        // ever touch it, and so a future visible session starts from a fresh, non-blinded map.
+        currentMap = null;
+        currentMapBlinded = false;
         if (overlayItem != null)
             overlayItem.setDisable(false);
         if (windowItem != null)
@@ -342,10 +356,13 @@ public final class FocusHeatmap {
         if (id != null && id.getServer() != null) {
             ImageServer<BufferedImage> server = id.getServer();
             currentMap = new FocusMap(server.getWidth(), server.getHeight(), GRID_MAX);
+            // Tag the new map with the mode that created it, so save() can refuse a blinded map later.
+            currentMapBlinded = blindedRecording;
             currentSlide = server.getMetadata().getName();
             currentUri = firstUri(server);
         } else {
             currentMap = null;
+            currentMapBlinded = false;
             currentSlide = null;
             currentUri = null;
         }
@@ -480,6 +497,10 @@ public final class FocusHeatmap {
 
     /** Snapshot the map on the (FX) calling thread, then write JSON + PNG on a background thread. */
     private void save(String slide, String uri, FocusMap map, File dir) {
+        // Defense-in-depth: a blinded map is anonymised-JSON-only (see saveBlinded) and must never
+        // reach the PNG/username-bearing path below, regardless of which caller reached here.
+        if (currentMapBlinded)
+            return;
         final String json = buildJson(slide, uri, map);
         final BufferedImage png = map.toImage();
         final String base = safe(slide) + "__" + safe(user) + "__"
