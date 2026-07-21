@@ -101,7 +101,8 @@ public final class FocusHeatmap {
     private boolean keepMaps;
 
     /** Blinded (research) recording: real per-tick dwell-ms, paused when idle/unfocused, no visuals. */
-    private boolean blindedRecording;
+    // volatile: read from the JVM shutdown-hook thread (flushOnShutdown) as well as the FX thread.
+    private volatile boolean blindedRecording;
     private long lastTickMs;
     /**
      * Where blinded fragments/checkpoints/zip for the <b>current</b> blinded session are written --
@@ -112,7 +113,7 @@ public final class FocusHeatmap {
      * qupath.getProject()} already points at the *new* project, so re-resolving it at save time would
      * misattribute the just-finished session's data to the wrong project.
      */
-    private File blindedDir;
+    private volatile File blindedDir;   // read from the shutdown-hook thread too
     /** Ticks since the last blinded checkpoint write; reset in {@link #startBlinded()} and whenever a
      *  fresh slide map is created while blinded (see {@link #switchTo}). */
     private int blindedTicks;
@@ -138,11 +139,11 @@ public final class FocusHeatmap {
 
     private QuPathViewer currentViewer;
     private ImageData<BufferedImage> currentImageData;
-    private FocusMap currentMap;
+    private volatile FocusMap currentMap;   // read from the shutdown-hook thread too
     /** True when {@code currentMap} was created while blinded recording — gates {@link #save}. */
     private boolean currentMapBlinded;
     private String currentSlide;
-    private String currentUri;
+    private volatile String currentUri;   // read from the shutdown-hook thread too
     private BufferedImageOverlay currentOverlay;
 
     public FocusHeatmap(QuPathGUI qupath) {
@@ -624,7 +625,7 @@ public final class FocusHeatmap {
 
     /** Snapshot the map on the (FX) calling thread, then write JSON + PNG on a background thread. */
     private void save(String slide, String uri, FocusMap map, File dir) {
-        // Defense-in-depth: a blinded map is anonymised-JSON-only (see saveBlinded) and must never
+        // Defense-in-depth: a blinded map is anonymised-JSON-only (see saveBlindedSync) and must never
         // reach the PNG/username-bearing path below, regardless of which caller reached here.
         if (currentMapBlinded)
             return;
@@ -672,7 +673,7 @@ public final class FocusHeatmap {
      * disabled until the atlas website has a receiver; until then the file can be shared manually.
      */
     private void contribute() {
-        // A blinded map is anonymised-JSON-only via saveBlinded; never re-contribute it under the
+        // A blinded map is anonymised-JSON-only via saveBlindedSync; never re-contribute it under the
         // schema/1 counts path (mirrors the identical guard at the top of save()).
         if (currentMapBlinded)
             return;
@@ -714,31 +715,18 @@ public final class FocusHeatmap {
 
     /**
      * Persist a finished blinded-recording map: raw JSON only, <b>never</b> a PNG (no visual
-     * artifact of blinded viewing should ever be produced, on disk or otherwise). Written into
-     * {@link #blindedDir} -- the project's {@code atlas-focus/} folder if one was open when {@link
-     * #startBlinded()} ran, else the home-dir fallback -- under schema/2.
-     */
-    private void saveBlinded(String uri, FocusMap map) {
-        final String json = buildBlindedJson(uri, map);
-        final File dir = blindedDir;
-        // Anonymized the same way as the JSON body's slideKey (see anonymizeSlideKey): a raw
-        // file:// slideKey would otherwise carry the local path/username into the *filename*
-        // even though the JSON payload itself is clean -- the identical leak, just relocated.
-        final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(uri))) + "__"
-                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
-        writeTextAsync(new File(dir, base + ".json"), json);
-    }
-
-    /**
-     * Synchronous twin of {@link #saveBlinded}: writes the final fragment on the <b>calling</b>
-     * thread before returning, instead of handing it to a fire-and-forget background thread. Used
-     * only by {@link #stopBlinded()}, which immediately reads {@link #blindedDir} back with {@link
-     * BlindedStore#zipFragments} -- with the async {@link #writeTextAsync} path, that read could
-     * race the write and silently ship a zip missing the last slide's data (a real risk for any
-     * slide viewed under {@link #CHECKPOINT_EVERY_TICKS}, i.e. before a checkpoint ever landed).
-     * {@link #switchTo} keeps using the async {@link #saveBlinded} for its promotion, since nothing
-     * reads the directory immediately afterward there. Same JSON-only, no-PNG contract; best-effort
-     * (logs and swallows any failure rather than throwing into the menu-toggle call site).
+     * artifact of blinded viewing should ever be produced, on disk or otherwise). Written
+     * <b>synchronously</b> on the calling thread into {@link #blindedDir} -- the project's
+     * {@code atlas-focus/} folder if one was open when {@link #startBlinded()} ran, else the
+     * home-dir fallback -- under schema/2.
+     * <p>
+     * Both call sites need the write to have completed before they proceed: {@link #switchTo}
+     * deletes the checkpoint immediately after (an in-flight async write followed by a crash would
+     * lose the slide with no checkpoint fallback), and {@link #stopBlinded()} immediately reads the
+     * directory back with {@link BlindedStore#zipFragments} (an async write could race that read and
+     * ship a zip missing a slide viewed under {@link #CHECKPOINT_EVERY_TICKS}, before a checkpoint
+     * landed). Hence synchronous, not fire-and-forget. Best-effort (logs and swallows any failure
+     * rather than throwing into the caller).
      */
     private void saveBlindedSync(String uri, FocusMap map) {
         try {

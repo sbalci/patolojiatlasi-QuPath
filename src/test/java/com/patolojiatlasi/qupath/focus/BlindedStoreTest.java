@@ -59,4 +59,14 @@ class BlindedStoreTest {
         BlindedStore.zipFragments(empty, zip);   // must not throw
         BlindedStore.zipFragments(new File(dir, "nope"), new File(dir, "n.zip"));  // missing dir, no throw
     }
+
+    @Test
+    void hasFragmentsDetectsFragmentsElseFalse(@TempDir File dir) throws Exception {
+        assertFalse(BlindedStore.hasFragments(dir));                    // empty
+        assertFalse(BlindedStore.hasFragments(new File(dir, "nope")));  // missing dir, no throw
+        Files.writeString(new File(dir, "note.txt").toPath(), "x");
+        assertFalse(BlindedStore.hasFragments(dir));                    // non-fragment only
+        Files.writeString(new File(dir, "focus-blinded__s__t.json").toPath(), "{}");
+        assertTrue(BlindedStore.hasFragments(dir));                     // a fragment present
+    }
 }
