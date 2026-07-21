@@ -66,6 +66,8 @@ public final class FocusHeatmap {
     private static final int SAMPLE_MS = 250;     // viewport sampling interval
     private static final int REFRESH_EVERY = 4;   // rebuild the overlay every N samples (~1s)
     private static final double OVERLAY_OPACITY = 0.5;
+    /** Blinded-mode dt clamp: at most two sample intervals, so a stalled/late tick can't over-credit. */
+    private static final long DT_CAP_MS = 2L * SAMPLE_MS;
 
     // Research contribution (anonymous, opt-in). Uploading is DISABLED until the atlas website
     // has a receiver — see docs/focus-aggregation-plan.md. Until then "Contribute" only writes an
@@ -74,6 +76,13 @@ public final class FocusHeatmap {
     private static final boolean UPLOAD_ENABLED = false;
     private static final String UPLOAD_ENDPOINT = "";
     private static final String CONTRIBUTION_SCHEMA = "atlas-focus-contribution/1";
+    /**
+     * Blinded (research) recording schema: same anonymised shape, but {@code grid} holds real dwell
+     * milliseconds (not fixed-weight sample counts) — {@code weightUnit="ms"} tells a reader which.
+     * tools/aggregate-focus.py accepts both schemas: it normalises each contribution by its own max
+     * before averaging, so ms-vs-count units don't need reconciling.
+     */
+    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/2";
 
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
@@ -81,12 +90,19 @@ public final class FocusHeatmap {
     private final String sessionId = java.util.UUID.randomUUID().toString();
 
     // The heat map can be shown two ways, independently: as a translucent layer on the slide, and/or
-    // in a separate small window. Sampling runs while EITHER is visible.
+    // in a separate small window. Sampling also runs — silently, no visuals — while blinded
+    // recording is active (see startBlinded/stopBlinded).
     private boolean overlayVisible;
     private boolean windowVisible;
     private boolean keepMaps;
 
-    private CheckMenuItem windowItem;   // kept so closing the window can untick it
+    /** Blinded (research) recording: real per-tick dwell-ms, paused when idle/unfocused, no visuals. */
+    private boolean blindedRecording;
+    private long lastTickMs;
+
+    private CheckMenuItem overlayItem;  // kept so blinded mode can disable/untick it
+    private CheckMenuItem windowItem;   // kept so closing the window can untick it, and for blinded mode
+    private CheckMenuItem blindedItem;  // kept so an externally-driven start/stop (Task 3) stays reflected
     private Stage window;
     private ImageView windowView;
 
@@ -106,7 +122,7 @@ public final class FocusHeatmap {
 
     /** Build the "Odak ısı haritası" submenu with all controls wired up. */
     public Menu buildMenu() {
-        CheckMenuItem overlayItem = new CheckMenuItem("Slayt üzerinde göster (ısı katmanı)");
+        overlayItem = new CheckMenuItem("Slayt üzerinde göster (ısı katmanı)");
         overlayItem.selectedProperty().addListener((obs, was, now) -> setOverlayVisible(now));
 
         windowItem = new CheckMenuItem("Ayrı pencerede göster");
@@ -124,15 +140,31 @@ public final class FocusHeatmap {
         CheckMenuItem keepItem = new CheckMenuItem("Oturumdan sonra sakla (kalıcı)");
         keepItem.selectedProperty().addListener((obs, was, now) -> keepMaps = now);
 
+        // JavaFX's MenuItem/CheckMenuItem has no setTooltip(...) — a hover tooltip isn't available
+        // on a plain menu row, so the description is folded into the label itself instead.
+        blindedItem = new CheckMenuItem("Kör kayıt (araştırma) — sessizce kaydeder, ısı haritası gösterilmez");
+        blindedItem.selectedProperty().addListener((obs, was, now) -> {
+            if (now)
+                startBlinded();
+            else
+                stopBlinded();
+        });
+
         Menu menu = new Menu("Odak ısı haritası");
         menu.getItems().addAll(overlayItem, windowItem, clearItem, saveItem, contributeItem,
-                new SeparatorMenuItem(), keepItem);
+                new SeparatorMenuItem(), keepItem, blindedItem);
         return menu;
     }
 
     // --- tracking lifecycle -------------------------------------------------
 
     private void setOverlayVisible(boolean on) {
+        // Belt-and-suspenders: the item is disabled while blinded, but refuse programmatic
+        // enabling too, so blinded recording can never surface a visual.
+        if (on && blindedRecording) {
+            overlayItem.setSelected(false);
+            return;
+        }
         this.overlayVisible = on;
         if (!on)
             removeOverlay();
@@ -140,6 +172,10 @@ public final class FocusHeatmap {
     }
 
     private void setWindowVisible(boolean on) {
+        if (on && blindedRecording) {
+            windowItem.setSelected(false);
+            return;
+        }
         this.windowVisible = on;
         if (on)
             showWindow();
@@ -148,9 +184,9 @@ public final class FocusHeatmap {
         refreshTracking();
     }
 
-    /** Start/stop the sampling timer based on whether either display is showing. */
+    /** Start/stop the sampling timer based on whether any display — or blinded recording — is active. */
     private void refreshTracking() {
-        boolean track = overlayVisible || windowVisible;
+        boolean track = overlayVisible || windowVisible || blindedRecording;
         if (track) {
             if (timer == null) {
                 timer = new Timeline(new KeyFrame(Duration.millis(SAMPLE_MS), e -> tick()));
@@ -167,12 +203,68 @@ public final class FocusHeatmap {
         }
     }
 
+    // --- blinded (research) recording ---------------------------------------
+    //
+    // Records real per-slide viewing time silently: no overlay, no window, no status message —
+    // just the tested FocusMap.activeDwellMs kernel accumulating dwell-ms, paused whenever the app
+    // is unfocused/idle. Driven either by the "Kör kayıt (araştırma)" menu toggle, or externally by
+    // Task 3's project-open/close hook via startBlinded()/stopBlinded() on this same retained
+    // instance (see AtlasExtension).
+
+    public boolean isBlinded() {
+        return blindedRecording;
+    }
+
+    /** Begin blinded recording: hides/disables any visuals, resets the current slide's map, and
+     *  starts the sampling timer if it isn't already running. Idempotent (no-op if already blinded). */
+    public void startBlinded() {
+        if (blindedRecording)
+            return;
+        // Hide/clear any visible overlay or window — blinded recording must render nothing.
+        if (overlayVisible)
+            overlayItem.setSelected(false);   // -> setOverlayVisible(false) -> removeOverlay()
+        if (windowVisible)
+            windowItem.setSelected(false);    // -> setWindowVisible(false) -> hideWindow()
+        if (overlayItem != null)
+            overlayItem.setDisable(true);
+        if (windowItem != null)
+            windowItem.setDisable(true);
+        if (currentMap != null)
+            currentMap.clear();
+        lastTickMs = System.currentTimeMillis();
+        blindedRecording = true;
+        if (blindedItem != null && !blindedItem.isSelected())
+            blindedItem.setSelected(true);
+        refreshTracking();
+    }
+
+    /** Stop blinded recording: saves the accumulated dwell-ms as a raw JSON, re-enables the overlay
+     *  and window toggles, and stops the timer if nothing else needs it. No-op if not blinded. */
+    public void stopBlinded() {
+        if (!blindedRecording)
+            return;
+        blindedRecording = false;
+        if (currentMap != null && !currentMap.isEmpty())
+            saveBlinded(currentUri, currentMap);
+        if (overlayItem != null)
+            overlayItem.setDisable(false);
+        if (windowItem != null)
+            windowItem.setDisable(false);
+        if (blindedItem != null && blindedItem.isSelected())
+            blindedItem.setSelected(false);
+        refreshTracking();
+    }
+
     private void tick() {
         try {
             QuPathViewer v = qupath.getViewer();
             ImageData<BufferedImage> id = (v == null) ? null : v.getImageData();
             if (id != currentImageData)
                 switchTo(v, id);
+            if (blindedRecording) {
+                tickBlinded(v);
+                return;
+            }
             if (v == null || currentMap == null)
                 return;
             Shape shape = v.getDisplayedRegionShape();
@@ -192,10 +284,38 @@ public final class FocusHeatmap {
         }
     }
 
+    /**
+     * Blinded-mode sampling: deposits real elapsed dwell-milliseconds (via the pure
+     * {@link FocusMap#activeDwellMs} kernel, paused whenever the app is unfocused/idle or no slide
+     * is open) — and nothing else. No overlay refresh, no window update, no status: this path must
+     * never render anything.
+     */
+    private void tickBlinded(QuPathViewer v) {
+        long now = System.currentTimeMillis();
+        boolean active = mainStageFocused() && v != null && v.getImageData() != null;
+        long ms = FocusMap.activeDwellMs(now, lastTickMs, active, DT_CAP_MS);
+        lastTickMs = now;
+        if (ms > 0 && currentMap != null) {
+            Shape shape = v.getDisplayedRegionShape();
+            if (shape != null) {
+                Rectangle b = shape.getBounds();
+                currentMap.deposit(b.getX(), b.getY(), b.getWidth(), b.getHeight(), ms);
+            }
+        }
+    }
+
+    private boolean mainStageFocused() {
+        return qupath.getStage() != null && qupath.getStage().isFocused();
+    }
+
     /** Move to a new slide/viewer: persist the old map if requested, then start a fresh one. */
     private void switchTo(QuPathViewer v, ImageData<BufferedImage> id) {
         if (keepMaps && currentMap != null && !currentMap.isEmpty())
             save(currentSlide, currentUri, currentMap, defaultDir());
+        // Independent of keepMaps: while blinded, always persist the finished slide's real dwell
+        // time before it's discarded — otherwise switching slides mid-session would silently lose it.
+        if (blindedRecording && currentMap != null && !currentMap.isEmpty())
+            saveBlinded(currentUri, currentMap);
         removeOverlay();
         currentViewer = v;
         currentImageData = id;
@@ -210,6 +330,8 @@ public final class FocusHeatmap {
             currentUri = null;
         }
         ticksSinceRefresh = REFRESH_EVERY;
+        if (blindedRecording)
+            lastTickMs = System.currentTimeMillis();
         if (windowVisible)
             updateWindow();
     }
@@ -415,6 +537,41 @@ public final class FocusHeatmap {
         m.put("sampleCount", map.getSampleCount());
         m.put("date", java.time.LocalDate.now().toString());   // date only (no time) for privacy
         m.put("grid", map.getGrid().clone());   // raw dwell counts; the server normalises
+        return new GsonBuilder().create().toJson(m);
+    }
+
+    /**
+     * Persist a finished blinded-recording map: raw JSON only, <b>never</b> a PNG (no visual
+     * artifact of blinded viewing should ever be produced, on disk or otherwise). Written to the
+     * same {@code contributions/} folder as {@link #contribute()}, under schema/2.
+     */
+    private void saveBlinded(String uri, FocusMap map) {
+        final String json = buildBlindedJson(uri, map);
+        final File dir = new File(defaultDir(), "contributions");
+        final String base = "focus-blinded__" + safe(slideKey(uri)) + "__"
+                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        writeTextAsync(new File(dir, base + ".json"), json);
+    }
+
+    /**
+     * Blinded contribution payload — same anonymised shape as {@link #buildContributionJson}, but
+     * {@code grid} holds real dwell-milliseconds (not fixed-weight sample counts): {@code
+     * weightUnit="ms"} and {@code durationMs} (= {@link FocusMap#getTotalWeight()}) make that explicit.
+     */
+    private String buildBlindedJson(String uri, FocusMap map) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("schema", CONTRIBUTION_SCHEMA_BLINDED);
+        m.put("slideKey", slideKey(uri));
+        m.put("sessionId", sessionId);
+        m.put("imageWidth", map.getImageWidth());
+        m.put("imageHeight", map.getImageHeight());
+        m.put("gridWidth", map.getGridWidth());
+        m.put("gridHeight", map.getGridHeight());
+        m.put("sampleCount", map.getSampleCount());
+        m.put("weightUnit", "ms");
+        m.put("durationMs", map.getTotalWeight());
+        m.put("date", java.time.LocalDate.now().toString());
+        m.put("grid", map.getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
         return new GsonBuilder().create().toJson(m);
     }
 

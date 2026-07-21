@@ -26,6 +26,9 @@ public class AtlasExtension implements QuPathExtension {
 
     private static final Logger logger = LoggerFactory.getLogger(AtlasExtension.class);
 
+    /** Retained so Task 3's project-open/close hook can drive blinded recording on the same instance. */
+    private FocusHeatmap focusHeatmap;
+
     @Override
     public String getName() {
         return "Patoloji Atlası";
@@ -64,7 +67,8 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
             rotationItem.setOnAction(e -> rotation.show());
             Menu viewMenu = new Menu("Görünüm");
-            viewMenu.getItems().addAll(rotationItem, new FocusHeatmap(qupath).buildMenu());
+            this.focusHeatmap = new FocusHeatmap(qupath);
+            viewMenu.getItems().addAll(rotationItem, focusHeatmap.buildMenu());
 
             // Compare group — a case's stains in a synchronized multi-viewer grid.
             MenuItem compareItem = new MenuItem("Bu vakanın boyalarını karşılaştır…");
