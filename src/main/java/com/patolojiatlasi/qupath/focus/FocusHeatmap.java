@@ -306,11 +306,15 @@ public final class FocusHeatmap {
         // folder (or the fallback dir) -- the single file to hand to the study coordinator. A zip
         // failure must never prevent recording from stopping cleanly.
         try {
-            String stamp = LocalDateTime.now().format(
-                    DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
-            String shortId = sessionId.length() >= 8 ? sessionId.substring(0, 8) : sessionId;
-            File zipParent = "atlas-focus".equals(blindedDir.getName()) ? blindedDir.getParentFile() : blindedDir;
-            BlindedStore.zipFragments(blindedDir, new File(zipParent, BlindedStore.zipName(stamp, shortId)));
+            // Only zip when something was actually recorded — an immediate start/stop (or a
+            // session with no dwell) must not litter the project folder with empty zips.
+            if (BlindedStore.hasFragments(blindedDir)) {
+                String stamp = LocalDateTime.now().format(
+                        DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
+                String shortId = sessionId.length() >= 8 ? sessionId.substring(0, 8) : sessionId;
+                File zipParent = "atlas-focus".equals(blindedDir.getName()) ? blindedDir.getParentFile() : blindedDir;
+                BlindedStore.zipFragments(blindedDir, new File(zipParent, BlindedStore.zipName(stamp, shortId)));
+            }
         } catch (Exception e) {
             logger.debug("Blinded zip failed: {}", e.getMessage());
         }
@@ -463,7 +467,10 @@ public final class FocusHeatmap {
         // Independent of keepMaps: while blinded, always persist the finished slide's real dwell
         // time before it's discarded — otherwise switching slides mid-session would silently lose it.
         if (blindedRecording && currentMap != null && !currentMap.isEmpty()) {
-            saveBlinded(currentUri, currentMap);
+            // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
+            // disk first — an async write could still be in flight if a crash follows, losing this
+            // slide with no checkpoint fallback. A small JSON write is negligible vs. slide loading.
+            saveBlindedSync(currentUri, currentMap);
             // The fragment just written now carries whatever the checkpoint was tracking for the
             // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
             deleteCheckpoint();

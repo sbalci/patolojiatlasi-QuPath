@@ -30,6 +30,12 @@ final class BlindedStore {
         return name.startsWith("focus-blinded__") || name.endsWith(".partial.json");
     }
 
+    /** True if {@code dir} holds at least one blinded fragment (avoid writing an empty zip). */
+    static boolean hasFragments(File dir) {
+        File[] files = dir == null ? null : dir.listFiles((d, n) -> isFragment(n));
+        return files != null && files.length > 0;
+    }
+
     /** Zip every blinded fragment (+ any .partial checkpoint) in {@code dir} into {@code zipTarget}. */
     static File zipFragments(File dir, File zipTarget) {
         try {
