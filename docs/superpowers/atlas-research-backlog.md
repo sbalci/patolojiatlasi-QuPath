@@ -21,10 +21,11 @@
 | 5 | **Portable Collections / Bookmarks-History** | S | ✅ shipped (merged to master, unpushed) |
 | 6 | **Guided Teaching Tour** | M | queued |
 
-> **Out-of-band (user-requested 2026-07-20, ahead of #6):** blinded temporal focus recording —
-> record viewed areas + dwell time silently (no in-app heatmap) for unbiased research, with a
-> project-default "hidden tracking on" mode. Requirements captured in
-> `blinded-focus-recording-notes.md`; spec/build next.
+> **Out-of-band (user-requested 2026-07-20, ahead of #6): ✅ SHIPPED** — blinded temporal focus
+> recording: records viewed areas + dwell time silently (no in-app heatmap, data-only) for unbiased
+> research, with a project-default "hidden tracking on" mode + one-time consent. Merged to master
+> (unpushed). Spec `2026-07-21-blinded-focus-recording-design.md`. Data-only guarantee + slideKey
+> anonymization verified airtight by review.
 | 7 | **Manual Stain-Alignment Curtain/Overlay** | M | queued |
 | 8 | **Multi-Panel Figure Export** | S | queued |
 | 9 | **Shareable View Links** | M | queued (VERIFY: 0.6 viewer settable center/downsample) |
