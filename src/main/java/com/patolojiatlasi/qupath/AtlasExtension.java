@@ -1,8 +1,10 @@
 package com.patolojiatlasi.qupath;
 
 import java.awt.image.BufferedImage;
+import java.util.Optional;
 
 import javafx.scene.control.Alert;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
@@ -11,12 +13,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.patolojiatlasi.qupath.focus.FocusHeatmap;
+import com.patolojiatlasi.qupath.research.BlindedResearch;
 
 import qupath.lib.common.Version;
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.extensions.QuPathExtension;
 import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.images.ImageData;
+import qupath.lib.projects.Project;
 
 /**
  * QuPath extension that adds a browsable catalogue of whole-slide images from
@@ -28,6 +32,9 @@ public class AtlasExtension implements QuPathExtension {
 
     /** Retained so Task 3's project-open/close hook can drive blinded recording on the same instance. */
     private FocusHeatmap focusHeatmap;
+
+    /** Retained so {@link #onProjectChanged} can own the consent {@link Alert} (stage owner lookup). */
+    private QuPathGUI qupath;
 
     @Override
     public String getName() {
@@ -47,6 +54,7 @@ public class AtlasExtension implements QuPathExtension {
 
     @Override
     public void installExtension(QuPathGUI qupath) {
+        this.qupath = qupath;
         try {
             // All of this extension's actions live under one top-level "Patoloji Atlası" menu,
             // grouped into sub-menus (with the focus heatmap as a sub-sub-menu), instead of being
@@ -69,6 +77,12 @@ public class AtlasExtension implements QuPathExtension {
             Menu viewMenu = new Menu("Görünüm");
             this.focusHeatmap = new FocusHeatmap(qupath);
             viewMenu.getItems().addAll(rotationItem, focusHeatmap.buildMenu());
+
+            // Blinded-research auto-start: a project can carry a "blinded tracking" flag
+            // (set from the project builder checkbox); opening such a project starts blinded
+            // recording on this same retained focusHeatmap instance, after a one-time consent
+            // notice. Property fires on the FX thread, so the hook itself doesn't need to.
+            qupath.projectProperty().addListener((obs, oldProj, newProj) -> onProjectChanged(oldProj, newProj));
 
             // Compare group — a case's stains in a synchronized multi-viewer grid.
             MenuItem compareItem = new MenuItem("Bu vakanın boyalarını karşılaştır…");
@@ -160,5 +174,48 @@ public class AtlasExtension implements QuPathExtension {
             logger.debug("Could not resolve open atlas case: {}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Blinded-research auto-start hook, run whenever {@code qupath.projectProperty()} fires (i.e.
+     * the active project changed — opened, closed, or switched). Stops any in-progress blinded
+     * recording from the closing project, then — if the newly-opened project carries the
+     * blinded-tracking flag (see {@link BlindedResearch}) — starts it again, showing a one-time
+     * consent notice first if this project hasn't been consented to yet. Declining the notice
+     * leaves {@code consented} false, so the same notice reappears next time this project opens
+     * and recording stays off; accepting starts recording immediately and every later re-open of
+     * this project skips straight to {@link FocusHeatmap#startBlinded()}.
+     */
+    private void onProjectChanged(Project<BufferedImage> oldProj, Project<BufferedImage> newProj) {
+        if (oldProj != null && focusHeatmap.isBlinded())
+            focusHeatmap.stopBlinded();
+
+        if (newProj == null || !BlindedResearch.isBlindedProject(newProj))
+            return;
+        // Re-entrancy guard: never re-start (or re-prompt for) a session that's already recording.
+        if (focusHeatmap.isBlinded())
+            return;
+
+        if (BlindedResearch.hasConsented(newProj)) {
+            focusHeatmap.startBlinded();
+            return;
+        }
+
+        Alert alert = new Alert(Alert.AlertType.CONFIRMATION,
+                "Bu proje araştırma amaçlı kör odak kaydı için işaretlenmiş. Kabul ederseniz, "
+                        + "bu oturumdan itibaren bakılan bölgeler ve süre anonimleştirilmiş şekilde "
+                        + "sessizce kaydedilir; kimlik bilgisi kaydedilmez ve uygulama içinde hiçbir "
+                        + "şey gösterilmez.");
+        alert.setTitle("Araştırma kaydı");
+        alert.setHeaderText("Araştırma kaydı");
+        if (qupath.getStage() != null)
+            alert.initOwner(qupath.getStage());
+        Optional<ButtonType> choice = alert.showAndWait();
+        if (choice.isPresent() && choice.get() == ButtonType.OK) {
+            BlindedResearch.markConsented(newProj);
+            focusHeatmap.startBlinded();
+        }
+        // else: declined -- consented stays false, so the notice is shown again on next open and
+        // recording stays off for this session.
     }
 }

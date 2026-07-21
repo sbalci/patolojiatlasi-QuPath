@@ -13,6 +13,7 @@ import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.ProgressIndicator;
@@ -30,6 +31,8 @@ import javafx.stage.Stage;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import com.patolojiatlasi.qupath.research.BlindedResearch;
 
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.projects.Project;
@@ -55,6 +58,7 @@ public class ProjectBuilderDialog {
 
     private RadioButton newRadio;
     private RadioButton currentRadio;
+    private CheckBox blindedCheckBox;
     private TextField nameField;
     private Label locationLabel;
     private File location;
@@ -118,6 +122,11 @@ public class ProjectBuilderDialog {
         newBox.setPadding(new Insets(4, 0, 0, 20));
         newBox.disableProperty().bind(newRadio.selectedProperty().not());
 
+        // Blinded (research) tracking is a per-project sidecar flag (see BlindedResearch), not
+        // tied to new-vs-current — checking it here just writes the flag once the project is
+        // built/added to; AtlasExtension's project-open hook does the actual auto-start + consent.
+        blindedCheckBox = new CheckBox("Araştırma projesi — kör odak kaydı (blinded)");
+
         createBtn = new Button("Create");
         createBtn.setOnAction(e -> runBuild());
         cancelBtn = new Button("Cancel");
@@ -133,6 +142,7 @@ public class ProjectBuilderDialog {
         VBox rootBox = new VBox(10,
                 new Label("Selected images:"), listView, listButtons,
                 new Label("Target:"), newRadio, newBox, currentRadio,
+                blindedCheckBox,
                 actions);
         rootBox.setPadding(new Insets(12));
 
@@ -279,7 +289,7 @@ public class ProjectBuilderDialog {
                         } catch (Throwable ex) {
                             logger.warn("Could not open new project: {}", ex.getMessage());
                         }
-                        finish(outcome.result());
+                        finish(outcome.result(), outcome.project());
                     });
                 } else {
                     Project<BufferedImage> project = qupath.getProject();
@@ -291,7 +301,7 @@ public class ProjectBuilderDialog {
                         } catch (Throwable ignore) {
                             // project already updated on disk
                         }
-                        finish(result);
+                        finish(result, project);
                     });
                 }
             } catch (Throwable ex) {
@@ -311,10 +321,21 @@ public class ProjectBuilderDialog {
         t.start();
     }
 
-    /** Runs on the FX thread after a build: keep failed cases for retry, drop the rest, report, close. */
-    private void finish(AtlasProjectService.BuildResult result) {
+    /** Runs on the FX thread after a build: keep failed cases for retry, drop the rest, report, close.
+     *  {@code project} is the project just created (new-project path) or added to (current-project
+     *  path); used only to resolve its directory for the blinded-research flag below. */
+    private void finish(AtlasProjectService.BuildResult result, Project<BufferedImage> project) {
         building = false;
         progress.setVisible(false);
+        // Write the blinded-research sidecar flag only when the checkbox was checked; the actual
+        // auto-start + one-time consent notice is AtlasExtension's project-open hook, not here.
+        if (blindedCheckBox.isSelected()) {
+            File dir = BlindedResearch.projectDir(project);
+            if (dir != null)
+                BlindedResearch.writeFlag(dir, true);
+            else
+                logger.warn("Could not resolve project directory for blinded-research flag");
+        }
         // Keep only the cases that failed to add, so the user can retry them without re-finding
         // them from the tree; succeeded and skipped (already-present) cases leave the selection.
         java.util.Set<AtlasCase> failed = new java.util.HashSet<>();
