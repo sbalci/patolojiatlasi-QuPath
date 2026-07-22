@@ -19,6 +19,19 @@ scanning vs drilling rate (Drew), path velocity/linearity/search-focus (Roa-Peñ
 cross-session coincidence/region-coverage (Xu/Nan, Roa-Peña). All new formulas are documented
 per-function with the exact edge-case behavior (blank-vs-0.0, ddof, quantile method) an R port
 must match -- see each docstring below.
+
+Phase 2 additions (schema/4's ``annotations`` GeoJSON FeatureCollection + schema/5's 8-element
+path with cursor position): annotation metrics (``dwell_in_mask_pct`` -- Ghezloo's ROI time
+percentage generalized to a reader's own annotated region; ``enrichment_ratio`` -- Nan 2025's
+dwell-weighted enrichment; ``annotation_reentry_count`` -- Brunyé 2017's re-entry rate) that all
+take an already-rasterized boolean cell mask (see ``analyze.py``'s GeoJSON-to-grid rasterizer,
+reused unchanged from the existing ``--roi`` machinery) rather than GeoJSON directly, plus cursor
+metrics (``cursor_over_slide_pct``, ``mouse_viewport_coupling_px``) computed straight off the
+path's ``mouseX``/``mouseY`` elements. This same pass also fixes two pre-existing correctness bugs
+found by literature review (``coincidence_level``'s denominator; ``magnification_percentage``'s
+tie-counting) -- see each function's docstring and
+``docs/superpowers/navtrack-lit-review-improvements.md`` §0 for the exact before/after and the
+literature citations motivating each fix.
 """
 import math
 from collections import Counter
@@ -460,20 +473,27 @@ def zoom_range(path, base_mag=None, img_w=None):
 
 
 def magnification_percentage(path, base_mag=None, img_w=None):
-    """Fraction of consecutive scanpath transitions that are zoom-IN or same-zoom (a
-    "consecutive zooming" measure after Ghezloo): ``|{i : zoom[i+1] >= zoom[i]}| / (n-1)`` where
-    ``zoom = point_zoom(path[i])`` and ``n = len(path)``. Exact ``>=`` comparison, no tolerance:
+    """Fraction of consecutive scanpath transitions that are strictly zoom-IN (a "consecutive
+    zooming" measure after Ghezloo): ``|{i : zoom[i+1] > zoom[i]}| / (n-1)`` where
+    ``zoom = point_zoom(path[i])`` and ``n = len(path)``. Exact ``>`` comparison, no tolerance:
     :func:`point_zoom` is a deterministic function of integer-quantized inputs (``dsMilli``,
     rounded ``w``) plus a fragment-constant ``base_mag``, so two ticks at a held zoom level
     produce bit-identical floats -- a tolerance would only be needed if this were re-derived from
-    a noisy/continuous zoom signal, which it is not.
+    a noisy/continuous zoom signal, which it is not. A held zoom level (an exact tie) does
+    **not** count -- see the bug-fix note below.
 
-    ``0.0`` if the path has fewer than 2 points (no transitions -- not NaN/NA)."""
+    ``0.0`` if the path has fewer than 2 points (no transitions -- not NaN/NA).
+
+    **Bug fix (2026-07, see ``docs/superpowers/navtrack-lit-review-improvements.md`` §0.B):** this
+    used to count zoom-*unchanged* transitions too (``diffs >= 0``). Ghezloo's definition is that
+    the zoom level must *strictly* increase; a held zoom level (an exact tie) must not count as
+    "consecutive zooming". Changed ``np.count_nonzero(diffs >= 0)`` to
+    ``np.count_nonzero(diffs > 0)`` below -- an R port must use the same strict ``>``."""
     if not path or len(path) < 2:
         return 0.0
     zooms = _zoom_series(path, base_mag, img_w)
     diffs = zooms[1:] - zooms[:-1]
-    return float(np.count_nonzero(diffs >= 0)) / len(diffs)
+    return float(np.count_nonzero(diffs > 0)) / len(diffs)
 
 
 def _step_zoom_changed(path, base_mag=None, img_w=None):
@@ -630,10 +650,22 @@ def search_focus_ratio(path, base_mag=None, img_w=None):
 def coincidence_level(grids, thresh=0.1):
     """Fraction of cells that are above-threshold (``> thresh`` of each grid's own max, via
     :func:`normalise_max`) in **2 or more** of the given grids (already resampled to a common
-    shape). Roa-Peña reports ~70.5% with this style of rule on real multi-reader data.
+    shape), normalized to the **visited footprint** -- cells above-threshold in **at least 1**
+    grid -- not the whole grid shape. Roa-Peña reports ~70.5% with this style of rule on real
+    multi-reader data.
 
-    ``float("nan")`` if fewer than 2 grids are given (undefined for a single reader); ``0.0`` for
-    an empty (zero-cell) grid shape."""
+    ``coincidence% = |cells visited by >=2 readers| / |cells visited by >=1 reader|``
+
+    **Bug fix (2026-07, see ``docs/superpowers/navtrack-lit-review-improvements.md`` §0.A):** this
+    used to normalize by the *whole grid* (``counts.size``, every cell including never-visited
+    ones), which silently under-reports coincidence for any partially-explored slide and isn't
+    comparable to the literature's ~70.5% benchmark -- Roa-Peña's own sanity check is a
+    48%-visited slide still showing 97% coincidence, which is impossible under a whole-grid
+    denominator. An R port must normalize by the visited-footprint count, not the grid length.
+
+    ``float("nan")`` if fewer than 2 grids are given (undefined for a single reader). ``0.0`` if
+    the visited footprint (``counts >= 1``) is empty -- nothing was visited by anyone, so there is
+    nothing to compute a coincidence fraction over (guarded to avoid division by zero)."""
     grids = list(grids)
     if len(grids) < 2:
         return float("nan")
@@ -641,7 +673,10 @@ def coincidence_level(grids, thresh=0.1):
     counts = np.zeros_like(normed[0], dtype=float)
     for g in normed:
         counts += (g > thresh).astype(float)
-    return float(np.count_nonzero(counts >= 2)) / counts.size if counts.size else 0.0
+    visited = int(np.count_nonzero(counts >= 1))
+    if visited == 0:
+        return 0.0
+    return float(np.count_nonzero(counts >= 2)) / visited
 
 
 def region_coverage_pct(session_grid, consensus_grid, thresh=0.1):
@@ -657,6 +692,147 @@ def region_coverage_pct(session_grid, consensus_grid, thresh=0.1):
         return 0.0
     covered = int(np.logical_and(cons_mask, sess > thresh).sum())
     return float(covered) / n * 100.0
+
+
+# ---------------------------------------------------------------------------
+# Annotation metrics (Phase 2; schema/4+ "annotations" GeoJSON FeatureCollection).
+#
+# These functions take an already-rasterized boolean cell mask (see ``analyze.py``'s
+# ``rasterize_roi``, the same GeoJSON-polygon-to-grid rasterizer already used for the ``--roi``
+# CLI flag) rather than GeoJSON themselves -- this module stays free of GeoJSON parsing, matching
+# the existing convention that ``metrics.py`` only ever operates on numpy arrays/paths.
+# ---------------------------------------------------------------------------
+
+def dwell_in_mask_pct(grid, mask):
+    """Percentage of total dwell that falls inside ``mask`` -- Ghezloo's "ROI time percentage",
+    generalized from an expert reference ROI to a reader's own annotated region:
+
+    ``dwellInAnnotationPct = 100 * sum(grid[mask]) / sum(grid)``
+
+    ``grid`` and ``mask`` (boolean, same shape) are both flattened before comparison. ``0.0`` if
+    ``sum(grid)`` is 0 (no dwell recorded at all, or an empty grid) -- there is genuinely 0% dwell
+    anywhere, not an undefined ratio; also ``0.0`` (not undefined) when ``mask`` has no ``True``
+    cells (no annotation on this slide) since ``sum(grid[mask])`` is then simply 0."""
+    g = np.asarray(grid, dtype=float).flatten()
+    msk = np.asarray(mask).astype(bool).flatten()
+    total = g.sum()
+    if total <= 0:
+        return 0.0
+    return float(g[msk].sum()) / total * 100.0
+
+
+def enrichment_ratio(grid, mask):
+    """Mean dwell-ms per annotated cell divided by mean dwell-ms per non-annotated cell (Nan 2025
+    Nat Commun's enrichment ratio, a companion to the area-based :func:`region_coverage_pct`):
+
+    ``enrichmentRatio = mean(grid[mask]) / mean(grid[~mask])``
+
+    ``float("nan")`` (blank in ``metrics.csv`` via ``analyze._sanitize_nan``) in three distinct
+    undefined cases, all mapped to the same NaN/blank rather than 0 or Inf -- an R port must
+    special-case all three the same way:
+
+    - ``mask`` has no ``True`` cells (no annotation on this slide -- nothing to enrich);
+    - ``mask`` has no ``False`` cells (the whole grid is annotated -- no "outside" to compare
+      against);
+    - the non-annotated mean is exactly 0 (division by zero)."""
+    g = np.asarray(grid, dtype=float).flatten()
+    msk = np.asarray(mask).astype(bool).flatten()
+    if not msk.any() or msk.all():
+        return float("nan")
+    mean_out = float(g[~msk].mean())
+    if mean_out == 0:
+        return float("nan")
+    mean_in = float(g[msk].mean())
+    return mean_in / mean_out
+
+
+def annotation_reentry_count(path, mask, gw, gh, img_w, img_h):
+    """Count of scanpath re-entries into the annotated region (Brunyé 2017's re-entry rate).
+
+    Maps every path point to a grid cell via :func:`visited_sequence` (the same floor-division
+    convention used throughout this module), which also run-length-dedups consecutive repeats so
+    dwelling in one cell across many samples doesn't inflate the count. Looks up ``mask``
+    (boolean, ``gh x gw`` flattened) at each deduped visited cell to get a per-visit
+    inside/outside boolean sequence, then counts the number of maximal ``True`` runs ("visits") in
+    that sequence:
+
+    ``annotationReentryCount = max(0, n_visits - 1)``
+
+    The first visit is an *entry*, not a *re*-entry -- this holds regardless of whether the very
+    first visited cell happens to already be inside the region (there is nothing to have "left"
+    yet either way), so the ``- 1`` is unconditional once ``n_visits >= 1``.
+
+    ``0`` if the path is empty/``None``, ``mask`` has no ``True`` cells (no annotation on this
+    slide), or the deduped visited sequence never enters the region at all (``n_visits == 0``)."""
+    mask = np.asarray(mask).astype(bool).flatten()
+    if not path or not mask.any():
+        return 0
+    seq = visited_sequence(path, gw, gh, img_w, img_h)
+    if not seq:
+        return 0
+    n_visits = 0
+    prev_inside = False
+    for idx in seq:
+        inside = bool(mask[idx])
+        if inside and not prev_inside:
+            n_visits += 1
+        prev_inside = inside
+    return max(0, n_visits - 1)
+
+
+# ---------------------------------------------------------------------------
+# Cursor / mouse metrics (Phase 2; schema/5 8-element path points only:
+# [tRelMs, cx, cy, w, h, dsMilli, mouseX, mouseY] -- a partial-attention proxy after Raghunath).
+# ---------------------------------------------------------------------------
+
+def has_mouse_data(path):
+    """``True`` iff ``path`` is non-empty and its points carry cursor data (8-element schema/5
+    points) rather than the shorter schema/3-/4 point shapes. Checked on the first point only -- a
+    single fragment's path is uniformly one shape (the recorder never mixes point lengths within
+    one session), so this never needs to scan the whole list."""
+    return bool(path) and len(path[0]) >= 8
+
+
+def cursor_over_slide_pct(path):
+    """Percentage of path points where the cursor was over the slide viewer.
+
+    The recorder's off-viewer sentinel is exactly ``(mouseX, mouseY) == (-1, -1)``, so a point
+    counts as "on-slide" iff ``mouseX != -1 or mouseY != -1`` (checking either coordinate with
+    ``or`` also tolerates a malformed single ``-1`` defensively, though the recorder always writes
+    both together): ``100 * count(on-slide) / len(path)``. Points without mouse data at all
+    (``len(point) < 8``) are treated as off-slide (excluded from the on-slide count, but still
+    counted in the denominator) -- in practice this never happens within one fragment since point
+    shape is uniform per :func:`has_mouse_data`.
+
+    ``0.0`` for an empty path. Callers should gate on :func:`has_mouse_data` before calling this at
+    all -- ``metrics.csv`` leaves the column blank (not ``0.0``) for schema </5 fragments, which
+    have no mouse data whatsoever, rather than reporting a spurious 0%."""
+    if not path:
+        return 0.0
+    on_slide = sum(1 for p in path if len(p) >= 8 and (p[6] != -1 or p[7] != -1))
+    return float(on_slide) / len(path) * 100.0
+
+
+def mouse_viewport_coupling_px(path):
+    """Median Euclidean distance (image px) between the cursor position (``mouseX``, ``mouseY``)
+    and the viewport center (``cx``, ``cy``) of the *same* path point, over on-slide points only
+    (see :func:`cursor_over_slide_pct`'s on-slide test) -- smaller means the cursor tracks the
+    visible view more tightly (a partial-attention proxy: a cursor glued to the viewport center
+    suggests active visual engagement with the current view, versus one that wanders or leaves
+    the window while the viewport itself stays put).
+
+    ``float("nan")`` (blank in ``metrics.csv``) if the path is empty or has zero on-slide points --
+    undefined, not 0, since an all-off-slide path says nothing about cursor/viewport coupling."""
+    if not path:
+        return float("nan")
+    dists = [
+        math.hypot(float(p[6]) - float(p[1]), float(p[7]) - float(p[2]))
+        for p in path
+        if len(p) >= 8 and (p[6] != -1 or p[7] != -1)
+    ]
+    if not dists:
+        return float("nan")
+    return float(np.median(dists))
 
 
 # ---------------------------------------------------------------------------

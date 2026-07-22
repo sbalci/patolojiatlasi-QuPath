@@ -1,9 +1,9 @@
 # blinded_focus — Python analysis toolkit
 
 Standalone Python toolkit that turns anonymised QuPath atlas **blinded-focus** fragments
-(schema `atlas-focus-contribution/{1,2,3,4}`) into per-session metrics (including a Phase-1
-zoom/navigation metric family), publication figures, cross-user agreement, reference/ROI
-comparison, and scanpath analysis.
+(schema `atlas-focus-contribution/{1,2,3,4,5}`) into per-session metrics (including a Phase-1
+zoom/navigation metric family and a Phase-2 annotation/cursor metric family), publication
+figures, cross-user agreement, reference/ROI comparison, and scanpath analysis.
 
 This is **not** part of the QuPath extension and does not import from it, nor from
 `tools/aggregate-focus.py` — it only shares the fragment JSON shape and the general heatmap idea
@@ -30,14 +30,20 @@ Requires numpy, pandas, matplotlib, and scipy (see `requirements.txt`).
 .venv/bin/python selftest.py
 ```
 
-`selftest.py` synthesizes 3 sessions on one slide (2 similar dwell grids + 1 different; mixed
-schema/2 (no path) + schema/3 (5-element path, w-proxy zoom) + schema/4 (6-element path, varying
-zoom + `baseMagnification`), one designated as `--reference`), runs the full `analyze` pipeline
+`selftest.py` synthesizes 4 sessions on one slide, one per accepted schema: schema/5 (8-element
+path with cursor `mouseX`/`mouseY` + varying zoom + `baseMagnification`, plus an `annotations`
+FeatureCollection overlapping its own dwell center), schema/4 (6-element path, varying zoom, no
+mouse, plus the *same* annotation rectangle and a deliberately bouncing path for a non-trivial
+re-entry count), schema/3 (5-element path, w-proxy zoom, no annotations), and schema/2 (no path,
+no annotations). One session is designated as `--reference`. Runs the full `analyze` pipeline
 into a temp directory, and asserts the output contract described below (symmetric compare matrix
 with a 1.0 diagonal, similar-pair CC > dissimilar-pair CC, high reference-vs-itself NSS/CC,
 scanpath diagonal 1.0, Phase-1 zoom columns populated/blank as expected, `magnificationPercentage`
-in `[0,1]`, a scanpath-rasterized fine heatmap PNG, valid PNGs, `.zip` input support). Exits
-non-zero on any failure.
+in `[0,1]`, a scanpath-rasterized fine heatmap PNG, valid PNGs, `.zip` input support, Phase-2
+annotation/cursor columns populated/blank as expected, a symmetric annotation IoU matrix with a
+1.0 diagonal for the annotated sessions, and direct regression asserts for the two literature-
+review bug fixes — `coincidence_level`'s visited-footprint denominator and
+`magnification_percentage`'s strict-increase tie fix). Exits non-zero on any failure.
 
 ## Usage
 
@@ -78,14 +84,15 @@ python -m blinded_focus.analyze ~/focus-contributions --out results \
 
 | File | Contents |
 |---|---|
-| `metrics.csv` | One row per (slide, session): `slide,session,durationMs,sampleCount,coveragePct,entropy,comX,comY,peakDwell,nHotspots,pathPoints,pathLengthPx,nRevisits,transitionEntropy,avgZoom,zoomVariance,zoomRange,magnificationPercentage,scanningRatePxPerMin,drillingRatePerMin,pathVelocityPxPerSec,linearity,searchFocusRatio,baseMagnification,pathTruncated`. Path-derived columns (incl. all the zoom/navigation ones) are blank for sessions without a `path` (schema /1, /2). `baseMagnification`/`pathTruncated` are blank for schema /1, /2, /3 (which lack those fragment-level fields). |
+| `metrics.csv` | One row per (slide, session): `slide,session,durationMs,sampleCount,coveragePct,entropy,comX,comY,peakDwell,nHotspots,pathPoints,pathLengthPx,nRevisits,transitionEntropy,avgZoom,zoomVariance,zoomRange,magnificationPercentage,scanningRatePxPerMin,drillingRatePerMin,pathVelocityPxPerSec,linearity,searchFocusRatio,baseMagnification,pathTruncated,nAnnotations,annotatedAreaPx,dwellInAnnotationPct,annotationReentryCount,enrichmentRatio,cursorOverSlidePct,mouseViewportCouplingPx`. Path-derived columns (incl. all the zoom/navigation ones, plus `annotationReentryCount`/`cursorOverSlidePct`/`mouseViewportCouplingPx`) are blank for sessions without a `path` (schema /1, /2). `baseMagnification`/`pathTruncated` are blank for schema /1, /2, /3 (which lack those fragment-level fields). `nAnnotations`/`annotatedAreaPx`/`dwellInAnnotationPct` need only the grid + a session's own `annotations` — populated (0/0.0) for every session, including path-less ones. `enrichmentRatio` is blank whenever its annotated/non-annotated split is degenerate (no annotations, a fully-annotated slide, or zero non-annotated dwell). `cursorOverSlidePct`/`mouseViewportCouplingPx` are blank unless the session's `path` carries schema/5 8-element points (`mouseX`/`mouseY`). |
 | `compare_<slug>.csv` | Per slide, pairwise agreement: `sessionA,sessionB,cc,sim,iou,diffFromConsensus,coincidenceLevel,regionCoveragePct`. Tidy long format (one row per ordered pair, including the diagonal) rather than a 2D matrix — `pivot(index="sessionA", columns="sessionB")` in pandas (or `pivot_wider` in R) recovers the matrix. The diagonal row (`sessionA == sessionB`) additionally carries `diffFromConsensus = 1 - cc(session, consensus)` and `regionCoveragePct` (this session's % coverage of the consensus's above-threshold cells); off-diagonal rows leave those blank. `coincidenceLevel` (a slide-level, not per-session, statistic) is written on exactly one row per slide — the diagonal row of the first session in insertion order — all other rows leave it blank. |
 | `consensus_<slug>.png` | Heatmap of the mean of each session's max-normalised, common-grid-resampled dwell map. |
 | `reference_<slug>.csv` | Written when `--reference` and/or `--roi` is given. One row per session (including the reference itself, for a self-check): `session,nss,aucJudd,cc,iou,refCoveragePct,timeOnRefMs,timeOffRefMs`, ranked descending by `nss`. |
-| `scanpath_<slug>.csv` | Written when at least one session on the slide has a `path` (schema /3 or /4). Pairwise `sessionA,sessionB,levenshteinSim,transitionEntropy` over visited-cell sequences (same tidy/diagonal-reuse convention as `compare_<slug>.csv`); sessions without a path are excluded entirely. |
+| `scanpath_<slug>.csv` | Written when at least one session on the slide has a `path` (schema /3+). Pairwise `sessionA,sessionB,levenshteinSim,transitionEntropy` over visited-cell sequences (same tidy/diagonal-reuse convention as `compare_<slug>.csv`); sessions without a path are excluded entirely. |
 | `magbands_<slug>.csv` | Written alongside `scanpath_<slug>.csv` (same path-session gating). Tidy `session,band,bandTimeMs,bandTimePct` — per-session dwell time (and % of that session's total path duration) in each of `--magbands` within-path zoom bands (band 0 = lowest zoom, highest index = highest zoom; see `metrics.zoom_band_labels`). |
-| `summary.md` | Slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/duration spread + coincidence level + mean avgZoom/scanningRate/drillingRate/magnificationPercentage, and the reference ranking when applicable. |
-| `<slug>/<session>_heatmap.png`, `_scanpath.png`, `_coverage.png`, `_scanpath_raster.png`, `_magband<N>.png` | With `--figures`: per-(slide, session) figures. `_heatmap` is at native recorded-grid resolution; `_scanpath`/`_coverage`/`_scanpath_raster`/`_magband<N>` are only written for sessions with a `path` (schema /3 or /4). `_scanpath_raster` is the scanpath-rasterized fine heatmap at `--res` resolution (independent of the recorded grid); `_magband<N>` is one heatmap per within-path zoom band that has at least one step (bands with zero steps are skipped, so a session may have fewer than `--magbands` band PNGs). |
+| `annotations_<slug>.csv` | Written when at least one session on the slide has drawn at least one annotation (schema/4+ `annotations`). Pairwise `sessionA,sessionB,iou,coincidenceLevel` over each session's own rasterized annotated region (tidy long format, same diagonal-reuse convention as `compare_<slug>.csv`) — `iou` is 0.0 (not 1.0) on the self-diagonal for a session with no annotations at all (empty-mask self-comparison; same convention `metrics.iou` uses elsewhere), and 1.0 for a session whose own (non-empty) annotated region is compared to itself. `coincidenceLevel` is written once per slide (the diagonal row of the first session), using the same fixed visited-footprint denominator as the dwell-grid `coincidenceLevel`. |
+| `summary.md` | Slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/duration spread + coincidence level + mean avgZoom/scanningRate/drillingRate/magnificationPercentage + mean dwellInAnnotationPct/annotation coincidence level + mean cursorOverSlidePct, and the reference ranking when applicable. |
+| `<slug>/<session>_heatmap.png`, `_scanpath.png`, `_coverage.png`, `_scanpath_raster.png`, `_magband<N>.png` | With `--figures`: per-(slide, session) figures. `_heatmap` is at native recorded-grid resolution; `_scanpath`/`_coverage`/`_scanpath_raster`/`_magband<N>` are only written for sessions with a `path` (schema /3+). `_scanpath_raster` is the scanpath-rasterized fine heatmap at `--res` resolution (independent of the recorded grid); `_magband<N>` is one heatmap per within-path zoom band that has at least one step (bands with zero steps are skipped, so a session may have fewer than `--magbands` band PNGs). |
 
 `<slug>` is a filesystem-safe hash-suffixed slug of the `slideKey` (see `blinded_focus.io.slug`);
 `<session>` likewise slugs the `sessionId` (or a resolved label).
@@ -112,8 +119,13 @@ keeps numbers comparable across sessions that recorded at different grid resolut
   agreement, single-rater; Shrout & Fleiss 1979 / McGraw & Wong 1996) via the documented
   two-way-ANOVA formula, with cells as rows and sessions as columns.
 - **Cross-session consistency** — `coincidenceLevel` (fraction of cells above-threshold in ≥2
-  readers' own-max-normalised grids; Roa-Peña reports ~70.5% with this style of rule) and
-  `regionCoveragePct` (this session's % coverage of the consensus's above-threshold cells).
+  readers' own-max-normalised grids, normalized to the **visited footprint** — cells
+  above-threshold in ≥1 reader, *not* the whole grid; Roa-Peña reports ~70.5% with this style of
+  rule) and `regionCoveragePct` (this session's % coverage of the consensus's above-threshold
+  cells). **Bug fix (2026-07):** `coincidenceLevel` used to normalize by the whole grid instead of
+  the visited footprint, silently under-reporting coincidence on any partially-explored slide —
+  see `docs/superpowers/navtrack-lit-review-improvements.md` §0.A and `metrics.coincidence_level`'s
+  docstring for the exact before/after.
 
 ### Phase 1 — scanpath raster + zoom/navigation metric family
 
@@ -134,10 +146,13 @@ behavior (an R port must match these, not just the "happy path" formula):
 - **`avgZoom` / `zoomVariance` / `zoomRange`** — mean / sample variance (`ddof=1`, matches R's
   `var()`) / range of `point_zoom` over every path point. `0.0` (never NaN/NA) for a path with
   fewer than 2 points.
-- **`magnificationPercentage`** — fraction of consecutive transitions with non-decreasing zoom
-  (zoom-in or same-zoom): `|{i : zoom[i+1] >= zoom[i]}| / (n-1)`. Exact `>=`, no tolerance
-  (`point_zoom` is deterministic on integer-quantized inputs, so a held zoom level yields
-  bit-identical floats). `0.0` for fewer than 2 points.
+- **`magnificationPercentage`** — fraction of consecutive transitions with strictly increasing
+  zoom (zoom-IN only): `|{i : zoom[i+1] > zoom[i]}| / (n-1)`. Exact `>`, no tolerance (`point_zoom`
+  is deterministic on integer-quantized inputs, so a held zoom level yields bit-identical floats).
+  `0.0` for fewer than 2 points. **Bug fix (2026-07):** this used to count held-zoom ties too
+  (`>=`); Ghezloo's definition requires a strict increase — see
+  `docs/superpowers/navtrack-lit-review-improvements.md` §0.B and
+  `metrics.magnification_percentage`'s docstring for the exact before/after.
 - **`scanningRatePxPerMin`** / **`drillingRatePerMin`** — pan distance accumulated over
   "zoom-unchanged" steps (exact equality, same determinism note), and count of "zoom-changed"
   steps, both normalized by the path's **total duration** (`(t[-1]-t[0])/60000`, minutes) — the
@@ -158,6 +173,39 @@ behavior (an R port must match these, not just the "happy path" formula):
 These formulas are pinned exactly (see the project's design doc) so that the parallel R toolkit
 under `analysis/R/` reproduces the same numbers on the same input.
 
+### Phase 2 — annotation + cursor metric family
+
+Motivated by the same literature review's ROI-based and partial-attention metrics, once ground-
+truth-style reader annotations (schema/4+) and cursor position (schema/5) are available. All
+formulas are in `blinded_focus/metrics.py`; the GeoJSON-to-grid rasterization they consume
+(`rasterize_roi`) lives in `blinded_focus/analyze.py` and is the *same* rasterizer already used
+for the `--roi` CLI flag — annotation metrics never parse GeoJSON themselves, only an
+already-rasterized boolean cell mask.
+
+- **`nAnnotations` / `annotatedAreaPx`** — feature count and total polygon area (image px²) of a
+  session's own `annotations` FeatureCollection, via the shoelace formula (exterior ring area
+  minus hole-ring areas, both by absolute value so ring winding order doesn't matter). Grid-only
+  (no `path` needed) — populated (0 / 0.0) for every session, including path-less ones.
+- **`dwellInAnnotationPct`** (Ghezloo's "ROI time percentage", generalized to a reader's own
+  annotated region) — `100 * sum(grid[mask]) / sum(grid)`. `0.0` if total dwell is 0 or the mask
+  has no annotated cells.
+- **`enrichmentRatio`** (Nan 2025 Nat Commun) — `mean(grid[mask]) / mean(grid[~mask])`. Blank
+  (`NaN`) if the mask has no annotated cells, no non-annotated cells, or zero non-annotated mean.
+- **`annotationReentryCount`** (Brunyé 2017's re-entry rate) — maps the scanpath to grid cells
+  (`visited_sequence`, run-length-deduped), looks up the annotation mask at each visited cell, and
+  counts the number of maximal `True` ("inside") runs in that boolean sequence minus 1 (the first
+  visit is an entry, not a *re*-entry): `max(0, n_visits - 1)`. Blank without a `path` at all;
+  `0` if there's a path but no annotation, or the path never enters the region.
+- **`cursorOverSlidePct`** / **`mouseViewportCouplingPx`** (a partial-attention proxy after
+  Raghunath, schema/5 8-element points only: `[..., dsMilli, mouseX, mouseY]`) — percentage of
+  path points where the cursor was over the slide (`mouseX/mouseY != (-1,-1)`), and the median
+  Euclidean distance (image px) between the cursor and the viewport center over on-slide points
+  only. Both blank for any fragment whose path doesn't carry 8-element points (schema </5).
+- **Cross-user annotation agreement** (`annotations_<slug>.csv`) — pairwise IoU of each session's
+  own rasterized annotated region (resampled to the slide's common `(tw, th)` grid, same as the
+  dwell-based `compare_<slug>.csv`), plus a slide-level `coincidenceLevel` reusing the same
+  (fixed, visited-footprint) `coincidence_level` function.
+
 ## Data model recap
 
 - `slideKey` identifies a slide (already anonymised upstream — `sha256:`-hashed for non-http
@@ -165,11 +213,19 @@ under `analysis/R/` reproduces the same numbers on the same input.
   one person across multiple sittings appears as multiple sessionIds; a coordinator maps identity
   to a real name out-of-band, e.g. via `--labels`).
 - `grid` is a row-major `gridWidth x gridHeight` array — milliseconds of dwell for schema `/2`,
-  `/3`, `/4`, fixed-weight sample counts for schema `/1`.
-- `path` (schema `/3`, `/4`) is the ordered, capped list of viewport samples (image-pixel center +
+  `/3`, `/4`, `/5`, fixed-weight sample counts for schema `/1`.
+- `path` (schema `/3`+) is the ordered, capped list of viewport samples (image-pixel center +
   visible extent, time relative to that slide's recording start). `/3` points are 5-element
   `[tRelMs, cx, cy, w, h]`; `/4` points are 6-element `[tRelMs, cx, cy, w, h, dsMilli]`
-  (`dsMilli` = downsample × 1000). `/4` fragments also carry a fragment-level `baseMagnification`
-  (number, or absent/`null` if unknown) and `pathTruncated` (bool). Fragments without a `path`
-  (schema `/1`, `/2`) still get full spatial/dwell analysis; only the scanpath- and
-  zoom/navigation-specific outputs are skipped (left blank in `metrics.csv`) for them.
+  (`dsMilli` = downsample × 1000); `/5` points are 8-element
+  `[tRelMs, cx, cy, w, h, dsMilli, mouseX, mouseY]` — purely additive over `/4` (`mouseX`/`mouseY`
+  are the cursor's position in the same image-pixel space as `cx`/`cy`, or the sentinel `-1, -1`
+  when the cursor was off the slide viewer). `/4`+ fragments also carry a fragment-level
+  `baseMagnification` (number, or absent/`null` if unknown), `pathTruncated` (bool), and
+  `annotations` (a GeoJSON `FeatureCollection` snapshot of the reader's own slide annotations —
+  geometry in image px, plus each feature's `properties`, which may include `name`,
+  `classification.name`, and `metadata.ANNOTATION_DESCRIPTION`; defaults to an empty
+  FeatureCollection via `blinded_focus.io.get_annotations` when absent or malformed). Fragments
+  without a `path` (schema `/1`, `/2`) still get full spatial/dwell analysis; only the scanpath-,
+  zoom/navigation-, and path-dependent annotation/cursor outputs are skipped (left blank in
+  `metrics.csv`) for them.
