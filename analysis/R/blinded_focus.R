@@ -1283,6 +1283,15 @@ load_roi_rings <- function(roi_path) {
   rings_from_feature_collection(d)
 }
 
+#' Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon file and
+#' return the parsed list (not its flattened rings), for per-Feature union rasterization via
+#' `rasterize_feature_collection` -- a multi-polygon/overlapping reference ROI must be rasterized
+#' feature-by-feature and unioned, not with a single pooled-rings even-odd test (see that
+#' function's docs); this is the `--roi` counterpart to the annotation-mask fix.
+load_roi_fc <- function(roi_path) {
+  jsonlite::fromJSON(roi_path, simplifyVector = FALSE)
+}
+
 #' Rasterize polygon rings (image-px coords) to a flat `(gw*gh,)` logical mask (row-major) by
 #' testing each grid cell's center point for containment. Same convention as
 #' `blinded_focus.analyze.rasterize_roi` in the Python toolkit.
@@ -1297,6 +1306,46 @@ rasterize_roi <- function(rings, gw, gh, img_w, img_h) {
       mask[idx] <- .point_in_poly(cx, cy, rings)
       idx <- idx + 1
     }
+  }
+  mask
+}
+
+#' Rasterize a GeoJSON list (`FeatureCollection`, `Feature`, or bare geometry -- the same shapes
+#' `rings_from_feature_collection` accepts) to a flat `(gw*gh,)` logical mask by rasterizing
+#' **each Feature's own rings separately** (that Feature's exterior + its own holes -- even-odd
+#' within the Feature, via `rasterize_roi`) and taking the **union (logical OR)** across Features.
+#' Same convention as `blinded_focus.analyze.rasterize_feature_collection` in the Python toolkit.
+#'
+#' This is deliberately NOT the same as pooling every Feature's rings into one flat list and
+#' running a single even-odd test across all of them (`rings_from_feature_collection` +
+#' `rasterize_roi`): even-odd correctly handles holes *within one polygon*, but pooling rings from
+#' separate Features breaks down when two distinct Features geometrically overlap (e.g. a coarse
+#' "tumor" annotation with a smaller "high-grade focus" annotation nested inside it) -- a point
+#' inside both gets even parity under the pooled test and is wrongly reported outside. Rasterizing
+#' feature-by-feature and OR-ing the results sidesteps this: single-feature and
+#' hole-within-one-feature behaviour is unchanged (this is a strict superset of the pooled-rings
+#' result -- only cross-feature overlap changes, from wrongly-excluded to correctly-included).
+#'
+#' A `NULL`/malformed `fc`, or one with no features/rings at all, returns an all-`FALSE` mask
+#' without walking any grid cell (same short-circuit the pooled-rings call sites relied on).
+rasterize_feature_collection <- function(fc, gw, gh, img_w, img_h) {
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  if (is.null(fc) || !is.list(fc)) {
+    return(rep(FALSE, gw * gh))
+  }
+  if (!is.null(fc$type) && fc$type == "FeatureCollection") {
+    features <- fc$features
+  } else if (!is.null(fc$type) && fc$type == "Feature") {
+    features <- list(fc)
+  } else {
+    features <- list(list(geometry = fc)) # bare geometry: treat as a single implicit feature
+  }
+  mask <- rep(FALSE, gw * gh)
+  for (feat in features) {
+    if (is.null(feat$geometry)) next
+    rings <- .extract_rings(feat$geometry)
+    if (length(rings) == 0) next
+    mask <- mask | rasterize_roi(rings, gw, gh, img_w, img_h)
   }
   mask
 }
@@ -1361,6 +1410,12 @@ rasterize_roi <- function(rings, gw, gh, img_w, img_h) {
 #' `.geometry_area` summed across features -- the `annotatedAreaPx` column. `0.0` for an
 #' empty/missing/malformed FeatureCollection (including non-area annotation geometries only, e.g.
 #' a lone point annotation).
+#'
+#' Caveat: this is the **sum of per-feature areas, not de-duplicated for overlap** -- two
+#' overlapping/nested annotation Features (unlike the mask-based metrics, which correctly union
+#' them via `rasterize_feature_collection`) report a combined `annotatedAreaPx` larger than their
+#' true union area. True polygon-union area would need geometric clipping, which neither toolkit
+#' implements.
 annotations_area_px <- function(fc) {
   if (is.null(fc) || !is.list(fc) || is.null(fc$type) || fc$type != "FeatureCollection") {
     return(0.0)
@@ -1626,7 +1681,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
   }
   labels <- load_labels(labels_csv)
   groups <- group_by_slide(fragments)
-  roi_rings <- if (!is.null(roi)) load_roi_rings(roi) else NULL
+  roi_fc <- if (!is.null(roi)) load_roi_fc(roi) else NULL
+  # Kept only for the reference/ROI gate below (truthy iff the ROI file has >=1 ring) -- the
+  # actual reference mask is built per-Feature + unioned via
+  # rasterize_feature_collection(roi_fc, ...) below, so a multi-polygon/overlapping reference ROI
+  # composes correctly (same fix as the annotation mask; see its docs).
+  roi_rings <- if (!is.null(roi_fc)) rings_from_feature_collection(roi_fc) else NULL
 
   metrics_rows <- list()
   slide_summaries <- list()
@@ -1682,19 +1742,17 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
 
       # ---- Phase 2: this session's own annotations, rasterized to its native (gw, gh) grid
       # (matching the resolution `grid`/`dwell` are already in) -- reuses the same
-      # GeoJSON-polygon-to-grid rasterizer as the `--roi` CLI flag. Short-circuits the (potentially
-      # large, gw*gh-cell) rasterization when there are no annotations at all -- the common case
-      # for most sessions -- rather than paying the full per-cell point-in-polygon cost just to
-      # produce an all-FALSE mask.
+      # GeoJSON-polygon-to-grid rasterizer as the `--roi` CLI flag. Each annotation Feature is
+      # rasterized on its own and the per-feature masks are unioned (OR'd), NOT pooled into one
+      # flat ring list and tested with a single even-odd pass -- pooling misclassifies a point
+      # inside two overlapping/nested Features (e.g. a "high-grade focus" annotation drawn inside
+      # a coarser "tumor" annotation) as outside the annotated region. See
+      # `rasterize_feature_collection`'s docs. It also keeps the short-circuit for the
+      # no-annotations case (all-FALSE, no per-cell work).
       ann_fc <- get_annotations(f)
-      ann_rings <- rings_from_feature_collection(ann_fc)
       n_ann <- length(ann_fc$features)
       ann_area <- annotations_area_px(ann_fc)
-      if (length(ann_rings) > 0) {
-        native_ann_mask <- rasterize_roi(ann_rings, gw, gh, img_w, img_h)
-      } else {
-        native_ann_mask <- rep(FALSE, gw * gh)
-      }
+      native_ann_mask <- rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
       # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the slide's
       # common (tw, th) grid -- resample the already-rasterized native mask (as 0.0/1.0 doubles)
       # via the same nearest-neighbour resampler used for dwell grids, rather than re-rasterizing
@@ -1897,7 +1955,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       if (!is.null(roi_rings)) {
         img_w <- by_session[[session_ids[1]]]$imageWidth; if (is.null(img_w)) img_w <- 1
         img_h <- by_session[[session_ids[1]]]$imageHeight; if (is.null(img_h)) img_h <- 1
-        ref_mask <- rasterize_roi(roi_rings, tw, th, img_w, img_h)
+        ref_mask <- rasterize_feature_collection(roi_fc, tw, th, img_w, img_h)
         ref_map <- as.numeric(ref_mask)
       }
       if (!is.null(reference) && reference %in% session_ids) {

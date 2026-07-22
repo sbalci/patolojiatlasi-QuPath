@@ -158,6 +158,16 @@ def load_roi_rings(roi_path):
     return rings_from_feature_collection(d)
 
 
+def load_roi_fc(roi_path):
+    """Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon file
+    and return the parsed dict (not its flattened rings), for per-Feature union rasterization via
+    :func:`rasterize_feature_collection` -- a multi-polygon/overlapping reference ROI must be
+    rasterized feature-by-feature and unioned, not with a single pooled-rings even-odd test (see
+    that function's docstring); this is the ``--roi`` counterpart to the annotation-mask fix."""
+    with open(roi_path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 def _shoelace_area(ring):
     """Absolute area (px^2) of a simple polygon ring (a list of ``(x, y)`` tuples) via the
     shoelace formula: ``abs(sum(x_i*y_{i+1} - x_{i+1}*y_i)) / 2``. ``0.0`` for a degenerate ring
@@ -207,7 +217,13 @@ def annotations_area_px(fc):
     ``FeatureCollection`` dict (a fragment's ``annotations`` field), via
     :func:`_feature_geometry_area` summed across features -- the ``annotatedAreaPx`` column.
     ``0.0`` for an empty/missing/malformed FeatureCollection (including non-area annotation
-    geometries only, e.g. a lone point annotation)."""
+    geometries only, e.g. a lone point annotation).
+
+    Caveat: this is the **sum of per-feature areas, not de-duplicated for overlap** -- two
+    overlapping/nested annotation Features (unlike the mask-based metrics, which correctly union
+    them via :func:`rasterize_feature_collection`) report a combined ``annotatedAreaPx`` larger
+    than their true union area. True polygon-union area would need geometric clipping, which
+    neither toolkit implements."""
     if not fc or not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
         return 0.0
     total = 0.0
@@ -231,6 +247,44 @@ def rasterize_roi(rings, gw, gh, img_w, img_h):
             cx = (col + 0.5) / gw * img_w
             mask[row, col] = _point_in_poly(cx, cy, rings)
     return mask.flatten()
+
+
+def rasterize_feature_collection(fc, gw, gh, img_w, img_h):
+    """Rasterize a GeoJSON dict (``FeatureCollection``, ``Feature``, or bare geometry -- the same
+    shapes :func:`rings_from_feature_collection` accepts) to a flat ``(gw*gh,)`` boolean mask by
+    rasterizing **each Feature's own rings separately** (that Feature's exterior + its own holes --
+    even-odd within the Feature, via :func:`rasterize_roi`) and taking the **union (logical OR)**
+    across Features.
+
+    This is deliberately NOT the same as pooling every Feature's rings into one flat list and
+    running a single even-odd test across all of them (:func:`rings_from_feature_collection` +
+    :func:`rasterize_roi`): even-odd correctly handles holes *within one polygon*, but pooling
+    rings from separate Features breaks down when two distinct Features geometrically overlap
+    (e.g. a coarse "tumor" annotation with a smaller "high-grade focus" annotation nested inside
+    it) -- a point inside both gets even parity under the pooled test and is wrongly reported
+    outside. Rasterizing feature-by-feature and OR-ing the results sidesteps this: single-feature
+    and hole-within-one-feature behaviour is unchanged (this is a strict superset of the
+    pooled-rings result -- only cross-feature overlap changes, from wrongly-excluded to
+    correctly-included).
+
+    A falsy/malformed ``fc``, or one with no features/rings at all, returns an all-``False`` mask
+    without walking any grid cell (same short-circuit the pooled-rings call sites relied on)."""
+    gw, gh = int(gw), int(gh)
+    if not fc or not isinstance(fc, dict):
+        return np.zeros(gw * gh, dtype=bool)
+    if fc.get("type") == "FeatureCollection":
+        features = [feat for feat in (fc.get("features", []) or []) if isinstance(feat, dict)]
+    elif fc.get("type") == "Feature":
+        features = [fc]
+    else:
+        features = [{"geometry": fc}]  # bare geometry: treat as a single implicit feature
+    mask = np.zeros(gw * gh, dtype=bool)
+    for feat in features:
+        rings = _extract_rings(feat.get("geometry", {}) or {})
+        if not rings:
+            continue
+        mask |= rasterize_roi(rings, gw, gh, img_w, img_h)
+    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +358,12 @@ def analyze(
         )
     labels = bf_io.load_labels(labels_csv)
     groups = bf_io.group_by_slide(fragments)
-    roi_rings = load_roi_rings(roi) if roi else None
+    roi_fc = load_roi_fc(roi) if roi else None
+    # Kept only for the reference/ROI gate below (truthy iff the ROI file has >=1 ring) -- the
+    # actual reference mask is built per-Feature + unioned via
+    # rasterize_feature_collection(roi_fc, ...) below, so a multi-polygon/overlapping reference
+    # ROI composes correctly (same fix as the annotation mask; see its docstring).
+    roi_rings = rings_from_feature_collection(roi_fc) if roi_fc else None
 
     metrics_rows = []
     slide_summaries = []
@@ -346,21 +405,17 @@ def analyze(
 
             # ---- Phase 2: this session's own annotations, rasterized to its native (gw, gh)
             # grid (matching the resolution `grid`/`dwell` are already in) -- reuses the same
-            # GeoJSON-polygon-to-grid rasterizer as the `--roi` CLI flag. Cast to bool explicitly:
-            # rasterize_roi already returns a bool array, but an empty-rings call still walks
-            # every cell (cheap relative to the fragment sizes in play here) so this is a plain
-            # reuse of existing machinery, not a new code path for the "no annotations" case.
+            # GeoJSON-polygon-to-grid rasterizer as the `--roi` CLI flag. Each annotation Feature
+            # is rasterized on its own and the per-feature masks are unioned (OR'd), NOT pooled
+            # into one flat ring list and tested with a single even-odd pass -- pooling
+            # misclassifies a point inside two overlapping/nested Features (e.g. a "high-grade
+            # focus" annotation drawn inside a coarser "tumor" annotation) as outside the annotated
+            # region. See rasterize_feature_collection's docstring. It also keeps the short-circuit
+            # for the no-annotations case (all-False, no per-cell work).
             ann_fc = bf_io.get_annotations(f)
-            ann_rings = rings_from_feature_collection(ann_fc)
             n_ann = len(ann_fc.get("features", []) or [])
             ann_area = annotations_area_px(ann_fc)
-            # Short-circuit the (potentially large, gw*gh-cell) rasterization when there are no
-            # annotations at all -- the common case for most sessions -- rather than paying the
-            # full per-cell point-in-polygon cost just to produce an all-False mask.
-            if ann_rings:
-                native_ann_mask = rasterize_roi(ann_rings, gw, gh, img_w, img_h)
-            else:
-                native_ann_mask = np.zeros(gw * gh, dtype=bool)
+            native_ann_mask = rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
             # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the
             # slide's common (tw, th) grid -- resample the already-rasterized native mask (as
             # 0.0/1.0 floats) via the same nearest-neighbour resampler used for dwell grids,
@@ -566,7 +621,7 @@ def analyze(
             if roi_rings:
                 img_w = sessions[0][1].get("imageWidth", 1)
                 img_h = sessions[0][1].get("imageHeight", 1)
-                ref_mask = rasterize_roi(roi_rings, tw, th, img_w, img_h)
+                ref_mask = rasterize_feature_collection(roi_fc, tw, th, img_w, img_h)
                 ref_map = ref_mask.astype(float)
             if reference and reference in resampled:
                 ref_grid = resampled[reference]

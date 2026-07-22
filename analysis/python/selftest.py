@@ -42,6 +42,11 @@ into a temp dir and asserts the documented output contract:
 - Direct, pipeline-independent regression asserts for the two literature-review bug fixes:
   ``magnification_percentage`` no longer counts held-zoom ties, and ``coincidence_level``
   normalizes by the visited footprint (>=1 reader), not the whole grid.
+- Direct, pipeline-independent regression assert for the annotation-mask union fix:
+  ``rasterize_feature_collection`` on two overlapping/nested annotation Features (an outer
+  rectangle + a smaller rectangle nested inside it) must classify the overlap zone as **inside**
+  the union mask -- the pre-fix pooled-rings even-odd test misclassified a point inside two
+  overlapping Features as outside (even parity).
 - ``--figures --res 256`` writes at least one valid PNG per session, including a
   scanpath-rasterized fine heatmap.
 - The same pipeline also works when the input is a ``.zip`` archive instead of a directory.
@@ -61,7 +66,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blinded_focus.analyze import analyze  # noqa: E402
+from blinded_focus.analyze import analyze, rasterize_feature_collection  # noqa: E402
 from blinded_focus import io as bf_io  # noqa: E402
 from blinded_focus import metrics as bf_metrics  # noqa: E402
 
@@ -551,6 +556,70 @@ def run():
         )
         assert abs(new_value - old_broken_value) > 1e-6, (
             "coincidence_level should no longer match the old whole-grid-denominator formula"
+        )
+
+        # --- Fix C targeted assert: the annotation mask is the UNION of each Feature's own
+        # rasterization, not a single even-odd test over every Feature's rings pooled together.
+        # Two overlapping/nested annotation Features -- an outer rectangle (image px [20,80] x
+        # [20,80]) and a smaller rectangle nested fully inside it (image px [40,60] x [40,60]) --
+        # on a 10x10 grid over a 100x100 image (cell size 10px, centers at 5,15,...,95). The outer
+        # rect's centers fall at grid indices 2-7 (px 25..75); the inner rect's centers fall at
+        # indices 4-5 (px 45,55) -- the "overlap zone" that is inside BOTH Features.
+        #
+        # Hand-derived expected value: since the inner rect is fully nested inside the outer one,
+        # the true union of the two Features is just the outer rectangle -- so the overlap-zone
+        # cells (rows/cols 4-5) must be classified INSIDE the mask. Concentrating all dwell weight
+        # (value 100 in each of the 4 overlap cells, 0 everywhere else -- 400 total) exactly on
+        # those cells makes dwellInAnnotationPct's hand-derived expected value a clean 100.0%.
+        #
+        # Under the pre-fix bug (pool every Feature's rings into one flat list, single even-odd
+        # test): a point inside both rectangles crosses one edge of each ring set (1 + 1 = 2
+        # crossings) -> EVEN parity -> wrongly classified OUTSIDE. Since all the dwell weight sits
+        # exactly on those wrongly-excluded cells, the pre-fix value would instead be 0.0%.
+        overlap_gw = overlap_gh = 10
+        overlap_img_w = overlap_img_h = 100
+        overlap_fc = {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[20, 20], [80, 20], [80, 80], [20, 80], [20, 20]]],
+                    },
+                    "properties": {"name": "tumor", "classification": {"name": "Tumor"}},
+                },
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[40, 40], [60, 40], [60, 60], [40, 60], [40, 40]]],
+                    },
+                    "properties": {"name": "focus", "classification": {"name": "HighGradeFocus"}},
+                },
+            ],
+        }
+        overlap_grid = [0.0] * (overlap_gw * overlap_gh)
+        for r in (4, 5):
+            for c in (4, 5):
+                overlap_grid[r * overlap_gw + c] = 100.0
+
+        overlap_mask = rasterize_feature_collection(
+            overlap_fc, overlap_gw, overlap_gh, overlap_img_w, overlap_img_h
+        )
+        overlap_mask_2d = overlap_mask.reshape(overlap_gh, overlap_gw)
+        for r in (4, 5):
+            for c in (4, 5):
+                assert overlap_mask_2d[r, c], (
+                    f"overlap-zone cell (row {r}, col {c}) -- inside both the outer and inner "
+                    f"annotation Features -- should be inside the UNION mask"
+                )
+
+        overlap_pct = bf_metrics.dwell_in_mask_pct(overlap_grid, overlap_mask)
+        assert abs(overlap_pct - 100.0) < 1e-6, (
+            f"expected dwellInAnnotationPct == 100.0 (all dwell weight sits in the overlap zone, "
+            f"which the union mask correctly includes); the pre-fix pooled-rings bug would instead "
+            f"yield 0.0 (the overlap zone misclassified as outside) -- got {overlap_pct}"
         )
 
         # --- .zip input also works ---

@@ -40,6 +40,11 @@
 # - Direct, pipeline-independent regression asserts for the two literature-review bug fixes:
 #   magnification_percentage no longer counts held-zoom ties, and coincidence_level normalizes by
 #   the visited footprint (>=1 reader), not the whole grid.
+# - Direct, pipeline-independent regression assert for the annotation-mask union fix:
+#   rasterize_feature_collection on two overlapping/nested annotation Features (an outer rectangle
+#   + a smaller rectangle nested inside it) must classify the overlap zone as INSIDE the union
+#   mask -- the pre-fix pooled-rings even-odd test misclassified a point inside two overlapping
+#   Features as outside (even parity).
 # - --figures --res 256 writes at least one valid PNG per session, including a scanpath-rasterized
 #   fine heatmap.
 # - The same pipeline also works when the input is a .zip archive instead of a directory.
@@ -612,6 +617,76 @@ run <- function() {
   stopifnot(
     "coincidence_level should no longer match the old whole-grid-denominator formula" =
       abs(new_value - old_broken_value) > 1e-6
+  )
+
+  # --- Fix C targeted assert: the annotation mask is the UNION of each Feature's own
+  # rasterization, not a single even-odd test over every Feature's rings pooled together. Two
+  # overlapping/nested annotation Features -- an outer rectangle (image px [20,80] x [20,80]) and
+  # a smaller rectangle nested fully inside it (image px [40,60] x [40,60]) -- on a 10x10 grid over
+  # a 100x100 image (cell size 10px, centers at 5,15,...,95). The outer rect's centers fall at
+  # grid indices 2-7 (px 25..75); the inner rect's centers fall at indices 4-5 (px 45,55) -- the
+  # "overlap zone" that is inside BOTH Features.
+  #
+  # Hand-derived expected value: since the inner rect is fully nested inside the outer one, the
+  # true union of the two Features is just the outer rectangle -- so the overlap-zone cells
+  # (rows/cols 4-5) must be classified INSIDE the mask. Concentrating all dwell weight (value 100
+  # in each of the 4 overlap cells, 0 everywhere else -- 400 total) exactly on those cells makes
+  # dwellInAnnotationPct's hand-derived expected value a clean 100.0%.
+  #
+  # Under the pre-fix bug (pool every Feature's rings into one flat list, single even-odd test): a
+  # point inside both rectangles crosses one edge of each ring set (1 + 1 = 2 crossings) -> EVEN
+  # parity -> wrongly classified OUTSIDE. Since all the dwell weight sits exactly on those
+  # wrongly-excluded cells, the pre-fix value would instead be 0.0%.
+  overlap_gw <- 10L; overlap_gh <- 10L
+  overlap_img_w <- 100; overlap_img_h <- 100
+  overlap_fc <- list(
+    type = "FeatureCollection",
+    features = list(
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(20, 20), c(80, 20), c(80, 80), c(20, 80), c(20, 20)))
+        ),
+        properties = list(name = "tumor", classification = list(name = "Tumor"))
+      ),
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(40, 40), c(60, 40), c(60, 60), c(40, 60), c(40, 40)))
+        ),
+        properties = list(name = "focus", classification = list(name = "HighGradeFocus"))
+      )
+    )
+  )
+  overlap_grid <- rep(0.0, overlap_gw * overlap_gh)
+  for (rr in c(4, 5)) {
+    for (cc in c(4, 5)) {
+      overlap_grid[rr * overlap_gw + cc + 1] <- 100.0 # 0-based (row, col) -> 1-based flat index
+    }
+  }
+
+  overlap_mask <- rasterize_feature_collection(overlap_fc, overlap_gw, overlap_gh, overlap_img_w, overlap_img_h)
+  for (rr in c(4, 5)) {
+    for (cc in c(4, 5)) {
+      idx <- rr * overlap_gw + cc + 1
+      if (!overlap_mask[idx]) {
+        stop(sprintf(
+          paste(
+            "overlap-zone cell (row %d, col %d) -- inside both the outer and inner annotation",
+            "Features -- should be inside the UNION mask"
+          ),
+          rr, cc
+        ))
+      }
+    }
+  }
+
+  overlap_pct <- dwell_in_mask_pct(overlap_grid, overlap_mask)
+  stopifnot(
+    "expected dwellInAnnotationPct == 100.0 (union mask includes the overlap zone; the pre-fix pooled-rings bug would instead yield 0.0)" =
+      abs(overlap_pct - 100.0) < 1e-6
   )
 
   # --- .zip input also works ---
