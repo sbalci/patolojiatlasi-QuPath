@@ -1,7 +1,7 @@
 # Blinded focus — evaluation & analysis
 
 Offline analysis of the **blinded focus recordings** produced by the QuPath atlas extension
-(`Extensions → Patoloji Atlası → … → Kör kayıt (araştırma)` and blinded-research projects). The
+(`Extensions → Araştırma → Odak ısı haritası → Kör kayıt (araştırma)` and blinded-research projects). The
 extension records, silently and anonymously, **where** a viewer looked and **for how long** — and,
 since schema `/3`, the **ordered navigation path (scanpath)**. These tools turn that data into
 per-user metrics, figures, cross-user agreement, reference comparison, and scanpath analysis.
