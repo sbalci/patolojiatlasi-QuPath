@@ -15,6 +15,10 @@ import java.util.Map;
 import javax.imageio.ImageIO;
 
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
@@ -44,6 +48,8 @@ import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.gui.viewer.overlays.BufferedImageOverlay;
 import qupath.lib.images.ImageData;
 import qupath.lib.images.servers.ImageServer;
+import qupath.lib.io.FeatureCollection;
+import qupath.lib.io.GsonTools;
 import qupath.lib.regions.ImageRegion;
 
 /**
@@ -807,6 +813,17 @@ public final class FocusHeatmap {
      * when unavailable) so a later analysis pass can derive true magnification as {@code
      * baseMagnification / (dsMilli / 1000.0)}. Both additions are read defensively — no throw into the
      * sampling timer or a checkpoint/shutdown write if metadata is missing.
+     * <p>
+     * Schema/4 also adds {@code annotations}: a GeoJSON {@code FeatureCollection} (real nested JSON,
+     * not a string) snapshotting {@code currentImageData}'s annotation objects at save time — geometry
+     * in image pixel coordinates, plus each annotation's name/classification/description as GeoJSON
+     * Feature properties, exactly as {@link qupath.lib.io.GsonTools} already serializes any {@link
+     * qupath.lib.io.FeatureCollection} (used elsewhere for the quiz reference geometry -- see {@link
+     * com.patolojiatlasi.qupath.quiz.QuizGeometry}). An empty hierarchy yields an empty {@code
+     * FeatureCollection} ({@code {"type":"FeatureCollection","features":[]}}), never {@code null} or
+     * an omitted field. Best-effort: any failure reading the hierarchy/serializing falls back to that
+     * same empty FeatureCollection rather than throwing, so a missing/closed image can never break a
+     * blinded save.
      */
     private String buildBlindedJson(String uri, FocusMap map) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -833,7 +850,50 @@ public final class FocusHeatmap {
             // currentImageData/server/metadata unavailable, or magnification unreadable -- leave null.
         }
         m.put("baseMagnification", baseMag);   // objective power for the fragment's slide, or null if unknown
+        m.put("annotations", buildAnnotationsFeatureCollection());   // schema/4: GeoJSON FeatureCollection, never null
         return new GsonBuilder().create().toJson(m);
+    }
+
+    /**
+     * Snapshot the current slide's annotations as a GeoJSON {@code FeatureCollection} {@link
+     * JsonElement} for embedding in {@link #buildBlindedJson}. Best-effort/no-throw: on any failure
+     * (no image loaded, closed hierarchy, serialization error) this returns an empty {@code
+     * FeatureCollection} rather than propagating -- a blinded save must never fail because of this.
+     * <p>
+     * Serializes via {@link GsonTools#getInstance()}'s {@code toJson(Object, Type)} (a JSON
+     * <em>string</em>), then reparses with {@link JsonParser} -- deliberately <strong>not</strong>
+     * {@code Gson.toJsonTree}: QuPath's own {@code ROITypeAdapters.writeCoordinates} calls the
+     * streaming-only {@code JsonWriter.jsonValue(String)} to emit raw coordinate literals, which
+     * {@code Gson}'s tree writer (used internally by {@code toJsonTree}) throws {@code
+     * UnsupportedOperationException} on for any non-empty geometry (confirmed empirically). The
+     * string round-trip avoids that path entirely and still yields a real nested {@link JsonElement}
+     * once parsed -- never a quoted string in the final fragment.
+     * <p>
+     * Threading: {@link #checkpointBlinded()} and {@link #saveBlindedSync} both run on the FX thread
+     * (driven by the sampling {@link Timeline}/a menu action), so {@code currentImageData} and its
+     * hierarchy are read safely there. {@link #flushOnShutdown()} is the one caller that runs off the
+     * FX thread (a JVM shutdown hook, by its own javadoc) -- {@link
+     * qupath.lib.objects.hierarchy.PathObjectHierarchy#getAnnotationObjects()} returns a fresh {@code
+     * ArrayList} snapshot (verified via the 0.6.0 bytecode), so collection iteration itself can't throw
+     * a {@code ConcurrentModificationException}; only a per-object torn read of in-flight name/class
+     * edits is possible in that narrow window, which this method's try/catch bounds to "fall back to
+     * empty" -- the same tradeoff {@link #flushOnShutdown()} already accepts for {@code currentMap}.
+     */
+    private JsonElement buildAnnotationsFeatureCollection() {
+        try {
+            var hierarchy = currentImageData == null ? null : currentImageData.getHierarchy();
+            var annotations = hierarchy == null ? java.util.List.<qupath.lib.objects.PathObject>of()
+                    : hierarchy.getAnnotationObjects();
+            FeatureCollection featureCollection = FeatureCollection.wrap(annotations);
+            String json = GsonTools.getInstance().toJson(featureCollection, FeatureCollection.class);
+            return JsonParser.parseString(json);
+        } catch (Exception e) {
+            logger.debug("Could not capture annotations for blinded fragment: {}", e.getMessage(), e);
+            JsonObject empty = new JsonObject();
+            empty.addProperty("type", "FeatureCollection");
+            empty.add("features", new JsonArray());
+            return empty;
+        }
     }
 
     /** Stable per-slide key for aggregation: the DZI URL without any query (e.g. no {@code ?mpp=}). */
