@@ -342,8 +342,11 @@ slides uncalibrated — only add real values (a wrong pixel size makes every mea
 
 ## Focus heatmap
 
-**Extensions → Odak ısı haritası** adds a dwell/attention heatmap that records where you look on a
-slide. While tracking is on, the active viewer's visible region is sampled a few times a second and
+**Extensions → Araştırma → Odak ısı haritası** adds a dwell/attention heatmap that records where you
+look on a slide. This lives in the **"Araştırma"** menu (a top-level sibling of "Patoloji Atlası" in
+Extensions), together with image rotation and the "flag any project" action below — these tools are
+atlas-independent and work on **any** open slide, not just ones opened from the atlas catalogue.
+While tracking is on, the active viewer's visible region is sampled a few times a second and
 accumulated into a per-slide grid shown as a translucent overlay — focused high-magnification viewing
 heats an area far faster than a zoomed-out browse, so the map doubles as a *"did I review the whole
 slide?"* check and as a way to study where readers focus.
@@ -376,15 +379,24 @@ and no on-screen indication of any kind** while it's active. It can't be toggled
 **Araştırmaya katkıda bulun…** menu items are all disabled for the duration, so a session can't
 accidentally surface a heatmap or leak one to a file.
 
-You can turn it on for a single session from the menu (**Kör kayıt (araştırma)**), or make it the
-default for an entire study: check **"Araştırma projesi — kör odak kaydı (blinded)"** in the
-*Create project* dialog when building a project from the browser. That writes a small
-`atlas-research.json` sidecar next to the project's `.qpproj` file; every time the project is
-opened afterwards, blinded recording starts automatically — after a **one-time consent notice**
-explaining that anonymised viewing data (regions viewed + dwell time, no identity) is being
-recorded for research. Declining leaves recording off and the notice reappears next time the
-project opens; accepting is remembered so later sessions start recording immediately, no
-re-prompt.
+You can turn it on for a single session from **Extensions → Araştırma → Odak ısı haritası → Kör
+kayıt (araştırma)**, or make it the default for an entire study. There are two ways to do that:
+
+- **Building a project from the atlas browser:** check **"Araştırma projesi — kör odak kaydı
+  (blinded)"** in the *Create project* dialog.
+- **Any other project — local slides, a server/PACS project, or one you already have open:**
+  **Extensions → Araştırma → Mevcut projeyi araştırma projesi yap (kör kayıt)…** flags the
+  **currently open project** in one click, no atlas involvement required. This is the same sidecar
+  mechanism, so it's how a researcher sets up a double-blind spatial/temporal/directional viewing
+  study on their own SVS files.
+
+Either way, this writes a small `atlas-research.json` sidecar next to the project's `.qpproj` file;
+every time the project is opened afterwards, blinded recording starts automatically — after a
+**one-time consent notice** explaining that anonymised viewing data (regions viewed + dwell time,
+no identity) is being recorded for research. (The "flag current project" action asks for that same
+consent immediately, since you're opting in right there, and starts recording at once rather than
+waiting for the next reopen.) Declining leaves recording off and the notice reappears next time the
+project opens; accepting is remembered so later sessions start recording immediately, no re-prompt.
 
 **Where the data goes.** When a project is open, every blinded write for that session goes into
 `<project>/atlas-focus/` (captured once when recording starts, so a later project switch can't

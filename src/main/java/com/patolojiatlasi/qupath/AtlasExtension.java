@@ -1,6 +1,7 @@
 package com.patolojiatlasi.qupath;
 
 import java.awt.image.BufferedImage;
+import java.io.File;
 import java.util.Optional;
 
 import javafx.scene.control.Alert;
@@ -56,9 +57,12 @@ public class AtlasExtension implements QuPathExtension {
     public void installExtension(QuPathGUI qupath) {
         this.qupath = qupath;
         try {
-            // All of this extension's actions live under one top-level "Patoloji Atlası" menu,
-            // grouped into sub-menus (with the focus heatmap as a sub-sub-menu), instead of being
-            // scattered flat among the other extensions' items in Extensions.
+            // This extension's atlas-specific actions live under one top-level "Patoloji Atlası"
+            // menu, grouped into sub-menus, instead of being scattered flat among the other
+            // extensions' items in Extensions. The atlas-independent research tools (focus
+            // heatmap / blinded recording, rotation, flag-any-project) live in a separate
+            // top-level "Araştırma" menu (sibling of this one) so they read as general tools that
+            // work on any slide, not just atlas ones.
             Menu atlas = new Menu("Patoloji Atlası");
 
             // Primary entry: browse & open atlas slides.
@@ -70,13 +74,15 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
             coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
 
-            // View group — reorientation + the focus (dwell) heatmap sub-menu.
+            // Research group — reorientation, the focus (dwell) heatmap sub-menu (which includes
+            // the blinded-record toggle), and flag-any-project, surfaced as a separate top-level
+            // "Araştırma" menu built further down. Atlas-independent: applies to any open slide.
             RotationControl rotation = new RotationControl(qupath);
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
             rotationItem.setOnAction(e -> rotation.show());
-            Menu viewMenu = new Menu("Görünüm");
             this.focusHeatmap = new FocusHeatmap(qupath);
-            viewMenu.getItems().addAll(rotationItem, focusHeatmap.buildMenu());
+            MenuItem flagProjectItem = new MenuItem("Mevcut projeyi araştırma projesi yap (kör kayıt)…");
+            flagProjectItem.setOnAction(e -> flagCurrentProjectAsResearch(qupath));
 
             // Blinded-research auto-start: a project can carry a "blinded tracking" flag
             // (set from the project builder checkbox); opening such a project starts blinded
@@ -140,9 +146,16 @@ public class AtlasExtension implements QuPathExtension {
                     browseItem,
                     coverageItem,
                     new SeparatorMenuItem(),
-                    viewMenu, compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
+                    compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
 
-            qupath.getMenu("Extensions", true).getItems().add(atlas);
+            Menu research = new Menu("Araştırma");
+            research.getItems().addAll(
+                    focusHeatmap.buildMenu(),
+                    rotationItem,
+                    new SeparatorMenuItem(),
+                    flagProjectItem);
+
+            qupath.getMenu("Extensions", true).getItems().addAll(atlas, research);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
@@ -180,6 +193,63 @@ public class AtlasExtension implements QuPathExtension {
             logger.debug("Could not resolve open atlas case: {}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Flags the currently open project (any project -- atlas-built, local-slide, or server-slide)
+     * as a blinded-research project: writes the {@code atlas-research.json} sidecar, marks consent
+     * (the researcher is opting in right now, in this very action, so there's no need for the
+     * {@link #onProjectChanged} hook to prompt again later), and starts blinded recording
+     * immediately on the retained {@link #focusHeatmap} instance -- the same instance the project-
+     * open hook and the "Araştırma" menu's focus sub-menu drive. This is what lets a researcher use
+     * blinded recording on their own project, not just one built from the atlas browser.
+     */
+    private void flagCurrentProjectAsResearch(QuPathGUI qupath) {
+        Project<?> p = qupath.getProject();
+        if (p == null) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Önce bir proje açın veya oluşturun.");
+            if (qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
+            return;
+        }
+        File dir = BlindedResearch.projectDir(p);
+        if (dir == null) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                    "Proje klasörünü bulmak için önce projeyi kaydedin.");
+            if (qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
+            return;
+        }
+        if (BlindedResearch.isBlindedProject(p)) {
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Bu zaten bir araştırma projesi.");
+            if (qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
+            return;
+        }
+
+        Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
+                "Bu proje bir araştırma projesi yapılacak: bu oturumda ve her açılışta anonim, "
+                        + "gizli (kör) odak kaydı tutulur — ekranda ısı haritası gösterilmez. "
+                        + "Devam edilsin mi?");
+        confirm.setTitle("Araştırma projesi");
+        confirm.setHeaderText("Araştırma projesi");
+        if (qupath.getStage() != null)
+            confirm.initOwner(qupath.getStage());
+        Optional<ButtonType> choice = confirm.showAndWait();
+        if (choice.isPresent() && choice.get() == ButtonType.OK) {
+            BlindedResearch.writeFlag(dir, true);
+            BlindedResearch.markConsented(p);
+            focusHeatmap.startBlinded();
+            Alert done = new Alert(Alert.AlertType.INFORMATION,
+                    "Proje işaretlendi; kör kayıt başladı ve her açılışta sürecek.");
+            if (qupath.getStage() != null)
+                done.initOwner(qupath.getStage());
+            done.showAndWait();
+        }
+        // else: cancelled -- flag not written, recording not started.
     }
 
     /**
