@@ -55,6 +55,11 @@ Her zamanki gibi kaydırın, yakınlaştırın, slaytlar arasında gezin. **Her 
 kaydedilir** — basılacak düğme yoktur, ısı haritası gösterilmez (bu bilinçlidir: nereye baktığınızı
 görmek nasıl baktığınızı değiştirir). Doğal çalışın.
 
+> ⚠️ **Çalışmanız anotasyon çizmenizi istiyorsa,** çizdiğiniz anotasyon şekilleri *ve üzerlerine
+> yazdığınız not/yorum metni* geri gönderilen verinize kaydedilir. Anotasyon notuna **kimlik
+> belirten bir bilgi yazmayın** (hasta adı, protokol/dosya numarası) — geometri anonimdir, ancak
+> yazdığınız serbest metin olduğu gibi saklanır.
+
 ### 4. Verinizi geri gönderin
 
 Bitirdiğinizde (projeyi kapatın veya QuPath'ten çıkın), eklenti proje klasörüne **tek bir dosya**

@@ -55,6 +55,11 @@ Pan, zoom, and move between slides exactly as you normally would. **Everything i
 automatically and silently** — there are no buttons to press and no heatmap is shown (that's
 deliberate: seeing where you'd looked would change how you look). Work naturally.
 
+> ⚠️ **If your study asks you to draw annotations,** the annotation shapes *and any note/comment text
+> you type on them* are saved into your returned data. **Never type an identifying detail** (patient
+> name, MRN, accession/case number) into an annotation note — the geometry is anonymized, but free
+> text you type is stored verbatim.
+
 ### 4. Send your data back
 
 When you finish (close the project, or quit QuPath), the extension writes **one file** into the
