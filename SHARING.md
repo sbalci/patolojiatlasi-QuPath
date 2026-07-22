@@ -73,6 +73,9 @@ so it's safe to send. This *data* zip is a **different file** from the *project*
 - **Where's my data?** In the project folder: `atlas-focus/` and the `atlas-focus_*.zip`.
 - **Is it anonymous?** Yes — no name, random id, date only.
 - **Nothing happens when I "record".** Correct — it's blinded by design; the recording is invisible.
+- **Can I check or toggle recording myself?** Normally you shouldn't need to — the project starts it
+  for you. The optional manual toggle lives at **Extensions ▸ Araştırma ▸ Odak ısı haritası ▸ Kör
+  kayıt (araştırma)** if you ever need it (e.g. to confirm it's on).
 
 ---
 
@@ -95,16 +98,18 @@ Put these in the zip you distribute (keep it small — see slide notes below):
   **"Araştırma projesi — kör odak kaydı (blinded)"** box checked. Entries are **DZI URLs**, so the
   project zip is tiny and slides stream on the recipient's machine (they need internet + the
   extension).
-- **Your own local slides (SVS, etc.):** the current project builder is atlas-only, so build a
-  **normal QuPath project** from your slides, then **manually add** an `atlas-research.json` file in
-  the project folder:
-  ```json
-  { "schema": "atlas-research/1", "blindedTracking": true, "consented": false }
-  ```
-  The extension's project-open hook reads this regardless of slide source, so blinded recording turns
-  on. **Share the slide files separately** (they're large — zipping them into the project is
-  impractical); recipients relink them on open. *(A one-click "flag any project" menu action is
-  planned to remove this manual step.)*
+- **Your own local slides (SVS, etc.):** the project builder is atlas-only, so build a **normal
+  QuPath project** from your slides, then flag it as a research project one of two ways:
+  - **One-click (recommended):** with the project open, **Extensions ▸ Araştırma ▸ "Mevcut projeyi
+    araştırma projesi yap (kör kayıt)…"** writes the sidecar for you, confirms once, and starts
+    recording immediately in this session too.
+  - **Manual:** add an `atlas-research.json` file yourself in the project folder:
+    ```json
+    { "schema": "atlas-research/1", "blindedTracking": true, "consented": false }
+    ```
+  Either way, the extension's project-open hook reads the sidecar regardless of slide source, so
+  blinded recording turns on for every future open. **Share the slide files separately** (they're
+  large — zipping them into the project is impractical); recipients relink them on open.
 
 ### Consent model — and the observer-effect tradeoff (read this)
 
