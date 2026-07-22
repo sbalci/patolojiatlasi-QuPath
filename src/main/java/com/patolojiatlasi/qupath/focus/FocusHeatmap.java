@@ -125,10 +125,12 @@ public final class FocusHeatmap {
     private int blindedTicks;
     /**
      * Ordered scanpath for the <b>current</b> blinded slide session: one {@code [tRelMs, cx, cy, w,
-     * h]} point per active deposit tick (viewport center + extent, all in slide pixel coordinates,
-     * plus milliseconds since {@link #blindedSlideStartMs}). Appended only in {@link #tickBlinded}
-     * alongside the existing dwell-grid deposit — same guard, same data source ({@code now}/{@code
-     * b}), so it carries no information the grid deposit doesn't already carry, just in sequence.
+     * h]} point per active tick (viewport center + extent, all in slide pixel coordinates, plus
+     * milliseconds since {@link #blindedSlideStartMs}). Appended in {@link #tickBlinded} for every
+     * tick where the app is focused and a slide is open (i.e. {@code ms > 0}), independent of
+     * whether the same tick's dwell-grid deposit ({@code currentMap.deposit(...)}) actually landed
+     * on the image — so {@code path} may carry a point for a tick the {@code grid} accumulation
+     * didn't credit.
      * Reset (cleared) in {@link #startBlinded()} and in {@link #switchTo} whenever a fresh blinded
      * slide map is created, mirroring {@link #blindedTicks}'s reset points. FX-thread-only to write;
      * read only via a defensive snapshot ({@code new ArrayList<>(blindedPath)}) at serialization time
@@ -196,7 +198,7 @@ public final class FocusHeatmap {
 
         // JavaFX's MenuItem/CheckMenuItem has no setTooltip(...) — a hover tooltip isn't available
         // on a plain menu row, so the description is folded into the label itself instead.
-        blindedItem = new CheckMenuItem("Kör kayıt (araştırma) — sessizce kaydeder, ısı haritası gösterilmez");
+        blindedItem = new CheckMenuItem("Gezinme kaydı (araştırma) — sessizce kaydeder, ısı haritası gösterilmez");
         blindedItem.selectedProperty().addListener((obs, was, now) -> {
             if (now)
                 startBlinded();
@@ -261,7 +263,7 @@ public final class FocusHeatmap {
     //
     // Records real per-slide viewing time silently: no overlay, no window, no status message —
     // just the tested FocusMap.activeDwellMs kernel accumulating dwell-ms, paused whenever the app
-    // is unfocused/idle. Driven either by the "Kör kayıt (araştırma)" menu toggle, or externally by
+    // is unfocused/idle. Driven either by the "Gezinme kaydı (araştırma)" menu toggle, or externally by
     // Task 3's project-open/close hook via startBlinded()/stopBlinded() on this same retained
     // instance (see AtlasExtension).
 
@@ -674,7 +676,7 @@ public final class FocusHeatmap {
         final String json = buildJson(slide, uri, map);
         final BufferedImage png = map.toImage();
         final String base = safe(slide) + "__" + safe(user) + "__"
-                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
         Thread t = new Thread(() -> {
             try {
                 if (!dir.exists())
@@ -725,8 +727,8 @@ public final class FocusHeatmap {
         }
         final String json = buildContributionJson(currentUri, currentMap);
         final File dir = new File(defaultDir(), "contributions");
-        final String base = "focus-contribution__" + safe(slideKey(currentUri)) + "__"
-                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+        final String base = "focus-contribution__" + safe(anonymizeSlideKey(slideKey(currentUri))) + "__"
+                + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
         final File file = new File(dir, base + ".json");
         writeTextAsync(file, json);
         if (UPLOAD_ENABLED && !UPLOAD_ENDPOINT.isBlank()) {
@@ -743,7 +745,7 @@ public final class FocusHeatmap {
     private String buildContributionJson(String uri, FocusMap map) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("schema", CONTRIBUTION_SCHEMA);
-        m.put("slideKey", slideKey(uri));       // stable across readers → server groups by this
+        m.put("slideKey", anonymizeSlideKey(slideKey(uri)));   // stable across readers → server groups by this
         m.put("sessionId", sessionId);          // anonymous, not a user identity
         m.put("imageWidth", map.getImageWidth());
         m.put("imageHeight", map.getImageHeight());
@@ -810,6 +812,7 @@ public final class FocusHeatmap {
         m.put("date", java.time.LocalDate.now().toString());
         m.put("grid", map.getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
         m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h] points; defensive snapshot
+        m.put("pathTruncated", blindedPathCapped);   // true if MAX_PATH_POINTS was hit and points were dropped
         return new GsonBuilder().create().toJson(m);
     }
 

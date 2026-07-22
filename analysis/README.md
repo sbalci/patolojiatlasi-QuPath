@@ -1,7 +1,7 @@
 # Blinded focus — evaluation & analysis
 
 Offline analysis of the **blinded focus recordings** produced by the QuPath atlas extension
-(`Extensions → Araştırma → Odak ısı haritası → Kör kayıt (araştırma)` and blinded-research projects). The
+(`Extensions → Araştırma → Odak ısı haritası → Gezinme kaydı (araştırma)` and blinded-research projects). The
 extension records, silently and anonymously, **where** a viewer looked and **for how long** — and,
 since schema `/3`, the **ordered navigation path (scanpath)**. These tools turn that data into
 per-user metrics, figures, cross-user agreement, reference comparison, and scanpath analysis.
@@ -12,7 +12,11 @@ showing the map *during* recording, not analyzing it afterwards).
 ## The data
 
 Each recording writes one JSON **fragment per slide** (in `<project>/atlas-focus/`, bundled into a
-timestamped `atlas-focus_*.zip` on session end). Fields (schema `atlas-focus-contribution/{1,2,3}`):
+timestamped `atlas-focus_*.zip` on session end). The extension currently writes schema **`/1`**
+(visible "Contribute" mode — fixed-weight sample counts) or **`/3`** (blinded recording — dwell
+milliseconds + scanpath); schema `/2` was superseded by `/3` and is no longer produced, but the
+tools below still **accept** it for backward compatibility with older recordings. Fields (schema
+`atlas-focus-contribution/{1,2,3}`):
 
 | field | meaning |
 |-------|---------|

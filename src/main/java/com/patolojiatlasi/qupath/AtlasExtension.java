@@ -81,7 +81,7 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
             rotationItem.setOnAction(e -> rotation.show());
             this.focusHeatmap = new FocusHeatmap(qupath);
-            MenuItem flagProjectItem = new MenuItem("Mevcut projeyi araştırma projesi yap (kör kayıt)…");
+            MenuItem flagProjectItem = new MenuItem("Mevcut projeyi araştırma projesi yap (gezinme kaydı)…");
             flagProjectItem.setOnAction(e -> flagCurrentProjectAsResearch(qupath));
 
             // Blinded-research auto-start: a project can carry a "blinded tracking" flag
@@ -232,7 +232,7 @@ public class AtlasExtension implements QuPathExtension {
 
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                 "Bu proje bir araştırma projesi yapılacak: bu oturumda ve her açılışta anonim, "
-                        + "gizli (kör) odak kaydı tutulur — ekranda ısı haritası gösterilmez. "
+                        + "gizli gezinme kaydı tutulur — ekranda ısı haritası gösterilmez. "
                         + "Devam edilsin mi?");
         confirm.setTitle("Araştırma projesi");
         confirm.setHeaderText("Araştırma projesi");
@@ -244,7 +244,7 @@ public class AtlasExtension implements QuPathExtension {
             BlindedResearch.markConsented(p);
             focusHeatmap.startBlinded();
             Alert done = new Alert(Alert.AlertType.INFORMATION,
-                    "Proje işaretlendi; kör kayıt başladı ve her açılışta sürecek.");
+                    "Proje işaretlendi; gezinme kaydı başladı ve her açılışta sürecek.");
             if (qupath.getStage() != null)
                 done.initOwner(qupath.getStage());
             done.showAndWait();
@@ -278,7 +278,7 @@ public class AtlasExtension implements QuPathExtension {
         }
 
         Alert alert = new Alert(Alert.AlertType.CONFIRMATION,
-                "Bu proje araştırma amaçlı kör odak kaydı için işaretlenmiş. Kabul ederseniz, "
+                "Bu proje araştırma amaçlı gezinme kaydı için işaretlenmiş. Kabul ederseniz, "
                         + "bu oturumdan itibaren bakılan bölgeler ve süre anonimleştirilmiş şekilde "
                         + "sessizce kaydedilir; kimlik bilgisi kaydedilmez ve uygulama içinde hiçbir "
                         + "şey gösterilmez.");

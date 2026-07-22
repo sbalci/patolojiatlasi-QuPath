@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import zipfile
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
@@ -29,14 +30,25 @@ SCHEMAS = {
 
 
 def _is_valid_fragment(d):
-    return (
+    if not (
         isinstance(d, dict)
         and d.get("schema") in SCHEMAS
         and "slideKey" in d
         and "grid" in d
         and "gridWidth" in d
         and "gridHeight" in d
-    )
+    ):
+        return False
+    # A `grid` whose length doesn't match `gridWidth*gridHeight` would make the later
+    # `np.reshape(gh, gw)` calls (metrics.py) throw ValueError, aborting the whole run instead of
+    # just skipping this one malformed fragment -- so validate the size here, at load time.
+    try:
+        gw = int(d["gridWidth"])
+        gh = int(d["gridHeight"])
+        grid = d["grid"]
+        return hasattr(grid, "__len__") and len(grid) == gw * gh
+    except (TypeError, ValueError):
+        return False
 
 
 def _parse_fragment(raw_text, source):
@@ -69,22 +81,39 @@ def load_fragments(paths):
         p = str(p)
         if os.path.isdir(p):
             for jf in sorted(glob.glob(os.path.join(p, "**", "*.json"), recursive=True)):
-                with open(jf, "r", encoding="utf-8") as fh:
-                    frag = _parse_fragment(fh.read(), jf)
+                try:
+                    with open(jf, "r", encoding="utf-8") as fh:
+                        text = fh.read()
+                except (OSError, UnicodeDecodeError) as exc:
+                    print(f"warning: skipping unreadable file {jf}: {exc}", file=sys.stderr)
+                    continue
+                frag = _parse_fragment(text, jf)
                 if frag is not None:
                     fragments.append(frag)
         elif os.path.isfile(p) and zipfile.is_zipfile(p):
             with zipfile.ZipFile(p) as zf:
                 for name in sorted(zf.namelist()):
                     if name.lower().endswith(".json"):
-                        with zf.open(name) as fh:
-                            text = fh.read().decode("utf-8")
+                        try:
+                            with zf.open(name) as fh:
+                                text = fh.read().decode("utf-8")
+                        except (OSError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+                            print(
+                                f"warning: skipping unreadable zip entry {p}!{name}: {exc}",
+                                file=sys.stderr,
+                            )
+                            continue
                         frag = _parse_fragment(text, f"{p}!{name}")
                         if frag is not None:
                             fragments.append(frag)
         elif os.path.isfile(p):
-            with open(p, "r", encoding="utf-8") as fh:
-                frag = _parse_fragment(fh.read(), p)
+            try:
+                with open(p, "r", encoding="utf-8") as fh:
+                    text = fh.read()
+            except (OSError, UnicodeDecodeError) as exc:
+                print(f"warning: skipping unreadable file {p}: {exc}", file=sys.stderr)
+                continue
+            frag = _parse_fragment(text, p)
             if frag is not None:
                 fragments.append(frag)
         else:

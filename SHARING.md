@@ -74,8 +74,8 @@ so it's safe to send. This *data* zip is a **different file** from the *project*
 - **Is it anonymous?** Yes — no name, random id, date only.
 - **Nothing happens when I "record".** Correct — it's blinded by design; the recording is invisible.
 - **Can I check or toggle recording myself?** Normally you shouldn't need to — the project starts it
-  for you. The optional manual toggle lives at **Extensions ▸ Araştırma ▸ Odak ısı haritası ▸ Kör
-  kayıt (araştırma)** if you ever need it (e.g. to confirm it's on).
+  for you. The optional manual toggle lives at **Extensions ▸ Araştırma ▸ Odak ısı haritası ▸
+  Gezinme kaydı (araştırma)** if you ever need it (e.g. to confirm it's on).
 
 ---
 
@@ -95,13 +95,13 @@ Put these in the zip you distribute (keep it small — see slide notes below):
 
 - **Atlas slides (works today):** build the project from the atlas browser
   (`Extensions ▸ Patoloji Atlası ▸ Slaytlara gözat… ▸ Create project…`) with the
-  **"Araştırma projesi — kör odak kaydı (blinded)"** box checked. Entries are **DZI URLs**, so the
+  **"Araştırma projesi — gezinme kaydı (blinded)"** box checked. Entries are **DZI URLs**, so the
   project zip is tiny and slides stream on the recipient's machine (they need internet + the
   extension).
 - **Your own local slides (SVS, etc.):** the project builder is atlas-only, so build a **normal
   QuPath project** from your slides, then flag it as a research project one of two ways:
   - **One-click (recommended):** with the project open, **Extensions ▸ Araştırma ▸ "Mevcut projeyi
-    araştırma projesi yap (kör kayıt)…"** writes the sidecar for you, confirms once, and starts
+    araştırma projesi yap (gezinme kaydı)…"** writes the sidecar for you, confirms once, and starts
     recording immediately in this session too.
   - **Manual:** add an `atlas-research.json` file yourself in the project folder:
     ```json

@@ -129,12 +129,23 @@ def _target_grid_dims(frags):
     )
 
 
+def _sanitize_nan(value):
+    """Map a float NaN to ``""`` (blank), matching the R toolkit's ``write.csv(..., na="")``
+    convention (R's ``NaN``/``NA`` both render as blank there). Without this, ``csv.DictWriter``
+    would str()-ify a NaN (e.g. ``auc_judd()``'s documented NaN-on-degenerate-mask return) to the
+    literal text ``"nan"``, which is a different on-disk representation of "undefined" than R's
+    blank cell for the same metric on the same input."""
+    if isinstance(value, float) and value != value:  # NaN != NaN
+        return ""
+    return value
+
+
 def _write_csv(path, rows, fieldnames):
     with open(path, "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=fieldnames)
         w.writeheader()
         for r in rows:
-            w.writerow(r)
+            w.writerow({k: _sanitize_nan(v) for k, v in r.items()})
 
 
 def _fmt(x, nd=3):
@@ -276,6 +287,13 @@ def analyze(inputs, out_dir, reference=None, roi=None, labels_csv=None, make_fig
         # ------------------------------------------------------------------
         # reference / ROI comparison
         # ------------------------------------------------------------------
+        if reference and reference not in resampled:
+            print(
+                f"warning: --reference {reference!r} matches no session on slide "
+                f"{slide_key!r} (sessions present: {', '.join(session_ids)})",
+                file=sys.stderr,
+            )
+
         if reference or roi_rings:
             ref_map, ref_mask = None, None
             if roi_rings:

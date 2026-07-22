@@ -3,7 +3,7 @@
     "description": "QuPath eklenti kataloğu: patolojiatlasi.com bütün-slayt görüntülerini QuPath içinden akışla açan Patoloji Atlası eklentisi (qupath-extension-atlas).",
     "extensions": [{
         "name": "QuPath Patoloji Atlası extension",
-        "description": "patolojiatlasi.com üzerindeki Deep Zoom (DZI) bütün-slayt görüntülerini QuPath içinden, önceden indirmeye gerek kalmadan, karo-karo akışla açar. Extensions → Browse Patoloji Atlası… menüsünden kategoriye göre gruplanmış görüntü kataloğunu açar ve .dzi URL'lerini açılabilir görüntü türü olarak kaydeder.",
+        "description": "patolojiatlasi.com üzerindeki Deep Zoom (DZI) bütün-slayt görüntülerini QuPath içinden, önceden indirmeye gerek kalmadan, karo-karo akışla açar. Extensions → Patoloji Atlası → Slaytlara gözat… menüsünden kategoriye göre gruplanmış görüntü kataloğunu açar, .dzi URL'lerini açılabilir görüntü türü olarak kaydeder; aynı menüde karşılaştırma, referans, atıf ve sınav/quiz araçları da bulunur. Ayrı bir Extensions → Araştırma menüsü, odak ısı haritası (gezinme kaydı dahil) ve görüntü döndürme gibi atlastan bağımsız araştırma araçlarını sunar.",
         "author": "Serdar Balcı",
         "homepage": "https://github.com/sbalci/patolojiatlasi-QuPath",
         "releases": [

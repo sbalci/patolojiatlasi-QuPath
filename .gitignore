@@ -14,3 +14,6 @@ bin/
 __pycache__/
 *.pyc
 .venv/
+
+# Local reference material (papers, notes) — not committed
+brainstorming/

@@ -42,14 +42,26 @@ SCHEMAS <- c(
 # io: fragment loading (dirs / .zip / single files), grouping, slugging, labels
 # ---------------------------------------------------------------------------
 
-#' Test whether a parsed JSON object is a valid blinded-focus fragment.
+#' Test whether a parsed JSON object is a valid blinded-focus fragment. Besides the required-field
+#' checks, also validates that `length(grid) == gridWidth*gridHeight` — a mismatch would otherwise
+#' make later `matrix(..., nrow=gh, ncol=gw)` / reshape calls throw (too few values) or silently
+#' misalign rows/cols (too many, matrix() just recycles), so it must be caught here at load time
+#' rather than downstream.
 .is_valid_fragment <- function(d) {
-  is.list(d) &&
+  if (!(is.list(d) &&
     !is.null(d$schema) && length(d$schema) == 1 && d$schema %in% SCHEMAS &&
     !is.null(d$slideKey) &&
     !is.null(d$grid) &&
     !is.null(d$gridWidth) &&
-    !is.null(d$gridHeight)
+    !is.null(d$gridHeight))) {
+    return(FALSE)
+  }
+  gw <- suppressWarnings(as.integer(d$gridWidth))
+  gh <- suppressWarnings(as.integer(d$gridHeight))
+  if (length(gw) != 1 || length(gh) != 1 || is.na(gw) || is.na(gh)) {
+    return(FALSE)
+  }
+  length(d$grid) == gw * gh
 }
 
 #' Parse one JSON document (character vector of lines, or a single string) into a fragment list
@@ -291,6 +303,9 @@ top_hotspots <- function(grid, gw, gh, n = 5) {
 count_hotspots <- function(grid, gw, gh, thresh_frac = 0.5) {
   gw <- as.integer(gw); gh <- as.integer(gh)
   g <- matrix(as.numeric(grid), nrow = gh, ncol = gw, byrow = TRUE)
+  if (length(g) == 0) {
+    return(0L)
+  }
   m <- max(g)
   if (m <= 0) {
     return(0L)
@@ -777,12 +792,25 @@ plot_coverage_over_time <- function(path, gw, gh, img_w, img_h, title, out) {
 
 # ---------------------------------------------------------------------------
 # CSV writing helper (tidy long-format, blank cells for NA/NaN — matches the Python CLI's
-# `_write_csv` output convention: comma-separated, unquoted, blank not the literal "NA")
+# `_write_csv` output convention: comma-separated, blank not the literal "NA". Quoting differs
+# slightly but is benign: Python's `csv.DictWriter` uses `QUOTE_MINIMAL` (only fields containing a
+# comma/quote/newline get quoted); R's `write.csv` default quotes *every* character field
+# regardless of content. Both are read back correctly by their respective CSV readers — the point
+# of alignment is "no unescaped comma ever corrupts column alignment", not byte-identical quoting.)
 # ---------------------------------------------------------------------------
 
 #' Write a list of row-lists (`rows`, each a named list covering `fieldnames`) to a tidy CSV at
 #' `path`, in `fieldnames` column order. `NA`/`NaN` cells are written as blank fields (matching the
 #' Python toolkit's diagonal-only-column convention, e.g. `diffFromConsensus`/`transitionEntropy`).
+#'
+#' Uses `write.csv`'s default quoting (i.e. does NOT pass `quote = FALSE`) so that a comma/quote/
+#' newline inside a character field (most realistically a `--labels sessionId,label` value like
+#' `"Dr. Smith, Pathology"` flowing through into the `session`/`sessionA`/`sessionB` columns) is
+#' properly escaped rather than corrupting column alignment on write and crashing `read.csv` on
+#' read (previously: `quote = FALSE` wrote the raw comma unescaped, and a later `utils::read.csv()`
+#' of that same file — see `analyze()`'s return value below, or a re-read for `--labels` output
+#' inspection — would then misparse the extra field and fail with "duplicate 'row.names' are not
+#' allowed" or worse, silently shift columns).
 write_csv_tidy <- function(rows, path, fieldnames) {
   if (length(rows) == 0) {
     df <- as.data.frame(matrix(nrow = 0, ncol = length(fieldnames)))
@@ -791,7 +819,7 @@ write_csv_tidy <- function(rows, path, fieldnames) {
     df <- do.call(rbind, lapply(rows, function(r) as.data.frame(r[fieldnames], stringsAsFactors = FALSE)))
     names(df) <- fieldnames
   }
-  utils::write.csv(df, path, row.names = FALSE, quote = FALSE, na = "")
+  utils::write.csv(df, path, row.names = FALSE, na = "")
   invisible(df)
 }
 
@@ -966,6 +994,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     # ------------------------------------------------------------------
     # reference / ROI comparison
     # ------------------------------------------------------------------
+    if (!is.null(reference) && !(reference %in% session_ids)) {
+      message(sprintf(
+        "warning: --reference '%s' matches no session on slide '%s' (sessions present: %s)",
+        reference, slide_key, paste(session_ids, collapse = ", ")
+      ))
+    }
+
     if (!is.null(reference) || !is.null(roi_rings)) {
       ref_map <- NULL; ref_mask <- NULL
       if (!is.null(roi_rings)) {
