@@ -70,15 +70,15 @@ jsonlite · dplyr · tidyr · ggplot2 · irr · proxy. See [`R/README.md`](R/REA
 ```bash
 Rscript R/requirements.R      # installs missing packages
 Rscript R/run_analysis.R <zip-or-dir...> --out out --figures \
-    [--reference <sessionId>] [--roi expert.geojson] [--labels labels.csv]
+    [--reference <sessionId>] [--roi expert.geojson] [--labels labels.csv] \
+    [--res 512] [--magbands 3]
 ```
 
 The Python and R toolkits are **parallel implementations of the same metrics** and emit the **same
 output files/columns** (`metrics.csv`, `compare_<slide>.csv`, `reference_<slide>.csv`,
 `scanpath_<slide>.csv`, `magbands_<slide>.csv`, `consensus_<slide>.png`, `summary.md`) — verified to
-agree numerically — so use whichever environment you prefer. (The Phase-1 zoom/navigation metric
-family below is currently Python-only; the R port is a separate, planned task and must match the
-formulas documented in `python/blinded_focus/metrics.py`.)
+agree numerically, including the Phase-1 zoom/navigation metric family — so use whichever
+environment you prefer.
 
 ## What the analysis computes
 

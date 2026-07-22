@@ -34,7 +34,8 @@ import sys
 import zipfile
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
-#: /2, /3 = real dwell-ms (blinded recording, weightUnit="ms"). /3 additionally has "path".
+#: /2, /3, /4 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ add a "path"; /4 path
+#: points carry a 6th element dsMilli (downsample×1000) and the fragment carries baseMagnification.
 SCHEMAS = {
     "atlas-focus-contribution/1",
     "atlas-focus-contribution/2",
