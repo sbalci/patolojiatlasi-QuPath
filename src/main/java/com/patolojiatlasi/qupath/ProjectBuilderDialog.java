@@ -131,7 +131,7 @@ public class ProjectBuilderDialog {
         // Blinded (research) tracking is a per-project sidecar flag (see BlindedResearch), not
         // tied to new-vs-current — checking it here just writes the flag once the project is
         // built/added to; AtlasExtension's project-open hook does the actual auto-start + consent.
-        blindedCheckBox = new CheckBox("Araştırma projesi — kör odak kaydı (blinded)");
+        blindedCheckBox = new CheckBox("Araştırma projesi — gezinme kaydı (blinded)");
 
         createBtn = new Button("Create");
         createBtn.setOnAction(e -> runBuild());

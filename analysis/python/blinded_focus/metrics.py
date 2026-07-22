@@ -100,12 +100,14 @@ def top_hotspots(grid, gw, gh, n=5):
 def count_hotspots(grid, gw, gh, thresh_frac=0.5):
     """Number of 4-connected regions with value ``> thresh_frac * max(grid)``.
 
-    0 for an all-zero grid. Used as ``nHotspots`` in ``metrics.csv`` — a simple, reproducible
-    "distinct attended regions" count (not part of the pinned Bylinskii metric set, but a natural
-    complement to ``peakDwell``).
+    0 for an all-zero or zero-size (empty) grid. Used as ``nHotspots`` in ``metrics.csv`` — a
+    simple, reproducible "distinct attended regions" count (not part of the pinned Bylinskii
+    metric set, but a natural complement to ``peakDwell``).
     """
     gw, gh = int(gw), int(gh)
     g = np.asarray(grid, dtype=float).reshape(gh, gw)
+    if g.size == 0:
+        return 0
     m = g.max()
     if m <= 0:
         return 0
@@ -187,7 +189,8 @@ def iou(a, b, thresh=0.1):
     """``|{a>thresh*max(a)} ∩ {b>thresh*max(b)}| / |union|``. 0.0 if the union is empty."""
     a = np.asarray(a, dtype=float).flatten()
     b = np.asarray(b, dtype=float).flatten()
-    ma, mb = a.max(), b.max()
+    ma = a.max() if a.size else 0.0
+    mb = b.max() if b.size else 0.0
     am = a > (thresh * ma) if ma > 0 else np.zeros_like(a, dtype=bool)
     bm = b > (thresh * mb) if mb > 0 else np.zeros_like(b, dtype=bool)
     union = np.logical_or(am, bm).sum()

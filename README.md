@@ -56,8 +56,9 @@ to these sites:
 
 ## Quiz (self-study)
 
-**Extensions → Sınav/quiz hazırla…** and **Extensions → Sınav/quiz çöz…** turn atlas slides into a
-self-study quiz — no project and no server required. Four question types are supported:
+**Extensions → Patoloji Atlası → Sınav / Quiz → Hazırla…** and **Extensions → Patoloji Atlası →
+Sınav / Quiz → Çöz…** turn atlas slides into a self-study quiz — no project and no server required.
+Four question types are supported:
 
 - **Multiple-choice** — a prompt with several options, one marked correct.
 - **Free-text** — a prompt with a model answer to compare your own notes against.
@@ -68,13 +69,13 @@ self-study quiz — no project and no server required. Four question types are s
   the area of highest mitotic activity"); pan/zoom there yourself, then click **Göster** to
   overlay the target region and recentre the viewer on it.
 
-- **Author** (`Sınav/quiz hazırla…`) — with an atlas slide open, add a question of any of the four
+- **Author** (`Sınav / Quiz → Hazırla…`) — with an atlas slide open, add a question of any of the four
   types; each question is bound to the slide that was open when you added it (its DZI URL is
   stored with the question), so one pack can span several slides. For an annotation or navigation
   question, draw and select the reference region on the slide yourself, then click **Referansı
   slayttan al** to capture its shape as the question's reference (annotation) or target
   (navigation) geometry. Save the finished set as a quiz-pack JSON.
-- **Take** (`Sınav/quiz çöz…`) — load a quiz-pack and work through its questions in order; each
+- **Take** (`Sınav / Quiz → Çöz…`) — load a quiz-pack and work through its questions in order; each
   question opens its slide, you answer it — pick an option, type notes, draw an outline, or
   navigate to a region — then click **Göster** to reveal the correct MCQ option, the free-text
   model answer, or, for annotation/navigation questions, an overlay of the reference/target region
@@ -89,7 +90,7 @@ self-study quiz — no project and no server required. Four question types are s
 
 ## Compare a case's stains
 
-**Extensions → Bu vakanın boyalarını karşılaştır…** opens every stain of the case shown in the
+**Extensions → Patoloji Atlası → Karşılaştır → Bu vakanın boyalarını karşılaştır…** opens every stain of the case shown in the
 active viewer — H&E plus any IHC / special stains — into QuPath's native multi-viewer grid, with
 pan/zoom linked across all of them (QuPath's built-in **synchronize viewers** behavior), so you can
 scroll one panel and have the others follow to the same field. The grid size (1×2 up to 2×3) is
@@ -97,7 +98,7 @@ picked to fit the number of stains; cases with more than six stains only show th
 active viewer isn't showing a cataloged atlas slide, or the slide's case has no other stains, you
 get a message instead of a grid.
 
-**Extensions → Tek görünüme dön** turns synchronization off and collapses the grid back to a
+**Extensions → Patoloji Atlası → Karşılaştır → Tek görünüme dön** turns synchronization off and collapses the grid back to a
 single viewer, closing the other panels (prompting to save first if any of them have unsaved
 edits, exactly like QuPath's own close-viewer action).
 
@@ -353,7 +354,8 @@ slide?"* check and as a way to study where readers focus.
 
 Menu items:
 
-- **Görünür — izlemeyi aç/kapat** — start/stop tracking and show/hide the overlay.
+- **Slayt üzerinde göster (ısı katmanı)** — toggle the translucent heatmap overlay on the active viewer.
+- **Ayrı pencerede göster** — toggle a separate floating window showing the same heatmap.
 - **Temizle** — reset the current slide's map.
 - **Kaydet…** — save the current map now to a folder you pick.
 - **Araştırmaya katkıda bulun…** — save an **anonymised** contribution (no user name; a random
@@ -363,6 +365,8 @@ Menu items:
 - **Oturumdan sonra sakla (kalıcı)** — when **off** (default), maps live only for the session and
   are discarded; when **on**, each slide's map is auto-saved (on slide change, close, or stopping) to
   `~/QuPath-atlas-focus-maps/` so it can be analysed later.
+- **Gezinme kaydı (araştırma) — sessizce kaydeder, ısı haritası gösterilmez** — the blinded-recording
+  toggle; see *Blinded research recording* below.
 
 Each saved map is a `<slide>__<user>__<timestamp>.json` (plus a `.png` preview). The JSON carries the
 slide name/URI, the user (OS login), image and grid dimensions, sample count, and the row-major
@@ -379,13 +383,14 @@ and no on-screen indication of any kind** while it's active. It can't be toggled
 **Araştırmaya katkıda bulun…** menu items are all disabled for the duration, so a session can't
 accidentally surface a heatmap or leak one to a file.
 
-You can turn it on for a single session from **Extensions → Araştırma → Odak ısı haritası → Kör
-kayıt (araştırma)**, or make it the default for an entire study. There are two ways to do that:
+You can turn it on for a single session from **Extensions → Araştırma → Odak ısı haritası →
+Gezinme kaydı (araştırma)**, or make it the default for an entire study. There are two ways to do
+that:
 
-- **Building a project from the atlas browser:** check **"Araştırma projesi — kör odak kaydı
+- **Building a project from the atlas browser:** check **"Araştırma projesi — gezinme kaydı
   (blinded)"** in the *Create project* dialog.
 - **Any other project — local slides, a server/PACS project, or one you already have open:**
-  **Extensions → Araştırma → Mevcut projeyi araştırma projesi yap (kör kayıt)…** flags the
+  **Extensions → Araştırma → Mevcut projeyi araştırma projesi yap (gezinme kaydı)…** flags the
   **currently open project** in one click, no atlas involvement required. This is the same sidecar
   mechanism, so it's how a researcher sets up a double-blind spatial/temporal/directional viewing
   study on their own SVS files.
