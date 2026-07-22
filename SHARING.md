@@ -1,5 +1,7 @@
 # Sharing a blinded-research project
 
+*Türkçe sürüm: [SHARING.tr.md](SHARING.tr.md).*
+
 How to hand out a **QuPath blinded-research project** (silent, anonymized focus recording) to
 participating researchers and get their data back — for spatial · temporal · directional viewing
 research. Two parts: a **researcher quick guide** (give this to whoever opens the project) and a
