@@ -1,11 +1,14 @@
 #!/usr/bin/env Rscript
 # blinded_focus.R — standalone R analysis toolkit for QuPath atlas blinded-focus fragments.
 #
-# Reads anonymised viewport-dwell fragments (schema `atlas-focus-contribution/{1,2,3}`) produced
+# Reads anonymised viewport-dwell fragments (schema `atlas-focus-contribution/{1,2,3,4}`) produced
 # by the qupath-extension-atlas blinded recording feature and computes the standard saliency /
 # eye-tracking evaluation set: spatial similarity (CC, SIM, KLD, NSS, AUC-Judd, IoU),
 # inter-observer agreement (mean pairwise CC, ICC(2,1) via `irr::icc`), reference/ROI comparison,
-# and scanpath sequence metrics (visited-cell Levenshtein similarity, transition entropy).
+# scanpath sequence metrics (visited-cell Levenshtein similarity, transition entropy), and (Phase 1
+# navigation-research upgrade) a scanpath-rasterized fine dwell grid plus a zoom/navigation metric
+# family (avg/variance/range zoom, magnification percentage, scanning/drilling rate, path
+# velocity/linearity/search-focus, cross-session coincidence/region-coverage).
 #
 # This is the R sibling of `analysis/python/blinded_focus/` (io.py + metrics.py + figures.py +
 # analyze.py combined into one sourced file, per this project's R convention). Metric formulas are
@@ -31,11 +34,18 @@ suppressPackageStartupMessages({
 EPS <- 1e-12
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
-#: /2, /3 = real dwell-ms (blinded recording, weightUnit="ms"). /3 additionally has "path".
+#: /2, /3, /4 = real dwell-ms (blinded recording, weightUnit="ms"). /3, /4 additionally have
+#: "path" (/3 points are 5-element `[tRelMs,cx,cy,w,h]`; /4 points are 6-element
+#: `[tRelMs,cx,cy,w,h,dsMilli]` and /4 fragments also carry `baseMagnification`/`pathTruncated`).
+#: No branching on the schema string beyond this membership check anywhere in the toolkit — 5- vs
+#: 6-element points are told apart by `length(point)`, and `baseMagnification`/`pathTruncated` are
+#: read via `f$field` (NULL when absent), so /1-/3 fragments degrade to blank CSV cells
+#: automatically (mirrors `blinded_focus.io`'s doc comment in the Python toolkit).
 SCHEMAS <- c(
   "atlas-focus-contribution/1",
   "atlas-focus-contribution/2",
-  "atlas-focus-contribution/3"
+  "atlas-focus-contribution/3",
+  "atlas-focus-contribution/4"
 )
 
 # ---------------------------------------------------------------------------
@@ -75,9 +85,12 @@ SCHEMAS <- c(
   d
 }
 
-#' Coerce a fragment's `path` field (schema/3 only) to an (n x 5) numeric matrix with columns
-#' `[tRelMs, cx, cy, w, h]`, regardless of whether jsonlite simplified it to a matrix already (the
-#' common case for well-formed, uniform-length rows) or left it as a list-of-vectors / empty list.
+#' Coerce a fragment's `path` field (schema/3 or /4) to an (n x 5) or (n x 6) numeric matrix with
+#' columns `[tRelMs, cx, cy, w, h]` (schema/3) or `[tRelMs, cx, cy, w, h, dsMilli]` (schema/4),
+#' regardless of whether jsonlite simplified it to a matrix already (the common case for
+#' well-formed, uniform-length rows) or left it as a list-of-vectors / empty list. Column count is
+#' inferred from the data itself (`ncol(path)` if already a matrix, else the length of each
+#' row-vector via `rbind`) — no schema branching needed here.
 as_path_matrix <- function(path) {
   if (is.null(path) || length(path) == 0) {
     return(matrix(numeric(0), ncol = 5))
@@ -542,6 +555,361 @@ n_revisits <- function(seq) {
 }
 
 # ---------------------------------------------------------------------------
+# Scanpath -> fine dwell raster (schema/3, /4; independent of the recorded grid resolution)
+# Phase 1 (navigation-research upgrade). Mirrors `blinded_focus.metrics`'s equivalent section in
+# the Python toolkit function-for-function; see each Python docstring for the exact edge-case
+# behavior (blank-vs-0.0, ddof, quantile method) this R port reproduces.
+# ---------------------------------------------------------------------------
+
+#' Per-step (`path[i] -> path[i+1]`) time delta in ms, length `nrow(as_path_matrix(path))-1`. A
+#' step with non-positive `dt` (out-of-order/duplicate timestamps) is clamped to `0.0` rather than
+#' going negative. `numeric(0)` if `path` has fewer than 2 points. R equivalent of the Python
+#' docstring's own note: `pmax(0, diff(t))`.
+step_durations_ms <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(numeric(0))
+  }
+  pmax(diff(pm[, 1]), 0)
+}
+
+#' Rebuild a `gh x gw` dwell-ms grid (flat, row-major) directly from the scanpath, independent of
+#' the recorded `grid` resolution. For each step, `dt` (see `step_durations_ms`) is attributed to
+#' the viewport rectangle of point i (`cx +/- w/2, cy +/- h/2`), clamped to `[0,img_w] x
+#' [0,img_h]`, spread evenly across the covered cells (`floor` lower bound, `ceiling(...)-1` upper
+#' bound — not `floor` — so a rect edge exactly on a cell boundary doesn't spuriously include the
+#' next cell). If the clamped rect collapses (viewport entirely off-image), the whole `dt` lands on
+#' the single cell containing the clamped center. Steps with `dt<=0` contribute nothing.
+#' `step_mask`, if given, is a logical vector of length `nrow(pm)-1` (steps where it is FALSE are
+#' skipped — used by the magnification-band split to reuse this same raster math per band).
+#' Returns `NULL` for a 0/1-point path (a `dt` requires two points). Exact port of
+#' `blinded_focus.metrics.raster_from_path`.
+raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NULL)
+  }
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  dts <- step_durations_ms(path)
+  grid <- matrix(0.0, nrow = gh, ncol = gw)
+  for (i in seq_len(n - 1)) {
+    dt <- dts[i]
+    if (dt <= 0) next
+    if (!is.null(step_mask) && !step_mask[i]) next
+    cx <- pm[i, 2]; cy <- pm[i, 3]
+    w <- if (pm[i, 4] > 0) pm[i, 4] else 1.0
+    h <- if (pm[i, 5] > 0) pm[i, 5] else 1.0
+    x0 <- max(0.0, cx - w / 2.0); x1 <- min(img_w, cx + w / 2.0)
+    y0 <- max(0.0, cy - h / 2.0); y1 <- min(img_h, cy + h / 2.0)
+    if (x1 <= x0 || y1 <= y0) {
+      # Viewport rect entirely outside the image after clamping -- fall back to the single cell
+      # containing the (clamped) center point rather than dropping the dt.
+      ccx <- min(max(cx, 0.0), img_w - EPS)
+      ccy <- min(max(cy, 0.0), img_h - EPS)
+      col <- min(max(as.integer(floor(ccx / img_w * gw)), 0L), gw - 1L)
+      row <- min(max(as.integer(floor(ccy / img_h * gh)), 0L), gh - 1L)
+      grid[row + 1L, col + 1L] <- grid[row + 1L, col + 1L] + dt
+      next
+    }
+    col0 <- min(max(as.integer(floor(x0 / img_w * gw)), 0L), gw - 1L)
+    col1 <- min(max(as.integer(ceiling(x1 / img_w * gw)) - 1L, 0L), gw - 1L)
+    row0 <- min(max(as.integer(floor(y0 / img_h * gh)), 0L), gh - 1L)
+    row1 <- min(max(as.integer(ceiling(y1 / img_h * gh)) - 1L, 0L), gh - 1L)
+    if (col1 < col0) col1 <- col0
+    if (row1 < row0) row1 <- row0
+    n_cells <- (col1 - col0 + 1L) * (row1 - row0 + 1L)
+    grid[(row0 + 1L):(row1 + 1L), (col0 + 1L):(col1 + 1L)] <-
+      grid[(row0 + 1L):(row1 + 1L), (col0 + 1L):(col1 + 1L)] + dt / n_cells
+  }
+  as.numeric(t(grid))
+}
+
+# ---------------------------------------------------------------------------
+# Zoom / magnification (schema/4 dsMilli+baseMagnification; schema/3 w-proxy fallback)
+# ---------------------------------------------------------------------------
+
+#' Magnification (or a zoom proxy when unavailable) for one scanpath point vector (`point`, one row
+#' of `as_path_matrix`'s output: length 5 = schema/3, length 6 = schema/4). Fallback order
+#' (higher = more zoomed in, always) -- see `blinded_focus.metrics.point_zoom`'s docstring for the
+#' full rationale:
+#'
+#' 1. `base_mag` known AND point has a 6th element (`dsMilli`): `base_mag / (dsMilli/1000)`.
+#' 2. Point has `dsMilli` but `base_mag` is NULL/NA: `1000/dsMilli` (== `1/downsample`).
+#' 3. Point has no `dsMilli` (5-element): width-proxy `img_w/w`.
+#'
+#' `dsMilli<=0`/`w<=0` are treated defensively as full-resolution/1px respectively.
+point_zoom <- function(point, base_mag = NULL, img_w = NULL) {
+  has_ds <- length(point) >= 6
+  if (has_ds) {
+    ds_milli <- as.numeric(point[6])
+    if (is.na(ds_milli) || ds_milli <= 0) ds_milli <- 1000.0
+    if (!is.null(base_mag) && !is.na(base_mag) && as.numeric(base_mag) > 0) {
+      return(as.numeric(base_mag) / (ds_milli / 1000.0))
+    }
+    return(1000.0 / ds_milli)
+  }
+  w <- as.numeric(point[4])
+  if (is.na(w) || w <= 0) w <- 1.0
+  iw <- if (!is.null(img_w) && length(img_w) && !is.na(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  iw / w
+}
+
+#' `point_zoom` for every point in `path`, as a numeric vector (`numeric(0)` if `path` is
+#' empty/NULL).
+.zoom_series <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n == 0) {
+    return(numeric(0))
+  }
+  vapply(seq_len(n), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
+}
+
+#' Mean of `point_zoom` over every point in the path. `0.0` for an empty path.
+avg_zoom <- function(path, base_mag = NULL, img_w = NULL) {
+  z <- .zoom_series(path, base_mag, img_w)
+  if (length(z) == 0) {
+    return(0.0)
+  }
+  mean(z)
+}
+
+#' Sample variance (`var()`'s default divide-by-`n-1`, matching numpy's `ddof=1`) of `point_zoom`
+#' over every point in the path. `0.0` (never NA) if the path has fewer than 2 points -- R's
+#' `var()` would otherwise return `NA` on a length-1 input; special-cased here to match the Python
+#' toolkit's documented "0.0 not NaN/NA for n<2" CSV contract.
+zoom_variance <- function(path, base_mag = NULL, img_w = NULL) {
+  z <- .zoom_series(path, base_mag, img_w)
+  if (length(z) < 2) {
+    return(0.0)
+  }
+  stats::var(z)
+}
+
+#' `max(point_zoom) - min(point_zoom)` over the path. `0.0` for an empty path.
+zoom_range <- function(path, base_mag = NULL, img_w = NULL) {
+  z <- .zoom_series(path, base_mag, img_w)
+  if (length(z) == 0) {
+    return(0.0)
+  }
+  max(z) - min(z)
+}
+
+#' Fraction of consecutive scanpath transitions that are zoom-IN or same-zoom (after Ghezloo):
+#' `|{i : zoom[i+1] >= zoom[i]}| / (n-1)`. Exact `>=`, no tolerance -- `point_zoom` is deterministic
+#' on integer-quantized inputs, so a held zoom level produces bit-identical doubles (see the Python
+#' docstring for the full determinism argument). `0.0` if the path has fewer than 2 points.
+magnification_percentage <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  zooms <- .zoom_series(path, base_mag, img_w)
+  diffs <- zooms[2:n] - zooms[1:(n - 1)]
+  sum(diffs >= 0) / length(diffs)
+}
+
+#' Per-step logical (length `nrow(pm)-1`): TRUE iff `point_zoom` differs (exact `!=`) between the
+#' step's two endpoints. Caveat for schema/3 (w-proxy) paths: a mid-session viewer-window resize
+#' changes `w` without an actual zoom and would misread as a zoom-change step; schema/4
+#' (`dsMilli`-based) zoom is unaffected by window resizes.
+.step_zoom_changed <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(logical(0))
+  }
+  zooms <- .zoom_series(path, base_mag, img_w)
+  zooms[2:n] != zooms[1:(n - 1)]
+}
+
+#' "Scanning" rate (px/min): total center pan-distance accumulated over steps where zoom is
+#' unchanged (see `.step_zoom_changed`), normalized by the path's **total duration**
+#' (`(t[last]-t[first])/60000`, minutes -- the deliberate denominator choice documented in the
+#' Python `scanning_rate_px_per_min` docstring: total session time, not time-spent-scanning, so the
+#' rate is comparable across sessions with different scanning/drilling mixes). `0.0` if the path
+#' has fewer than 2 points or non-positive total duration.
+scanning_rate_px_per_min <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  duration_min <- (pm[n, 1] - pm[1, 1]) / 60000.0
+  if (duration_min <= 0) {
+    return(0.0)
+  }
+  changed <- .step_zoom_changed(path, base_mag, img_w)
+  pan <- 0.0
+  for (i in seq_len(n - 1)) {
+    if (!changed[i]) {
+      x0 <- pm[i, 2]; y0 <- pm[i, 3]
+      x1 <- pm[i + 1, 2]; y1 <- pm[i + 1, 3]
+      pan <- pan + sqrt((x1 - x0)^2 + (y1 - y0)^2)
+    }
+  }
+  pan / duration_min
+}
+
+#' "Drilling" rate (events/min): count of zoom-change steps (see `.step_zoom_changed`) per minute
+#' of the path's total duration (same denominator as `scanning_rate_px_per_min`). `0.0` if the path
+#' has fewer than 2 points or non-positive total duration.
+drilling_rate_per_min <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  duration_min <- (pm[n, 1] - pm[1, 1]) / 60000.0
+  if (duration_min <= 0) {
+    return(0.0)
+  }
+  changed <- .step_zoom_changed(path, base_mag, img_w)
+  sum(changed) / duration_min
+}
+
+#' Assign each *step* (`path[i] -> path[i+1]`) to one of `n_bands` zoom bands (band `0` = lowest
+#' zoom, `n_bands-1` = highest) by within-path quantile cut points: cuts at the
+#' `1/n_bands, 2/n_bands, ...` quantiles of the per-step `point_zoom` values, using `type=7`
+#' (R's default -- numerically identical to numpy's default linear-interpolation method), then
+#' `findInterval(zooms, cuts)` (equivalent to numpy's `searchsorted(cuts, zooms, side="right")`:
+#' both return, for each value, the count of cut points `<=` that value). Returns a vector of
+#' length `nrow(pm)-1`, or `integer(0)` if the path has fewer than 2 points.
+zoom_band_labels <- function(path, base_mag = NULL, img_w = NULL, n_bands = 3) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(integer(0))
+  }
+  zooms <- vapply(seq_len(n - 1), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
+  if (n_bands < 2) {
+    return(rep(0L, length(zooms)))
+  }
+  qs <- (1:(n_bands - 1)) / n_bands
+  cuts <- stats::quantile(zooms, probs = qs, names = FALSE, type = 7)
+  findInterval(zooms, cuts)
+}
+
+# ---------------------------------------------------------------------------
+# Path descriptors (Roa-Pena)
+# ---------------------------------------------------------------------------
+
+#' Per-step instantaneous speed (image px/sec): `distance(i, i+1) / (dt/1000)`. A step with
+#' non-positive `dt` (see `step_durations_ms`) gets velocity `0.0` (treated as "no motion" rather
+#' than undefined/dropped). Length `nrow(pm)-1`; `numeric(0)` if the path has fewer than 2 points.
+.step_velocities_px_per_sec <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(numeric(0))
+  }
+  dts <- step_durations_ms(path)
+  out <- numeric(n - 1)
+  for (i in seq_len(n - 1)) {
+    dt <- dts[i]
+    if (dt <= 0) {
+      out[i] <- 0.0
+    } else {
+      x0 <- pm[i, 2]; y0 <- pm[i, 3]
+      x1 <- pm[i + 1, 2]; y1 <- pm[i + 1, 3]
+      out[i] <- sqrt((x1 - x0)^2 + (y1 - y0)^2) / (dt / 1000.0)
+    }
+  }
+  out
+}
+
+#' Median of per-step velocities (see `.step_velocities_px_per_sec`). `0.0` if the path has fewer
+#' than 2 points.
+path_velocity_px_per_sec <- function(path) {
+  vels <- .step_velocities_px_per_sec(path)
+  if (length(vels) == 0) {
+    return(0.0)
+  }
+  stats::median(vels)
+}
+
+#' Net displacement (first->last point, straight-line) divided by the total scanpath length
+#' (`scanpath_length_px`, sum of consecutive-step distances). `0.0` if the total length is 0
+#' (degenerate/empty/stationary path).
+linearity <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  x0 <- pm[1, 2]; y0 <- pm[1, 3]
+  x1 <- pm[n, 2]; y1 <- pm[n, 3]
+  net <- sqrt((x1 - x0)^2 + (y1 - y0)^2)
+  total <- scanpath_length_px(path)
+  if (total > 0) net / total else 0.0
+}
+
+#' Fraction of dt-weighted steps that are "focused": zoom(i) >= median(per-step zooms) OR
+#' velocity(i) <= median(per-step velocities) -- both thresholds are the path's own median
+#' (session-relative, not a fixed absolute cutoff). `0.0` if the path has fewer than 2 points or
+#' zero total dt.
+search_focus_ratio <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  zooms <- vapply(seq_len(n - 1), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
+  dts <- step_durations_ms(path)
+  vels <- .step_velocities_px_per_sec(path)
+  zoom_thresh <- stats::median(zooms)
+  vel_thresh <- stats::median(vels)
+  focused <- (zooms >= zoom_thresh) | (vels <= vel_thresh)
+  total_dt <- sum(dts)
+  if (total_dt <= 0) {
+    return(0.0)
+  }
+  sum(dts[focused]) / total_dt
+}
+
+# ---------------------------------------------------------------------------
+# Cross-session consistency (dwell grids; Xu/Nan, Roa-Pena)
+# ---------------------------------------------------------------------------
+
+#' Fraction of cells above-threshold (`> thresh` of each grid's own max, via `normalise_max`) in
+#' **2 or more** of the given grids (already resampled to a common shape). `NaN` if fewer than 2
+#' grids are given (undefined for a single reader); `0.0` for an empty (zero-cell) grid shape.
+coincidence_level <- function(grids, thresh = 0.1) {
+  if (length(grids) < 2) {
+    return(NaN)
+  }
+  normed <- lapply(grids, normalise_max)
+  counts <- rep(0, length(normed[[1]]))
+  for (g in normed) {
+    counts <- counts + as.numeric(g > thresh)
+  }
+  if (length(counts) == 0) {
+    return(0.0)
+  }
+  sum(counts >= 2) / length(counts)
+}
+
+#' Percentage of the consensus's above-threshold cells (`> thresh` of its own max) that this
+#' session's grid *also* has above its own threshold. `0.0` if the consensus grid has no
+#' above-threshold cells.
+region_coverage_pct <- function(session_grid, consensus_grid, thresh = 0.1) {
+  cons <- normalise_max(consensus_grid)
+  sess <- normalise_max(session_grid)
+  cons_mask <- cons > thresh
+  n <- sum(cons_mask)
+  if (n == 0) {
+    return(0.0)
+  }
+  covered <- sum(cons_mask & (sess > thresh))
+  covered / n * 100.0
+}
+
+# ---------------------------------------------------------------------------
 # Inter-observer agreement
 # ---------------------------------------------------------------------------
 
@@ -823,6 +1191,21 @@ write_csv_tidy <- function(rows, path, fieldnames) {
   invisible(df)
 }
 
+#' Mean of a named field across a list of row-lists, ignoring `NA` entries (matches the Python
+#' toolkit's `_mean_of` helper: sessions without a path leave the zoom/scanning columns blank/NA,
+#' and the slide-level mean is taken only over sessions that have one). `NaN` if no non-NA values.
+.mean_of_col <- function(rows, col) {
+  vals <- vapply(rows, function(r) {
+    v <- r[[col]]
+    if (is.null(v)) NA_real_ else as.numeric(v)
+  }, numeric(1))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) {
+    return(NaN)
+  }
+  mean(vals)
+}
+
 #' `sprintf`-based fixed-decimal formatter for `summary.md`; `NA`/`NaN` -> `"n/a"` (matches the
 #' Python toolkit's `_fmt` helper).
 .fmt <- function(x, nd = 3) {
@@ -841,24 +1224,57 @@ write_csv_tidy <- function(rows, path, fieldnames) {
 #: Threshold fraction (of a grid's own max) used for the connected-region hotspot count.
 HOTSPOT_THRESH_FRAC <- 0.5
 #: Threshold fraction used for all IoU / above-threshold-region computations (matches the spec's
-#: iou(a,b,thresh=0.1) default and the reference attended-map mask definition).
+#: iou(a,b,thresh=0.1) default and the reference attended-map mask definition), also reused for
+#: coincidence_level / region_coverage_pct's "above-threshold" cell masks.
 IOU_THRESH <- 0.1
+#: Default resolution (longest grid side, aspect-preserved) for the scanpath-rasterized fine
+#: heatmap and the magnification-band heatmaps, overridable via `res=`.
+DEFAULT_RES <- 512
+#: Default number of within-path zoom bands (terciles) for the magnification-split analysis,
+#: overridable via `magbands=`.
+DEFAULT_MAGBANDS <- 3
+
+#' Aspect-preserving grid dims with the longest side capped at `res` (mirrors the QuPath
+#' extension's own `GRID_MAX`-style longest-side cap, and `blinded_focus.analyze._res_grid_dims`
+#' in the Python toolkit): `max(gw, gh) == res` (rounded), the other side scaled by the image's
+#' aspect ratio, floored at 1. Returns `c(gw, gh)`.
+.res_grid_dims <- function(img_w, img_h, res) {
+  img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  longest <- max(img_w, img_h)
+  gw <- max(1L, as.integer(round(res * img_w / longest)))
+  gh <- max(1L, as.integer(round(res * img_h / longest)))
+  c(gw, gh)
+}
 
 #' Run the full blinded-focus pipeline over `inputs` (files/dirs/zips) into `out_dir`. Returns the
 #' `metrics.csv` rows as a data frame (for programmatic/test use), and writes:
 #'
-#' - `metrics.csv` — one row per (slide, session).
+#' - `metrics.csv` — one row per (slide, session); includes the Phase-1 zoom/navigation metric
+#'   family (`avgZoom`, `zoomVariance`, `zoomRange`, `magnificationPercentage`,
+#'   `scanningRatePxPerMin`, `drillingRatePerMin`, `pathVelocityPxPerSec`, `linearity`,
+#'   `searchFocusRatio`) plus `baseMagnification`/`pathTruncated` passthrough — blank for sessions
+#'   with no `path`.
 #' - per slide: `compare_<slug>.csv` (pairwise cc/sim/iou, tidy long format), `consensus_<slug>.png`.
+#'   Also carries a slide-level `coincidenceLevel` (one row) and a per-session
+#'   `regionCoveragePct` (vs the slide consensus).
 #' - per slide, when `reference`/`roi` given: `reference_<slug>.csv`.
-#' - per slide, when any session has a schema/3 `path`: `scanpath_<slug>.csv`.
-#' - `summary.md` — counts, per-slide agreement, reference ranking.
+#' - per slide, when any session has a schema/3 or /4 `path`: `scanpath_<slug>.csv`, and (Phase 1)
+#'   `magbands_<slug>.csv` — per-session dwell time in each of `magbands` within-path zoom bands.
+#' - `summary.md` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers.
 #' - with `make_figures=TRUE`: per-(slide,session) heatmap/scanpath/coverage-over-time PNGs under
-#'   `<out_dir>/<slug>/`.
-analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = NULL, make_figures = FALSE) {
+#'   `<out_dir>/<slug>/`, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
+#'   `res` resolution and one heatmap per magnification band.
+#'
+#' `res` sets the longest-side resolution of the scanpath-rasterized fine/magband heatmaps (see
+#' `.res_grid_dims`); `magbands` sets the number of within-path zoom bands for the
+#' magnification-split analysis (see `zoom_band_labels`).
+analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = NULL,
+                     make_figures = FALSE, res = DEFAULT_RES, magbands = DEFAULT_MAGBANDS) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   fragments <- load_fragments(inputs)
   if (length(fragments) == 0) {
-    message("warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3})")
+    message("warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3,4})")
   }
   labels <- load_labels(labels_csv)
   groups <- group_by_slide(fragments)
@@ -910,6 +1326,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       resampled[[sid]] <- resample_nn(grid, gw, gh, tw, th)
 
       com <- center_of_mass(grid, gw, gh)
+      base_mag <- f$baseMagnification
+      img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
+      img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
       row <- list(
         slide = slide_key,
         session = label_for(sid, labels),
@@ -924,15 +1343,25 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         pathPoints = NA,
         pathLengthPx = NA,
         nRevisits = NA,
-        transitionEntropy = NA
+        transitionEntropy = NA,
+        avgZoom = NA,
+        zoomVariance = NA,
+        zoomRange = NA,
+        magnificationPercentage = NA,
+        scanningRatePxPerMin = NA,
+        drillingRatePerMin = NA,
+        pathVelocityPxPerSec = NA,
+        linearity = NA,
+        searchFocusRatio = NA,
+        # Passthrough fragment-level fields (schema/4; NA -> blank for /1,/2,/3 which lack them).
+        baseMagnification = if (!is.null(base_mag)) as.numeric(base_mag) else NA,
+        pathTruncated = if (!is.null(f$pathTruncated)) as.logical(f$pathTruncated) else NA
       )
 
       path <- f$path
       if (!is.null(path) && length(path) > 0) {
         # Use the slide's common (tw, th) so metrics.csv values match the diagonal reuse in
         # scanpath_<slug>.csv (same visited-cell sequence definition either place).
-        img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
-        img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
         seq <- visited_sequence(path, tw, th, img_w, img_h)
         path_seq[[sid]] <- seq
         pm <- as_path_matrix(path)
@@ -940,6 +1369,15 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$pathLengthPx <- scanpath_length_px(path)
         row$nRevisits <- n_revisits(seq)
         row$transitionEntropy <- transition_entropy(seq)
+        row$avgZoom <- avg_zoom(path, base_mag, img_w)
+        row$zoomVariance <- zoom_variance(path, base_mag, img_w)
+        row$zoomRange <- zoom_range(path, base_mag, img_w)
+        row$magnificationPercentage <- magnification_percentage(path, base_mag, img_w)
+        row$scanningRatePxPerMin <- scanning_rate_px_per_min(path, base_mag, img_w)
+        row$drillingRatePerMin <- drilling_rate_per_min(path, base_mag, img_w)
+        row$pathVelocityPxPerSec <- path_velocity_px_per_sec(path)
+        row$linearity <- linearity(path)
+        row$searchFocusRatio <- search_focus_ratio(path, base_mag, img_w)
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
     }
@@ -947,11 +1385,21 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     # ------------------------------------------------------------------
     # cross-user compare (pairwise cc/sim/iou + consensus + agreement summary)
     # ------------------------------------------------------------------
+    # This slide's just-appended metrics_rows entries (one per session, same order as
+    # session_ids) -- reused below for the zoom/scanning summary aggregates.
+    slide_metric_rows <- metrics_rows[
+      seq(length(metrics_rows) - length(session_ids) + 1, length(metrics_rows))
+    ]
     consensus_grid <- Reduce(`+`, lapply(session_ids, function(sid) normalise_max(resampled[[sid]]))) /
       length(session_ids)
+    # Slide-level (not per-session) statistic -- placed on exactly one row below (see
+    # blinded_focus.analyze's module docstring "coincidenceLevel" convention note; the two
+    # toolkits must place it identically for their compare_<slug>.csv files to diff-match).
+    coincidence_val <- coincidence_level(lapply(session_ids, function(sid) resampled[[sid]]), IOU_THRESH)
 
     compare_rows <- list()
-    for (a in session_ids) {
+    for (idx_a in seq_along(session_ids)) {
+      a <- session_ids[idx_a]
       for (b in session_ids) {
         r <- list(
           sessionA = label_for(a, labels),
@@ -959,17 +1407,24 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           cc = cc(resampled[[a]], resampled[[b]]),
           sim = sim(resampled[[a]], resampled[[b]]),
           iou = iou(resampled[[a]], resampled[[b]], IOU_THRESH),
-          diffFromConsensus = NA
+          diffFromConsensus = NA,
+          coincidenceLevel = NA,
+          regionCoveragePct = NA
         )
         if (identical(a, b)) {
           r$diffFromConsensus <- 1.0 - cc(resampled[[a]], consensus_grid)
+          r$regionCoveragePct <- region_coverage_pct(resampled[[a]], consensus_grid, IOU_THRESH)
+          if (idx_a == 1) {
+            r$coincidenceLevel <- coincidence_val
+          }
         }
         compare_rows[[length(compare_rows) + 1]] <- r
       }
     }
     write_csv_tidy(
       compare_rows, file.path(out_dir, paste0("compare_", slide_slug, ".csv")),
-      c("sessionA", "sessionB", "cc", "sim", "iou", "diffFromConsensus")
+      c("sessionA", "sessionB", "cc", "sim", "iou", "diffFromConsensus",
+        "coincidenceLevel", "regionCoveragePct")
     )
     plot_heatmap(
       consensus_grid, tw, th, paste0("Consensus - ", slide_key),
@@ -988,7 +1443,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       sessions = sapply(session_ids, function(sid) label_for(sid, labels)),
       meanPairwiseCC = mean_cc, icc = icc_val,
       coverageMin = min(coverages), coverageMedian = stats::median(coverages), coverageMax = max(coverages),
-      durationMin = min(durations), durationMedian = stats::median(durations), durationMax = max(durations)
+      durationMin = min(durations), durationMedian = stats::median(durations), durationMax = max(durations),
+      coincidenceLevel = coincidence_val,
+      meanAvgZoom = .mean_of_col(slide_metric_rows, "avgZoom"),
+      meanScanningRatePxPerMin = .mean_of_col(slide_metric_rows, "scanningRatePxPerMin"),
+      meanDrillingRatePerMin = .mean_of_col(slide_metric_rows, "drillingRatePerMin"),
+      meanMagnificationPercentage = .mean_of_col(slide_metric_rows, "magnificationPercentage")
     )
 
     # ------------------------------------------------------------------
@@ -1054,7 +1514,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
-    # scanpath (schema/3 sessions only)
+    # scanpath (schema/3, /4 sessions only)
     # ------------------------------------------------------------------
     scan_sids <- session_ids[session_ids %in% names(path_seq)]
     if (length(scan_sids) > 0) {
@@ -1077,6 +1537,39 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         scan_rows, file.path(out_dir, paste0("scanpath_", slide_slug, ".csv")),
         c("sessionA", "sessionB", "levenshteinSim", "transitionEntropy")
       )
+    }
+
+    # ------------------------------------------------------------------
+    # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      magband_rows <- list()
+      for (sid in scan_sids) {
+        f <- by_session[[sid]]
+        path <- f$path
+        base_mag <- f$baseMagnification
+        img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
+        bands <- zoom_band_labels(path, base_mag, img_w, magbands)
+        if (length(bands) == 0) next
+        dts <- step_durations_ms(path)
+        total_dt <- sum(dts)
+        label <- label_for(sid, labels)
+        for (band in 0:(magbands - 1)) {
+          band_dt <- sum(dts[bands == band])
+          magband_rows[[length(magband_rows) + 1]] <- list(
+            session = label,
+            band = band,
+            bandTimeMs = band_dt,
+            bandTimePct = if (total_dt > 0) band_dt / total_dt * 100.0 else 0.0
+          )
+        }
+      }
+      if (length(magband_rows) > 0) {
+        write_csv_tidy(
+          magband_rows, file.path(out_dir, paste0("magbands_", slide_slug, ".csv")),
+          c("session", "band", "bandTimeMs", "bandTimePct")
+        )
+      }
     }
 
     # ------------------------------------------------------------------
@@ -1106,6 +1599,35 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             path, ng$gw, ng$gh, img_w, img_h,
             paste0(label, " coverage over time"), file.path(slide_out, paste0(sess_slug, "_coverage.png"))
           )
+
+          # Phase 1: scanpath-rasterized fine heatmap at `res`, independent of the recorded grid
+          # -- the trustworthy high-magnification map.
+          res_dims <- .res_grid_dims(img_w, img_h, res)
+          res_gw <- res_dims[1]; res_gh <- res_dims[2]
+          raster <- raster_from_path(path, img_w, img_h, res_gw, res_gh)
+          if (!is.null(raster)) {
+            plot_heatmap(
+              raster, res_gw, res_gh, paste0(label, " scanpath raster (", res, "px)"),
+              file.path(slide_out, paste0(sess_slug, "_scanpath_raster.png"))
+            )
+          }
+
+          # Phase 1: magnification-split heatmaps, one per within-path zoom band.
+          base_mag <- f$baseMagnification
+          bands <- zoom_band_labels(path, base_mag, img_w, magbands)
+          if (length(bands) > 0) {
+            for (band in 0:(magbands - 1)) {
+              step_mask <- (bands == band)
+              if (!any(step_mask)) next
+              raster_b <- raster_from_path(path, img_w, img_h, res_gw, res_gh, step_mask = step_mask)
+              if (!is.null(raster_b)) {
+                plot_heatmap(
+                  raster_b, res_gw, res_gh, paste0(label, " - zoom band ", band),
+                  file.path(slide_out, paste0(sess_slug, "_magband", band, ".png"))
+                )
+              }
+            }
+          }
         }
       }
     }
@@ -1116,7 +1638,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     c(
       "slide", "session", "durationMs", "sampleCount", "coveragePct", "entropy",
       "comX", "comY", "peakDwell", "nHotspots", "pathPoints", "pathLengthPx",
-      "nRevisits", "transitionEntropy"
+      "nRevisits", "transitionEntropy",
+      "avgZoom", "zoomVariance", "zoomRange", "magnificationPercentage",
+      "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
+      "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated"
     )
   )
   write_summary(out_dir, groups, slide_summaries, reference_summaries)
@@ -1141,6 +1666,14 @@ write_summary <- function(out_dir, groups, slide_summaries, reference_summaries)
     lines <- c(lines, paste0(
       "- durationMs (min/median/max): ", .fmt(s$durationMin, 0), " / ",
       .fmt(s$durationMedian, 0), " / ", .fmt(s$durationMax, 0)
+    ))
+    lines <- c(lines, paste0(
+      "- coincidence level (>=2 readers, thresh=", IOU_THRESH, "): ", .fmt(s$coincidenceLevel, 3)
+    ))
+    lines <- c(lines, paste0(
+      "- mean avg zoom / scanning rate (px/min) / drilling rate (per min) / magnification %: ",
+      .fmt(s$meanAvgZoom, 2), " / ", .fmt(s$meanScanningRatePxPerMin, 1), " / ",
+      .fmt(s$meanDrillingRatePerMin, 2), " / ", .fmt(s$meanMagnificationPercentage, 3)
     ))
     lines <- c(lines, "")
   }
