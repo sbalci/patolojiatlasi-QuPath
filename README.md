@@ -399,6 +399,11 @@ bundles every fragment from the session into a single
 is what you hand to the study coordinator. Every artifact in this pipeline (checkpoint, fragment,
 zip) is JSON-only and anonymised: no PNG, no username, ever.
 
+**Running a study?** See **[SHARING.md](SHARING.md)** for the end-to-end guide to preparing a
+blinded-research project, packaging it (with the extension) for researchers, the consent /
+observer-effect tradeoff, and getting the data back — and **[analysis/](analysis/README.md)** for
+the Python/R analysis toolkits.
+
 ---
 
 ## Coverage & QC dashboard
