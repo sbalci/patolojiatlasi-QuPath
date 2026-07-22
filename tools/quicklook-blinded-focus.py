@@ -34,7 +34,8 @@ SCHEMAS = {
 # --- loading -------------------------------------------------------------------------------------
 
 def _accept(d):
-    return isinstance(d, dict) and d.get("schema") in SCHEMAS and "grid" in d and "slideKey" in d
+    return (isinstance(d, dict) and d.get("schema") in SCHEMAS and "grid" in d and "slideKey" in d
+            and "gridWidth" in d and "gridHeight" in d)
 
 
 def load_fragments(paths):
@@ -209,7 +210,9 @@ def run(inputs, out_dir, scale, labels_path):
         sd = os.path.join(out_dir, slug(frag["slideKey"]))
         os.makedirs(sd, exist_ok=True)
         sess = frag.get("sessionId", "session")
-        label = labels.get(sess, sess[:8] if len(sess) >= 8 else sess)
+        # slug() the label before it becomes a filename: sessionId/label come from untrusted
+        # participant fragments, so a value like "../../x" or "/abs/path" must not escape out_dir.
+        label = slug(labels.get(sess, sess[:8] if len(sess) >= 8 else sess))
         W, H, rgba = render_fragment(frag, scale)
         png = os.path.join(sd, label + ".png")
         with open(png, "wb") as f:
