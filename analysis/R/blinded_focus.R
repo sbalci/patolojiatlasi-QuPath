@@ -1,14 +1,18 @@
 #!/usr/bin/env Rscript
 # blinded_focus.R — standalone R analysis toolkit for QuPath atlas blinded-focus fragments.
 #
-# Reads anonymised viewport-dwell fragments (schema `atlas-focus-contribution/{1,2,3,4}`) produced
-# by the qupath-extension-atlas blinded recording feature and computes the standard saliency /
-# eye-tracking evaluation set: spatial similarity (CC, SIM, KLD, NSS, AUC-Judd, IoU),
+# Reads anonymised viewport-dwell fragments (schema `atlas-focus-contribution/{1,2,3,4,5}`)
+# produced by the qupath-extension-atlas blinded recording feature and computes the standard
+# saliency / eye-tracking evaluation set: spatial similarity (CC, SIM, KLD, NSS, AUC-Judd, IoU),
 # inter-observer agreement (mean pairwise CC, ICC(2,1) via `irr::icc`), reference/ROI comparison,
-# scanpath sequence metrics (visited-cell Levenshtein similarity, transition entropy), and (Phase 1
+# scanpath sequence metrics (visited-cell Levenshtein similarity, transition entropy), (Phase 1
 # navigation-research upgrade) a scanpath-rasterized fine dwell grid plus a zoom/navigation metric
 # family (avg/variance/range zoom, magnification percentage, scanning/drilling rate, path
-# velocity/linearity/search-focus, cross-session coincidence/region-coverage).
+# velocity/linearity/search-focus, cross-session coincidence/region-coverage), and (Phase 2)
+# annotation metrics (schema/4+ `annotations` GeoJSON FeatureCollection: dwell-in-annotation %,
+# enrichment ratio, re-entry count, cross-user annotation IoU/coincidence) plus cursor metrics
+# (schema/5 8-element path points with `mouseX`/`mouseY`: % time on-slide, cursor/viewport
+# coupling distance).
 #
 # This is the R sibling of `analysis/python/blinded_focus/` (io.py + metrics.py + figures.py +
 # analyze.py combined into one sourced file, per this project's R convention). Metric formulas are
@@ -34,18 +38,21 @@ suppressPackageStartupMessages({
 EPS <- 1e-12
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
-#: /2, /3, /4 = real dwell-ms (blinded recording, weightUnit="ms"). /3, /4 additionally have
+#: /2, /3, /4, /5 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ additionally have
 #: "path" (/3 points are 5-element `[tRelMs,cx,cy,w,h]`; /4 points are 6-element
-#: `[tRelMs,cx,cy,w,h,dsMilli]` and /4 fragments also carry `baseMagnification`/`pathTruncated`).
+#: `[tRelMs,cx,cy,w,h,dsMilli]` and /4 fragments also carry `baseMagnification`/`pathTruncated`/
+#: `annotations`; /5 points are 8-element `[tRelMs,cx,cy,w,h,dsMilli,mouseX,mouseY]`).
 #: No branching on the schema string beyond this membership check anywhere in the toolkit — 5- vs
-#: 6-element points are told apart by `length(point)`, and `baseMagnification`/`pathTruncated` are
-#: read via `f$field` (NULL when absent), so /1-/3 fragments degrade to blank CSV cells
-#: automatically (mirrors `blinded_focus.io`'s doc comment in the Python toolkit).
+#: 6- vs 8-element points are told apart by `ncol(as_path_matrix(path))`, and
+#: `baseMagnification`/`pathTruncated`/`annotations` are read via `f$field` (NULL when absent), so
+#: /1-/3 fragments degrade to blank CSV cells automatically (mirrors `blinded_focus.io`'s doc
+#: comment in the Python toolkit).
 SCHEMAS <- c(
   "atlas-focus-contribution/1",
   "atlas-focus-contribution/2",
   "atlas-focus-contribution/3",
-  "atlas-focus-contribution/4"
+  "atlas-focus-contribution/4",
+  "atlas-focus-contribution/5"
 )
 
 # ---------------------------------------------------------------------------
@@ -226,6 +233,44 @@ load_labels <- function(csv_path) {
 label_for <- function(sid, labels) {
   lab <- labels[[sid]]
   if (is.null(lab)) sid else lab
+}
+
+#' Fallback FeatureCollection for a fragment with no (or a malformed) `annotations` field. Freshly
+#' constructed on every call so no caller can mutate a "default" and corrupt it for a later
+#' fragment (mirrors `blinded_focus.io._empty_feature_collection` in the Python toolkit).
+.empty_feature_collection <- function() {
+  list(type = "FeatureCollection", features = list())
+}
+
+#' Return a fragment's `annotations` GeoJSON `FeatureCollection` as a list, defaulting to an empty
+#' one (see `.empty_feature_collection`) when the field is absent or malformed. Present
+#' (additively) from schema/4 onward; schema/1-/3 fragments never carry the field.
+#'
+#' `fragment` was parsed by `.parse_fragment` with `simplifyVector = TRUE` (needed elsewhere for
+#' `grid`/`path` to come back as plain numeric vectors/matrices), which means `fragment$annotations`
+#' itself may arrive **partially simplified** in a shape that depends on feature count/consistency
+#' (jsonlite may coerce a uniform `features` array into a `data.frame`, `coordinates` into an
+#' array, etc. — verified empirically to vary with input shape). Rather than writing
+#' shape-detection code for every possible partial-simplification outcome, this round-trips the
+#' extracted `annotations` value through `toJSON()` -> `fromJSON(simplifyVector = FALSE)`, which
+#' normalizes it to the same fully-nested list-of-lists shape `load_roi_rings` gets directly from a
+#' `simplifyVector = FALSE` file parse, regardless of how the TRUE-mode parse happened to simplify
+#' it. `digits = 15` is required on the `toJSON()` step — jsonlite's default (`digits = 4`) rounds
+#' away precision on non-integer image-px coordinates (e.g. a grid-cell boundary at `y = 187.5`),
+#' which would silently corrupt `annotatedAreaPx`/rasterization for exactly those coordinates.
+get_annotations <- function(fragment) {
+  ann <- fragment$annotations
+  if (is.null(ann)) {
+    return(.empty_feature_collection())
+  }
+  raw <- tryCatch(
+    jsonlite::fromJSON(jsonlite::toJSON(ann, auto_unbox = TRUE, digits = 15), simplifyVector = FALSE),
+    error = function(e) NULL
+  )
+  if (is.null(raw) || is.null(raw$type) || raw$type != "FeatureCollection" || is.null(raw$features)) {
+    return(.empty_feature_collection())
+  }
+  raw
 }
 
 # ---------------------------------------------------------------------------
@@ -699,10 +744,17 @@ zoom_range <- function(path, base_mag = NULL, img_w = NULL) {
   max(z) - min(z)
 }
 
-#' Fraction of consecutive scanpath transitions that are zoom-IN or same-zoom (after Ghezloo):
-#' `|{i : zoom[i+1] >= zoom[i]}| / (n-1)`. Exact `>=`, no tolerance -- `point_zoom` is deterministic
-#' on integer-quantized inputs, so a held zoom level produces bit-identical doubles (see the Python
-#' docstring for the full determinism argument). `0.0` if the path has fewer than 2 points.
+#' Fraction of consecutive scanpath transitions that are strictly zoom-IN (a "consecutive zooming"
+#' measure after Ghezloo): `|{i : zoom[i+1] > zoom[i]}| / (n-1)`. Exact `>`, no tolerance --
+#' `point_zoom` is deterministic on integer-quantized inputs, so a held zoom level produces
+#' bit-identical doubles (see the Python docstring for the full determinism argument). A held zoom
+#' level (an exact tie) does **not** count -- see the bug-fix note below. `0.0` if the path has
+#' fewer than 2 points.
+#'
+#' **Bug fix (2026-07, see `docs/superpowers/navtrack-lit-review-improvements.md` §0.B):** this
+#' used to count zoom-*unchanged* transitions too (`diffs >= 0`). Ghezloo's definition is that the
+#' zoom level must *strictly* increase; a held zoom level (an exact tie) must not count as
+#' "consecutive zooming". Changed `sum(diffs >= 0)` to `sum(diffs > 0)` below.
 magnification_percentage <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
@@ -711,7 +763,7 @@ magnification_percentage <- function(path, base_mag = NULL, img_w = NULL) {
   }
   zooms <- .zoom_series(path, base_mag, img_w)
   diffs <- zooms[2:n] - zooms[1:(n - 1)]
-  sum(diffs >= 0) / length(diffs)
+  sum(diffs > 0) / length(diffs)
 }
 
 #' Per-step logical (length `nrow(pm)-1`): TRUE iff `point_zoom` differs (exact `!=`) between the
@@ -877,8 +929,22 @@ search_focus_ratio <- function(path, base_mag = NULL, img_w = NULL) {
 # ---------------------------------------------------------------------------
 
 #' Fraction of cells above-threshold (`> thresh` of each grid's own max, via `normalise_max`) in
-#' **2 or more** of the given grids (already resampled to a common shape). `NaN` if fewer than 2
-#' grids are given (undefined for a single reader); `0.0` for an empty (zero-cell) grid shape.
+#' **2 or more** of the given grids (already resampled to a common shape), normalized to the
+#' **visited footprint** — cells above-threshold in **at least 1** grid — not the whole grid
+#' shape. Roa-Peña reports ~70.5% with this style of rule on real multi-reader data.
+#'
+#' `coincidence% = |cells visited by >=2 readers| / |cells visited by >=1 reader|`
+#'
+#' **Bug fix (2026-07, see `docs/superpowers/navtrack-lit-review-improvements.md` §0.A):** this
+#' used to normalize by the *whole grid* (`length(counts)`, every cell including never-visited
+#' ones), which silently under-reports coincidence for any partially-explored slide and isn't
+#' comparable to the literature's ~70.5% benchmark — Roa-Peña's own sanity check is a
+#' 48%-visited slide still showing 97% coincidence, which is impossible under a whole-grid
+#' denominator.
+#'
+#' `NaN` if fewer than 2 grids are given (undefined for a single reader). `0.0` if the visited
+#' footprint (`counts >= 1`) is empty — nothing was visited by anyone, so there is nothing to
+#' compute a coincidence fraction over (guarded to avoid division by zero).
 coincidence_level <- function(grids, thresh = 0.1) {
   if (length(grids) < 2) {
     return(NaN)
@@ -888,10 +954,11 @@ coincidence_level <- function(grids, thresh = 0.1) {
   for (g in normed) {
     counts <- counts + as.numeric(g > thresh)
   }
-  if (length(counts) == 0) {
+  visited <- sum(counts >= 1)
+  if (visited == 0) {
     return(0.0)
   }
-  sum(counts >= 2) / length(counts)
+  sum(counts >= 2) / visited
 }
 
 #' Percentage of the consensus's above-threshold cells (`> thresh` of its own max) that this
@@ -907,6 +974,166 @@ region_coverage_pct <- function(session_grid, consensus_grid, thresh = 0.1) {
   }
   covered <- sum(cons_mask & (sess > thresh))
   covered / n * 100.0
+}
+
+# ---------------------------------------------------------------------------
+# Annotation metrics (Phase 2; schema/4+ "annotations" GeoJSON FeatureCollection).
+#
+# These functions take an already-rasterized boolean cell mask (see `rasterize_roi` in the "ROI"
+# section below, the same GeoJSON-polygon-to-grid rasterizer already used for the `--roi` CLI
+# flag) rather than GeoJSON themselves -- mirrors `blinded_focus.metrics`'s equivalent section in
+# the Python toolkit function-for-function.
+# ---------------------------------------------------------------------------
+
+#' Percentage of total dwell that falls inside `mask` -- Ghezloo's "ROI time percentage",
+#' generalized from an expert reference ROI to a reader's own annotated region:
+#'
+#' `dwellInAnnotationPct = 100 * sum(grid[mask]) / sum(grid)`
+#'
+#' `grid` and `mask` (logical, same length) are both coerced to plain vectors before comparison.
+#' `0.0` if `sum(grid)` is 0 (no dwell recorded at all, or an empty grid) -- there is genuinely 0%
+#' dwell anywhere, not an undefined ratio; also `0.0` (not undefined) when `mask` has no `TRUE`
+#' cells (no annotation on this slide) since `sum(grid[mask])` is then simply 0.
+dwell_in_mask_pct <- function(grid, mask) {
+  g <- as.numeric(grid)
+  msk <- as.logical(mask)
+  total <- sum(g)
+  if (total <= 0) {
+    return(0.0)
+  }
+  sum(g[msk]) / total * 100.0
+}
+
+#' Mean dwell-ms per annotated cell divided by mean dwell-ms per non-annotated cell (Nan 2025 Nat
+#' Commun's enrichment ratio, a companion to the area-based `region_coverage_pct`):
+#'
+#' `enrichmentRatio = mean(grid[mask]) / mean(grid[!mask])`
+#'
+#' `NaN` (blank in `metrics.csv` via `write.csv(..., na="")`) in three distinct undefined cases,
+#' all mapped to the same NaN/blank rather than 0 or Inf:
+#'
+#' - `mask` has no `TRUE` cells (no annotation on this slide -- nothing to enrich);
+#' - `mask` has no `FALSE` cells (the whole grid is annotated -- no "outside" to compare against);
+#' - the non-annotated mean is exactly 0 (division by zero).
+enrichment_ratio <- function(grid, mask) {
+  g <- as.numeric(grid)
+  msk <- as.logical(mask)
+  if (!any(msk) || all(msk)) {
+    return(NaN)
+  }
+  mean_out <- mean(g[!msk])
+  if (mean_out == 0) {
+    return(NaN)
+  }
+  mean_in <- mean(g[msk])
+  mean_in / mean_out
+}
+
+#' Count of scanpath re-entries into the annotated region (Brunyé 2017's re-entry rate).
+#'
+#' Maps every path point to a grid cell via `visited_sequence` (the same floor-division convention
+#' used throughout this file, 0-based cell indices), which also run-length-dedups consecutive
+#' repeats so dwelling in one cell across many samples doesn't inflate the count. Looks up `mask`
+#' (logical, `gh x gw` flattened, 1-based R indexing -- hence `mask[idx + 1]` below for a 0-based
+#' `idx`) at each deduped visited cell to get a per-visit inside/outside logical sequence, then
+#' counts the number of maximal `TRUE` runs ("visits") in that sequence:
+#'
+#' `annotationReentryCount = max(0, n_visits - 1)`
+#'
+#' The first visit is an *entry*, not a *re*-entry -- this holds regardless of whether the very
+#' first visited cell happens to already be inside the region, so the `- 1` is unconditional once
+#' `n_visits >= 1`.
+#'
+#' `0` if the path is empty/NULL, `mask` has no `TRUE` cells (no annotation on this slide), or the
+#' deduped visited sequence never enters the region at all (`n_visits == 0`).
+annotation_reentry_count <- function(path, mask, gw, gh, img_w, img_h) {
+  mask <- as.logical(mask)
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n == 0 || !any(mask)) {
+    return(0L)
+  }
+  seq_idx <- visited_sequence(path, gw, gh, img_w, img_h)
+  if (length(seq_idx) == 0) {
+    return(0L)
+  }
+  n_visits <- 0L
+  prev_inside <- FALSE
+  for (idx in seq_idx) {
+    inside <- mask[idx + 1L]
+    if (inside && !prev_inside) {
+      n_visits <- n_visits + 1L
+    }
+    prev_inside <- inside
+  }
+  max(0L, n_visits - 1L)
+}
+
+# ---------------------------------------------------------------------------
+# Cursor / mouse metrics (Phase 2; schema/5 8-element path points only:
+# [tRelMs, cx, cy, w, h, dsMilli, mouseX, mouseY] -- a partial-attention proxy after Raghunath).
+# ---------------------------------------------------------------------------
+
+#' `TRUE` iff `path` is non-empty and its points carry cursor data (8-element schema/5 points)
+#' rather than the shorter schema/3-/4 point shapes. A single fragment's path is uniformly one
+#' shape (the recorder never mixes point lengths within one session), so checking `ncol` of the
+#' coerced matrix is equivalent to (and simpler than) checking the first point's length.
+has_mouse_data <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  !is.null(n) && n > 0 && ncol(pm) >= 8
+}
+
+#' Percentage of path points where the cursor was over the slide viewer.
+#'
+#' The recorder's off-viewer sentinel is exactly `(mouseX, mouseY) == (-1, -1)`, so a point counts
+#' as "on-slide" iff `mouseX != -1 | mouseY != -1` (checking either coordinate also tolerates a
+#' malformed single `-1` defensively, though the recorder always writes both together):
+#' `100 * count(on-slide) / nrow(path)`. Points without mouse data at all (`ncol(pm) < 8`) are
+#' treated as off-slide entirely (0 on-slide) -- in practice this never happens within one
+#' fragment since point shape is uniform per `has_mouse_data`.
+#'
+#' `0.0` for an empty path. Callers should gate on `has_mouse_data` before calling this at all --
+#' `metrics.csv` leaves the column blank (not `0.0`) for schema </5 fragments, which have no mouse
+#' data whatsoever, rather than reporting a spurious 0%.
+cursor_over_slide_pct <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n == 0) {
+    return(0.0)
+  }
+  if (ncol(pm) < 8) {
+    return(0.0)
+  }
+  mouse_x <- pm[, 7]; mouse_y <- pm[, 8]
+  on_slide <- sum(mouse_x != -1 | mouse_y != -1)
+  on_slide / n * 100.0
+}
+
+#' Median Euclidean distance (image px) between the cursor position (`mouseX`, `mouseY`) and the
+#' viewport center (`cx`, `cy`) of the *same* path point, over on-slide points only (see
+#' `cursor_over_slide_pct`'s on-slide test) -- smaller means the cursor tracks the visible view
+#' more tightly (a partial-attention proxy: a cursor glued to the viewport center suggests active
+#' visual engagement with the current view, versus one that wanders or leaves the window while the
+#' viewport itself stays put).
+#'
+#' `NaN` (blank in `metrics.csv`) if the path is empty, has no mouse data at all, or has zero
+#' on-slide points -- undefined, not 0, since an all-off-slide path says nothing about
+#' cursor/viewport coupling.
+mouse_viewport_coupling_px <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n == 0 || ncol(pm) < 8) {
+    return(NaN)
+  }
+  mouse_x <- pm[, 7]; mouse_y <- pm[, 8]
+  cx <- pm[, 2]; cy <- pm[, 3]
+  on_slide <- mouse_x != -1 | mouse_y != -1
+  if (!any(on_slide)) {
+    return(NaN)
+  }
+  dists <- sqrt((mouse_x[on_slide] - cx[on_slide])^2 + (mouse_y[on_slide] - cy[on_slide])^2)
+  stats::median(dists)
 }
 
 # ---------------------------------------------------------------------------
@@ -979,8 +1206,28 @@ icc <- function(grids) {
   inside
 }
 
+#' Coerce one GeoJSON ring (a list of `[x, y, ...]` points, in whatever shape jsonlite produced it
+#' -- an already-simplified numeric matrix, a data.frame, or a plain list of 2+-element
+#' points/vectors, e.g. from a `simplifyVector = FALSE` parse) into a plain 2-col numeric matrix
+#' `(x, y)`. Handles all three shapes uniformly so callers never need to branch on how a given
+#' GeoJSON document happened to get simplified.
+.ring_to_matrix <- function(ring) {
+  if (is.matrix(ring)) {
+    return(matrix(as.numeric(ring[, 1:2]), ncol = 2))
+  }
+  if (is.data.frame(ring)) {
+    return(matrix(as.numeric(as.matrix(ring[, 1:2])), ncol = 2))
+  }
+  pts <- lapply(ring, function(pt) {
+    v <- as.numeric(unlist(pt))
+    v[1:2]
+  })
+  matrix(unlist(pts), ncol = 2, byrow = TRUE)
+}
+
 #' Flatten a GeoJSON Polygon/MultiPolygon geometry into a list of rings (each a 2-col matrix of
-#' `(x, y)`). All rings (exterior + holes) are returned; even-odd counting handles holes.
+#' `(x, y)`, via `.ring_to_matrix`). All rings (exterior + holes) are returned; even-odd counting
+#' (`.point_in_poly`) handles holes naturally.
 .extract_rings <- function(geometry) {
   gtype <- geometry$type
   coords <- geometry$coordinates
@@ -990,33 +1237,59 @@ icc <- function(grids) {
   }
   if (gtype == "Polygon") {
     for (ring in coords) {
-      rings[[length(rings) + 1]] <- matrix(as.numeric(ring[, 1:2]), ncol = 2)
+      rings[[length(rings) + 1]] <- .ring_to_matrix(ring)
     }
   } else if (gtype == "MultiPolygon") {
     for (poly in coords) {
       for (ring in poly) {
-        rings[[length(rings) + 1]] <- matrix(as.numeric(ring[, 1:2]), ncol = 2)
+        rings[[length(rings) + 1]] <- .ring_to_matrix(ring)
       }
     }
   }
   rings
 }
 
-#' Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon and
-#' return its rings (image-px coordinates) for rasterization.
-load_roi_rings <- function(roi_path) {
-  d <- jsonlite::fromJSON(roi_path, simplifyVector = FALSE)
-  if (!is.null(d$type) && d$type == "FeatureCollection") {
+#' Same ring-extraction as `load_roi_rings`, but from an already-parsed GeoJSON list (a `Feature`,
+#' `FeatureCollection`, or bare geometry) rather than a file path -- used for a fragment's embedded
+#' `annotations` field (Phase 2), which arrives via `get_annotations` (already normalized to a
+#' `simplifyVector = FALSE`-shaped nested list), not a file on disk. Returns a flat list of rings
+#' (image-px coordinates) suitable for `rasterize_roi`/point-in-polygon (holes handled via the
+#' even-odd rule). `list()` for a falsy/malformed input (e.g. an empty
+#' `list(type="FeatureCollection", features=list())`, the default from `get_annotations`).
+rings_from_feature_collection <- function(fc) {
+  if (is.null(fc) || !is.list(fc)) {
+    return(list())
+  }
+  if (!is.null(fc$type) && fc$type == "FeatureCollection") {
     rings <- list()
-    for (feat in d$features) {
-      rings <- c(rings, .extract_rings(feat$geometry))
+    for (feat in fc$features) {
+      if (!is.null(feat$geometry)) {
+        rings <- c(rings, .extract_rings(feat$geometry))
+      }
     }
     return(rings)
   }
-  if (!is.null(d$type) && d$type == "Feature") {
-    return(.extract_rings(d$geometry))
+  if (!is.null(fc$type) && fc$type == "Feature") {
+    return(.extract_rings(fc$geometry))
   }
-  .extract_rings(d)
+  .extract_rings(fc)
+}
+
+#' Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon and
+#' return its rings (image-px coordinates) for rasterization. Thin wrapper around
+#' `rings_from_feature_collection` over a file's parsed content.
+load_roi_rings <- function(roi_path) {
+  d <- jsonlite::fromJSON(roi_path, simplifyVector = FALSE)
+  rings_from_feature_collection(d)
+}
+
+#' Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon file and
+#' return the parsed list (not its flattened rings), for per-Feature union rasterization via
+#' `rasterize_feature_collection` -- a multi-polygon/overlapping reference ROI must be rasterized
+#' feature-by-feature and unioned, not with a single pooled-rings even-odd test (see that
+#' function's docs); this is the `--roi` counterpart to the annotation-mask fix.
+load_roi_fc <- function(roi_path) {
+  jsonlite::fromJSON(roi_path, simplifyVector = FALSE)
 }
 
 #' Rasterize polygon rings (image-px coords) to a flat `(gw*gh,)` logical mask (row-major) by
@@ -1035,6 +1308,126 @@ rasterize_roi <- function(rings, gw, gh, img_w, img_h) {
     }
   }
   mask
+}
+
+#' Rasterize a GeoJSON list (`FeatureCollection`, `Feature`, or bare geometry -- the same shapes
+#' `rings_from_feature_collection` accepts) to a flat `(gw*gh,)` logical mask by rasterizing
+#' **each Feature's own rings separately** (that Feature's exterior + its own holes -- even-odd
+#' within the Feature, via `rasterize_roi`) and taking the **union (logical OR)** across Features.
+#' Same convention as `blinded_focus.analyze.rasterize_feature_collection` in the Python toolkit.
+#'
+#' This is deliberately NOT the same as pooling every Feature's rings into one flat list and
+#' running a single even-odd test across all of them (`rings_from_feature_collection` +
+#' `rasterize_roi`): even-odd correctly handles holes *within one polygon*, but pooling rings from
+#' separate Features breaks down when two distinct Features geometrically overlap (e.g. a coarse
+#' "tumor" annotation with a smaller "high-grade focus" annotation nested inside it) -- a point
+#' inside both gets even parity under the pooled test and is wrongly reported outside. Rasterizing
+#' feature-by-feature and OR-ing the results sidesteps this: single-feature and
+#' hole-within-one-feature behaviour is unchanged (this is a strict superset of the pooled-rings
+#' result -- only cross-feature overlap changes, from wrongly-excluded to correctly-included).
+#'
+#' A `NULL`/malformed `fc`, or one with no features/rings at all, returns an all-`FALSE` mask
+#' without walking any grid cell (same short-circuit the pooled-rings call sites relied on).
+rasterize_feature_collection <- function(fc, gw, gh, img_w, img_h) {
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  if (is.null(fc) || !is.list(fc)) {
+    return(rep(FALSE, gw * gh))
+  }
+  if (!is.null(fc$type) && fc$type == "FeatureCollection") {
+    features <- fc$features
+  } else if (!is.null(fc$type) && fc$type == "Feature") {
+    features <- list(fc)
+  } else {
+    features <- list(list(geometry = fc)) # bare geometry: treat as a single implicit feature
+  }
+  mask <- rep(FALSE, gw * gh)
+  for (feat in features) {
+    if (is.null(feat$geometry)) next
+    rings <- .extract_rings(feat$geometry)
+    if (length(rings) == 0) next
+    mask <- mask | rasterize_roi(rings, gw, gh, img_w, img_h)
+  }
+  mask
+}
+
+#' Absolute area (px^2) of a simple polygon ring (a 2-col `(x, y)` matrix, e.g. from
+#' `.ring_to_matrix`) via the shoelace formula: `abs(sum(x_i*y_{i+1} - x_{i+1}*y_i)) / 2`. `0.0`
+#' for a degenerate ring (fewer than 3 points).
+.shoelace_area <- function(ring) {
+  n <- nrow(ring)
+  if (is.null(n) || n < 3) {
+    return(0.0)
+  }
+  x <- ring[, 1]; y <- ring[, 2]
+  x2 <- c(x[-1], x[1]); y2 <- c(y[-1], y[1])
+  abs(sum(x * y2 - x2 * y)) / 2.0
+}
+
+#' Area (px^2) of one GeoJSON `Polygon` geometry's `coordinates` array: the exterior ring's area
+#' (first ring) minus each hole ring's area (subsequent rings), each computed via `.shoelace_area`
+#' -- using the *absolute* area of every ring sidesteps any ambiguity in ring winding order (CW vs
+#' CCW), which GeoJSON does not strictly mandate a producer follow. Clamped at `0.0` (a malformed
+#' polygon whose holes exceed its exterior should never report a negative area). `0.0` for an
+#' empty `coordinates` array.
+.polygon_coords_area <- function(poly_coords) {
+  if (is.null(poly_coords) || length(poly_coords) == 0) {
+    return(0.0)
+  }
+  rings <- lapply(poly_coords, .ring_to_matrix)
+  area <- .shoelace_area(rings[[1]])
+  if (length(rings) > 1) {
+    for (i in 2:length(rings)) {
+      area <- area - .shoelace_area(rings[[i]])
+    }
+  }
+  max(area, 0.0)
+}
+
+#' Area (px^2) of one GeoJSON `Polygon`/`MultiPolygon` geometry: `.polygon_coords_area` of each
+#' constituent polygon, summed for `MultiPolygon`. `0.0` for any other geometry type (e.g.
+#' `Point`/`LineString` annotations, which QuPath also allows but which have no area).
+.geometry_area <- function(geometry) {
+  gtype <- geometry$type
+  coords <- geometry$coordinates
+  if (is.null(gtype) || is.null(coords)) {
+    return(0.0)
+  }
+  if (gtype == "Polygon") {
+    return(.polygon_coords_area(coords))
+  }
+  if (gtype == "MultiPolygon") {
+    total <- 0.0
+    for (poly in coords) {
+      total <- total + .polygon_coords_area(poly)
+    }
+    return(total)
+  }
+  0.0
+}
+
+#' Total area (image px^2) of every `Polygon`/`MultiPolygon` feature in a GeoJSON
+#' `FeatureCollection` list (a fragment's `annotations` field, via `get_annotations`), via
+#' `.geometry_area` summed across features -- the `annotatedAreaPx` column. `0.0` for an
+#' empty/missing/malformed FeatureCollection (including non-area annotation geometries only, e.g.
+#' a lone point annotation).
+#'
+#' Caveat: this is the **sum of per-feature areas, not de-duplicated for overlap** -- two
+#' overlapping/nested annotation Features (unlike the mask-based metrics, which correctly union
+#' them via `rasterize_feature_collection`) report a combined `annotatedAreaPx` larger than their
+#' true union area. True polygon-union area would need geometric clipping, which neither toolkit
+#' implements.
+annotations_area_px <- function(fc) {
+  if (is.null(fc) || !is.list(fc) || is.null(fc$type) || fc$type != "FeatureCollection") {
+    return(0.0)
+  }
+  total <- 0.0
+  for (feat in fc$features) {
+    geom <- feat$geometry
+    if (!is.null(geom)) {
+      total <- total + .geometry_area(geom)
+    }
+  }
+  total
 }
 
 # ---------------------------------------------------------------------------
@@ -1254,14 +1647,24 @@ DEFAULT_MAGBANDS <- 3
 #'   family (`avgZoom`, `zoomVariance`, `zoomRange`, `magnificationPercentage`,
 #'   `scanningRatePxPerMin`, `drillingRatePerMin`, `pathVelocityPxPerSec`, `linearity`,
 #'   `searchFocusRatio`) plus `baseMagnification`/`pathTruncated` passthrough — blank for sessions
-#'   with no `path`.
+#'   with no `path` — and (Phase 2) annotation metrics `nAnnotations`, `annotatedAreaPx`,
+#'   `dwellInAnnotationPct`, `annotationReentryCount`, `enrichmentRatio` (the first three
+#'   populated for every session — 0/0.0 when a session has no `annotations`;
+#'   `annotationReentryCount` blank without a `path`; `enrichmentRatio` blank when its mask has no
+#'   in/out split to compare) plus cursor metrics `cursorOverSlidePct`, `mouseViewportCouplingPx`
+#'   (blank unless the session's `path` carries schema/5 8-element points with `mouseX`/`mouseY`).
 #' - per slide: `compare_<slug>.csv` (pairwise cc/sim/iou, tidy long format), `consensus_<slug>.png`.
 #'   Also carries a slide-level `coincidenceLevel` (one row) and a per-session
 #'   `regionCoveragePct` (vs the slide consensus).
 #' - per slide, when `reference`/`roi` given: `reference_<slug>.csv`.
-#' - per slide, when any session has a schema/3 or /4 `path`: `scanpath_<slug>.csv`, and (Phase 1)
+#' - per slide, when any session has a schema/3+ `path`: `scanpath_<slug>.csv`, and (Phase 1)
 #'   `magbands_<slug>.csv` — per-session dwell time in each of `magbands` within-path zoom bands.
-#' - `summary.md` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers.
+#' - per slide, when any session has at least one annotation: (Phase 2) `annotations_<slug>.csv` —
+#'   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
+#'   diagonal-reuse convention as `compare_<slug>.csv`) plus a slide-level `coincidenceLevel` over
+#'   those same regions.
+#' - `summary.md` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers,
+#'   and (Phase 2) headline annotation-coverage + cursor-coupling numbers.
 #' - with `make_figures=TRUE`: per-(slide,session) heatmap/scanpath/coverage-over-time PNGs under
 #'   `<out_dir>/<slug>/`, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
 #'   `res` resolution and one heatmap per magnification band.
@@ -1274,11 +1677,16 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   fragments <- load_fragments(inputs)
   if (length(fragments) == 0) {
-    message("warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3,4})")
+    message("warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3,4,5})")
   }
   labels <- load_labels(labels_csv)
   groups <- group_by_slide(fragments)
-  roi_rings <- if (!is.null(roi)) load_roi_rings(roi) else NULL
+  roi_fc <- if (!is.null(roi)) load_roi_fc(roi) else NULL
+  # Kept only for the reference/ROI gate below (truthy iff the ROI file has >=1 ring) -- the
+  # actual reference mask is built per-Feature + unioned via
+  # rasterize_feature_collection(roi_fc, ...) below, so a multi-polygon/overlapping reference ROI
+  # composes correctly (same fix as the annotation mask; see its docs).
+  roi_rings <- if (!is.null(roi_fc)) rings_from_feature_collection(roi_fc) else NULL
 
   metrics_rows <- list()
   slide_summaries <- list()
@@ -1316,7 +1724,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
 
     resampled <- list() # sessionId -> resampled (tw*th,) vector, raw units
     native_grid <- list() # sessionId -> list(grid=, gw=, gh=)
-    path_seq <- list() # sessionId -> visited-cell sequence (schema/3 only)
+    path_seq <- list() # sessionId -> visited-cell sequence (schema/3+ only)
+    common_ann_masks <- list() # sessionId -> this session's own annotated region, resampled to
+                                # (tw, th) logical -- used only by the cross-user annotations_<slug>.csv
 
     for (sid in session_ids) {
       f <- by_session[[sid]]
@@ -1329,6 +1739,26 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       base_mag <- f$baseMagnification
       img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
       img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
+
+      # ---- Phase 2: this session's own annotations, rasterized to its native (gw, gh) grid
+      # (matching the resolution `grid`/`dwell` are already in) -- reuses the same
+      # GeoJSON-polygon-to-grid rasterizer as the `--roi` CLI flag. Each annotation Feature is
+      # rasterized on its own and the per-feature masks are unioned (OR'd), NOT pooled into one
+      # flat ring list and tested with a single even-odd pass -- pooling misclassifies a point
+      # inside two overlapping/nested Features (e.g. a "high-grade focus" annotation drawn inside
+      # a coarser "tumor" annotation) as outside the annotated region. See
+      # `rasterize_feature_collection`'s docs. It also keeps the short-circuit for the
+      # no-annotations case (all-FALSE, no per-cell work).
+      ann_fc <- get_annotations(f)
+      n_ann <- length(ann_fc$features)
+      ann_area <- annotations_area_px(ann_fc)
+      native_ann_mask <- rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
+      # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the slide's
+      # common (tw, th) grid -- resample the already-rasterized native mask (as 0.0/1.0 doubles)
+      # via the same nearest-neighbour resampler used for dwell grids, rather than re-rasterizing
+      # from scratch at (tw, th).
+      common_ann_masks[[sid]] <- resample_nn(as.numeric(native_ann_mask), gw, gh, tw, th) > 0.5
+
       row <- list(
         slide = slide_key,
         session = label_for(sid, labels),
@@ -1353,9 +1783,21 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         pathVelocityPxPerSec = NA,
         linearity = NA,
         searchFocusRatio = NA,
-        # Passthrough fragment-level fields (schema/4; NA -> blank for /1,/2,/3 which lack them).
+        # Passthrough fragment-level fields (schema/4+; NA -> blank for /1,/2,/3 which lack them).
         baseMagnification = if (!is.null(base_mag)) as.numeric(base_mag) else NA,
-        pathTruncated = if (!is.null(f$pathTruncated)) as.logical(f$pathTruncated) else NA
+        pathTruncated = if (!is.null(f$pathTruncated)) as.logical(f$pathTruncated) else NA,
+        # Phase 2 annotation metrics: nAnnotations/annotatedAreaPx/dwellInAnnotationPct only need
+        # the grid + this session's own annotation mask (no path required), so they're always
+        # populated (0/0.0 when there are no annotations at all). enrichmentRatio is likewise
+        # grid-only, but blank (NaN) whenever its mask has no meaningful in/out split to compare.
+        nAnnotations = n_ann,
+        annotatedAreaPx = ann_area,
+        dwellInAnnotationPct = dwell_in_mask_pct(grid, native_ann_mask),
+        enrichmentRatio = enrichment_ratio(grid, native_ann_mask),
+        # Path-dependent Phase 2 metrics: blank without a path at all (schema/1, /2).
+        annotationReentryCount = NA,
+        cursorOverSlidePct = NA,
+        mouseViewportCouplingPx = NA
       )
 
       path <- f$path
@@ -1378,6 +1820,14 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$pathVelocityPxPerSec <- path_velocity_px_per_sec(path)
         row$linearity <- linearity(path)
         row$searchFocusRatio <- search_focus_ratio(path, base_mag, img_w)
+        # Phase 2: reentry uses the session's own NATIVE (gw, gh) mask/grid resolution (not the
+        # slide's common (tw, th)) -- a per-session metric, not a cross-session one, so it should
+        # stay at the resolution the fragment actually recorded.
+        row$annotationReentryCount <- annotation_reentry_count(path, native_ann_mask, gw, gh, img_w, img_h)
+        if (has_mouse_data(path)) {
+          row$cursorOverSlidePct <- cursor_over_slide_pct(path)
+          row$mouseViewportCouplingPx <- mouse_viewport_coupling_px(path)
+        }
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
     }
@@ -1431,6 +1881,41 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       file.path(out_dir, paste0("consensus_", slide_slug, ".png"))
     )
 
+    # ------------------------------------------------------------------
+    # Phase 2: cross-user annotation agreement -- pairwise IoU of each session's own rasterized
+    # annotated region + a coincidence level, mirroring compare_<slug>.csv's tidy-long +
+    # diagonal-reuse convention exactly. Gated on at least one session having drawn at least one
+    # annotation (mirrors the scanpath_<slug>.csv path-presence gate), so a slide with zero
+    # annotations anywhere doesn't emit a trivially-all-zero file.
+    # ------------------------------------------------------------------
+    annotation_coincidence_val <- NaN
+    any_annotated <- any(sapply(slide_metric_rows, function(r) r$nAnnotations > 0))
+    if (any_annotated) {
+      annotation_coincidence_val <- coincidence_level(
+        lapply(session_ids, function(sid) as.numeric(common_ann_masks[[sid]])), IOU_THRESH
+      )
+      ann_rows <- list()
+      for (idx_a in seq_along(session_ids)) {
+        a <- session_ids[idx_a]
+        for (b in session_ids) {
+          ann_row <- list(
+            sessionA = label_for(a, labels),
+            sessionB = label_for(b, labels),
+            iou = iou(as.numeric(common_ann_masks[[a]]), as.numeric(common_ann_masks[[b]]), IOU_THRESH),
+            coincidenceLevel = NA
+          )
+          if (identical(a, b) && idx_a == 1) {
+            ann_row$coincidenceLevel <- annotation_coincidence_val
+          }
+          ann_rows[[length(ann_rows) + 1]] <- ann_row
+        }
+      }
+      write_csv_tidy(
+        ann_rows, file.path(out_dir, paste0("annotations_", slide_slug, ".csv")),
+        c("sessionA", "sessionB", "iou", "coincidenceLevel")
+      )
+    }
+
     mean_cc <- mean_pairwise_cc(lapply(session_ids, function(sid) resampled[[sid]]))
     icc_val <- icc(lapply(session_ids, function(sid) resampled[[sid]]))
     coverages <- sapply(session_ids, function(sid) coverage(native_grid[[sid]]$grid) * 100.0)
@@ -1448,7 +1933,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       meanAvgZoom = .mean_of_col(slide_metric_rows, "avgZoom"),
       meanScanningRatePxPerMin = .mean_of_col(slide_metric_rows, "scanningRatePxPerMin"),
       meanDrillingRatePerMin = .mean_of_col(slide_metric_rows, "drillingRatePerMin"),
-      meanMagnificationPercentage = .mean_of_col(slide_metric_rows, "magnificationPercentage")
+      meanMagnificationPercentage = .mean_of_col(slide_metric_rows, "magnificationPercentage"),
+      # Phase 2 headline numbers.
+      meanDwellInAnnotationPct = .mean_of_col(slide_metric_rows, "dwellInAnnotationPct"),
+      annotationCoincidenceLevel = annotation_coincidence_val,
+      meanCursorOverSlidePct = .mean_of_col(slide_metric_rows, "cursorOverSlidePct")
     )
 
     # ------------------------------------------------------------------
@@ -1466,7 +1955,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       if (!is.null(roi_rings)) {
         img_w <- by_session[[session_ids[1]]]$imageWidth; if (is.null(img_w)) img_w <- 1
         img_h <- by_session[[session_ids[1]]]$imageHeight; if (is.null(img_h)) img_h <- 1
-        ref_mask <- rasterize_roi(roi_rings, tw, th, img_w, img_h)
+        ref_mask <- rasterize_feature_collection(roi_fc, tw, th, img_w, img_h)
         ref_map <- as.numeric(ref_mask)
       }
       if (!is.null(reference) && reference %in% session_ids) {
@@ -1514,7 +2003,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
-    # scanpath (schema/3, /4 sessions only)
+    # scanpath (schema/3+ sessions only)
     # ------------------------------------------------------------------
     scan_sids <- session_ids[session_ids %in% names(path_seq)]
     if (length(scan_sids) > 0) {
@@ -1641,7 +2130,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "nRevisits", "transitionEntropy",
       "avgZoom", "zoomVariance", "zoomRange", "magnificationPercentage",
       "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
-      "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated"
+      "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
+      "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
+      "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"
     )
   )
   write_summary(out_dir, groups, slide_summaries, reference_summaries)
@@ -1674,6 +2165,15 @@ write_summary <- function(out_dir, groups, slide_summaries, reference_summaries)
       "- mean avg zoom / scanning rate (px/min) / drilling rate (per min) / magnification %: ",
       .fmt(s$meanAvgZoom, 2), " / ", .fmt(s$meanScanningRatePxPerMin, 1), " / ",
       .fmt(s$meanDrillingRatePerMin, 2), " / ", .fmt(s$meanMagnificationPercentage, 3)
+    ))
+    lines <- c(lines, paste0(
+      "- annotation coverage: mean dwell-in-annotation % = ",
+      .fmt(s$meanDwellInAnnotationPct, 1), ", cross-user annotation coincidence (>=2 readers, thresh=",
+      IOU_THRESH, ") = ", .fmt(s$annotationCoincidenceLevel, 3)
+    ))
+    lines <- c(lines, paste0(
+      "- cursor coupling: mean % of path time cursor was over the slide = ",
+      .fmt(s$meanCursorOverSlidePct, 1)
     ))
     lines <- c(lines, "")
   }

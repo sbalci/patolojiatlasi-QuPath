@@ -15,6 +15,10 @@ import java.util.Map;
 import javax.imageio.ImageIO;
 
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import javafx.animation.Animation;
 import javafx.animation.KeyFrame;
@@ -44,6 +48,8 @@ import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.gui.viewer.overlays.BufferedImageOverlay;
 import qupath.lib.images.ImageData;
 import qupath.lib.images.servers.ImageServer;
+import qupath.lib.io.FeatureCollection;
+import qupath.lib.io.GsonTools;
 import qupath.lib.regions.ImageRegion;
 
 /**
@@ -89,9 +95,14 @@ public final class FocusHeatmap {
      * schema/2 readers that ignore unknown fields still work. Schema/4 additionally carries a
      * per-point downsample ({@code dsMilli}, see {@link #blindedPath}) and a fragment-level {@code
      * baseMagnification} (nullable) — both additive; a schema/3 reader that ignores unknown fields
-     * still works.
+     * still works. Schema/5 extends each {@code path} point with the cursor's position at that tick
+     * ({@code mouseX}, {@code mouseY} — see {@link #blindedPath}), captured only while the cursor is
+     * over the slide viewer and expressed in the same image-pixel coordinate space as {@code cx}/
+     * {@code cy}; {@code -1,-1} means the cursor was off the viewer (or its position unknown) at that
+     * tick. Purely additive (two more trailing ints per point); a schema/4 reader that reads points by
+     * length still works.
      */
-    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/4";
+    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/5";
     /** Hard cap on recorded scanpath points per blinded slide session — a safety bound against an
      *  unbounded list on a pathologically long session, not an expected ceiling in practice (20000
      *  points at the ~250ms sample interval is ~83 minutes of continuous active dwell). */
@@ -128,14 +139,17 @@ public final class FocusHeatmap {
     private int blindedTicks;
     /**
      * Ordered scanpath for the <b>current</b> blinded slide session: one {@code [tRelMs, cx, cy, w,
-     * h, dsMilli]} point per active tick (viewport center + extent, all in slide pixel coordinates,
-     * plus milliseconds since {@link #blindedSlideStartMs}, plus the viewer's downsample factor at
-     * that tick times 1000, rounded to an integer — {@code dsMilli = round(viewer.getDownsampleFactor()
-     * * 1000)} — kept as a scaled integer so the JSON stays compact; 1.0 downsample = full resolution,
-     * higher = more zoomed out). Appended in {@link #tickBlinded} for every tick where the app is
-     * focused and a slide is open (i.e. {@code ms > 0}), independent of whether the same tick's
-     * dwell-grid deposit ({@code currentMap.deposit(...)}) actually landed on the image — so {@code
-     * path} may carry a point for a tick the {@code grid} accumulation didn't credit.
+     * h, dsMilli, mouseX, mouseY]} point per active tick (viewport center + extent, all in slide pixel
+     * coordinates, plus milliseconds since {@link #blindedSlideStartMs}, plus the viewer's downsample
+     * factor at that tick times 1000, rounded to an integer — {@code dsMilli =
+     * round(viewer.getDownsampleFactor() * 1000)} — kept as a scaled integer so the JSON stays compact;
+     * 1.0 downsample = full resolution, higher = more zoomed out; plus the cursor's position at that
+     * tick, in the same image-pixel coordinate space as {@code cx}/{@code cy} — see {@link
+     * #lastMouseImageX}/{@link #lastMouseImageY} for how it's captured and the {@code -1,-1} off-viewer
+     * sentinel). Appended in {@link #tickBlinded} for every tick where the app is focused and a slide
+     * is open (i.e. {@code ms > 0}), independent of whether the same tick's dwell-grid deposit ({@code
+     * currentMap.deposit(...)}) actually landed on the image — so {@code path} may carry a point for a
+     * tick the {@code grid} accumulation didn't credit.
      * Reset (cleared) in {@link #startBlinded()} and in {@link #switchTo} whenever a fresh blinded
      * slide map is created, mirroring {@link #blindedTicks}'s reset points. FX-thread-only to write;
      * read only via a defensive snapshot ({@code new ArrayList<>(blindedPath)}) at serialization time
@@ -152,6 +166,65 @@ public final class FocusHeatmap {
      *  start/stop cycles within the same JVM (a shutdown hook can't be usefully "un-added" per
      *  session, so it's registered once and self-guards on {@link #blindedRecording} at fire time). */
     private boolean shutdownHookAdded;
+
+    /**
+     * Latest cursor position over the actively-tracked viewer, in <b>image (tissue) pixel</b>
+     * coordinates — <b>never</b> global/OS mouse position. {@code -1,-1} is the sentinel for "the
+     * cursor is not currently over the slide viewer" (also the initial value, before any mouse event
+     * has arrived), used both before the first event and whenever the cursor leaves the viewer's view
+     * node. Written only by {@link #mouseMovedHandler} (mirrored by {@link #mouseExitedHandler}'s
+     * reset) and read only by {@link #tickBlinded} — both run on the JavaFX Application Thread in
+     * practice; {@code volatile} costs nothing and matches this class's existing defensive style.
+     * When the cursor is over the viewer but outside the displayed image (e.g. a zoomed-out
+     * letterboxed margin), the position is clamped to the image bounds (0..width, 0..height) rather
+     * than left raw or reset to the sentinel — the sentinel means "off the viewer", not "off the
+     * image".
+     */
+    private volatile int lastMouseImageX = -1;
+    private volatile int lastMouseImageY = -1;
+    /** Which viewer's view node {@link #mouseMovedHandler}/{@link #mouseExitedHandler} are currently
+     *  attached to, or {@code null} when not attached. Mouse tracking is wired up only while blinded
+     *  recording is active — see {@link #attachMouseTracking}, {@link #startBlinded()}, {@link
+     *  #stopBlinded()} — so this is non-null only during a blinded session. */
+    private QuPathViewer mouseViewer;
+    /**
+     * Converts a mouse-moved/dragged event on the tracked viewer's view node to image pixel
+     * coordinates via {@link QuPathViewer#componentPointToImagePoint(double, double,
+     * java.awt.geom.Point2D, boolean)} and stores the result in {@link #lastMouseImageX}/{@link
+     * #lastMouseImageY}. This is the <b>only</b> source of cursor position anywhere in this class — it
+     * reads the JavaFX {@code MouseEvent} delivered to the viewer's own view node (never any
+     * global/OS pointer query), so a position can only ever be captured while the cursor is physically
+     * over that slide viewer. Best-effort: any failure (e.g. a non-invertible transform, or the
+     * tracked viewer having no server) falls back to the off-viewer sentinel rather than throwing into
+     * JavaFX event dispatch.
+     */
+    private final javafx.event.EventHandler<javafx.scene.input.MouseEvent> mouseMovedHandler = e -> {
+        QuPathViewer v = mouseViewer;
+        if (v == null) {
+            resetMousePosition();
+            return;
+        }
+        try {
+            java.awt.geom.Point2D p = v.componentPointToImagePoint(e.getX(), e.getY(), null, true);
+            lastMouseImageX = (int) Math.round(p.getX());
+            lastMouseImageY = (int) Math.round(p.getY());
+        } catch (Exception ex) {
+            resetMousePosition();
+        }
+    };
+    /** Cursor left the tracked viewer's view node — back to the "off viewer" sentinel. */
+    private final javafx.event.EventHandler<javafx.scene.input.MouseEvent> mouseExitedHandler =
+            e -> resetMousePosition();
+    /**
+     * Moves {@link #mouseMovedHandler}/{@link #mouseExitedHandler} to whichever viewer becomes active,
+     * so cursor tracking always follows the <b>active</b> viewer — mirrors {@link
+     * com.patolojiatlasi.qupath.RotationControl}'s {@code rebind()} pattern for the same {@link
+     * QuPathGUI#viewerProperty()}.
+     * Wired on only while blinded (added in {@link #startBlinded()}, removed in {@link
+     * #stopBlinded()}), so there is never a listener registered outside a recording session.
+     */
+    private final javafx.beans.value.ChangeListener<QuPathViewer> viewerMouseListener =
+            (obs, was, now) -> attachMouseTracking(now);
 
     private CheckMenuItem overlayItem;  // kept so blinded mode can disable/untick it
     private CheckMenuItem windowItem;   // kept so closing the window can untick it, and for blinded mode
@@ -308,6 +381,10 @@ public final class FocusHeatmap {
         blindedPath.clear();
         blindedPathCapped = false;
         blindedSlideStartMs = System.currentTimeMillis();
+        // Viewer-scoped cursor tracking (image coords only, never global mouse) -- starts following
+        // whichever viewer is active now, and re-follows on every later active-viewer change.
+        qupath.viewerProperty().addListener(viewerMouseListener);
+        attachMouseTracking(qupath.getViewer());
         if (!shutdownHookAdded) {
             Runtime.getRuntime().addShutdownHook(new Thread(this::flushOnShutdown, "atlas-blinded-shutdown"));
             shutdownHookAdded = true;
@@ -332,6 +409,10 @@ public final class FocusHeatmap {
         if (!blindedRecording)
             return;
         blindedRecording = false;
+        // Cursor tracking is blinded-only -- stop following the active viewer and detach the mouse
+        // handlers now, so no listener/handler is ever left registered outside a recording session.
+        qupath.viewerProperty().removeListener(viewerMouseListener);
+        attachMouseTracking(null);
         if (currentMap != null && !currentMap.isEmpty())
             saveBlindedSync(currentUri, currentMap);
         // The final fragment above (if any) now carries whatever the checkpoint was tracking --
@@ -427,9 +508,14 @@ public final class FocusHeatmap {
                 if (blindedPath.size() < MAX_PATH_POINTS) {
                     long tRel = now - blindedSlideStartMs;
                     int dsMilli = (int) Math.round(v.getDownsampleFactor() * 1000);
+                    // mouseX/mouseY: the cursor's last-known position over THIS viewer, in image px
+                    // (see lastMouseImageX/Y's javadoc); (-1,-1) when the cursor isn't over the slide
+                    // viewer. Read here, not computed here -- mouse events update the fields
+                    // independently of the sampling timer as they arrive.
                     blindedPath.add(new int[]{(int) tRel, (int) Math.round(b.getX() + b.getWidth() / 2.0),
                             (int) Math.round(b.getY() + b.getHeight() / 2.0),
-                            (int) Math.round(b.getWidth()), (int) Math.round(b.getHeight()), dsMilli});
+                            (int) Math.round(b.getWidth()), (int) Math.round(b.getHeight()), dsMilli,
+                            lastMouseImageX, lastMouseImageY});
                 } else if (!blindedPathCapped) {
                     blindedPathCapped = true;
                     logger.info("Blinded scanpath reached {} points; further points dropped.", MAX_PATH_POINTS);
@@ -507,6 +593,52 @@ public final class FocusHeatmap {
         return qupath.getStage() != null && qupath.getStage().isFocused();
     }
 
+    /**
+     * Wire {@link #mouseMovedHandler}/{@link #mouseExitedHandler} onto {@code v}'s view node, first
+     * detaching them from whichever viewer they were previously on (if different). Passing {@code
+     * null} only detaches — used when there is no active viewer, or when mouse tracking is being torn
+     * down in {@link #stopBlinded()}. Always resets {@link #lastMouseImageX}/{@link
+     * #lastMouseImageY} to the off-viewer sentinel on a change: a position captured against the old
+     * viewer's transform is meaningless once tracking has moved elsewhere. Best-effort/no-throw — a
+     * failed attach/detach is logged and swallowed, never thrown into a property-change callback.
+     */
+    private void attachMouseTracking(QuPathViewer v) {
+        if (v == mouseViewer)
+            return;
+        if (mouseViewer != null) {
+            try {
+                javafx.scene.Node node = mouseViewer.getView();
+                node.removeEventFilter(javafx.scene.input.MouseEvent.MOUSE_MOVED, mouseMovedHandler);
+                node.removeEventFilter(javafx.scene.input.MouseEvent.MOUSE_DRAGGED, mouseMovedHandler);
+                node.removeEventFilter(javafx.scene.input.MouseEvent.MOUSE_EXITED, mouseExitedHandler);
+            } catch (Exception e) {
+                logger.debug("Could not detach cursor tracking from previous viewer: {}", e.getMessage());
+            }
+        }
+        mouseViewer = v;
+        resetMousePosition();
+        if (v != null) {
+            try {
+                javafx.scene.Node node = v.getView();
+                // MOUSE_MOVED covers normal pointer movement; MOUSE_DRAGGED keeps the position live
+                // while panning (a button-down drag delivers MOVED->DRAGGED, not repeated MOVED).
+                // Filters (not handlers) so this never competes with the viewer's own pan/zoom/tool
+                // handlers on the same node for event consumption.
+                node.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_MOVED, mouseMovedHandler);
+                node.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_DRAGGED, mouseMovedHandler);
+                node.addEventFilter(javafx.scene.input.MouseEvent.MOUSE_EXITED, mouseExitedHandler);
+            } catch (Exception e) {
+                logger.debug("Could not attach cursor tracking to viewer: {}", e.getMessage());
+            }
+        }
+    }
+
+    /** Reset the cursor position to the "not over the slide viewer" sentinel ({@code -1,-1}). */
+    private void resetMousePosition() {
+        lastMouseImageX = -1;
+        lastMouseImageY = -1;
+    }
+
     /** Move to a new slide/viewer: persist the old map if requested, then start a fresh one. */
     private void switchTo(QuPathViewer v, ImageData<BufferedImage> id) {
         if (keepMaps && currentMap != null && !currentMap.isEmpty())
@@ -525,6 +657,9 @@ public final class FocusHeatmap {
         removeOverlay();
         currentViewer = v;
         currentImageData = id;
+        // A cursor position cached against the previous image's transform is meaningless once the
+        // image (or viewer) has changed -- start the new slide session at the off-viewer sentinel.
+        resetMousePosition();
         if (id != null && id.getServer() != null) {
             ImageServer<BufferedImage> server = id.getServer();
             currentMap = new FocusMap(server.getWidth(), server.getHeight(), GRID_MAX);
@@ -807,6 +942,24 @@ public final class FocusHeatmap {
      * when unavailable) so a later analysis pass can derive true magnification as {@code
      * baseMagnification / (dsMilli / 1000.0)}. Both additions are read defensively — no throw into the
      * sampling timer or a checkpoint/shutdown write if metadata is missing.
+     * <p>
+     * Schema/4 also adds {@code annotations}: a GeoJSON {@code FeatureCollection} (real nested JSON,
+     * not a string) snapshotting {@code currentImageData}'s annotation objects at save time — geometry
+     * in image pixel coordinates, plus each annotation's name/classification/description as GeoJSON
+     * Feature properties, exactly as {@link qupath.lib.io.GsonTools} already serializes any {@link
+     * qupath.lib.io.FeatureCollection} (used elsewhere for the quiz reference geometry -- see {@link
+     * com.patolojiatlasi.qupath.quiz.QuizGeometry}). An empty hierarchy yields an empty {@code
+     * FeatureCollection} ({@code {"type":"FeatureCollection","features":[]}}), never {@code null} or
+     * an omitted field. Best-effort: any failure reading the hierarchy/serializing falls back to that
+     * same empty FeatureCollection rather than throwing, so a missing/closed image can never break a
+     * blinded save.
+     * <p>
+     * Schema/5 extends each {@code path} point with the cursor's position at that tick ({@code
+     * mouseX}, {@code mouseY} — see {@link #blindedPath} and {@link #lastMouseImageX}), in the same
+     * image-pixel coordinate space as the point's {@code cx}/{@code cy} — captured only while the
+     * cursor is over the slide viewer (never a global/OS mouse position); {@code -1,-1} means the
+     * cursor was off the viewer at that tick. Purely additive to each point; the fragment-level shape
+     * ({@code grid}, {@code annotations}, etc.) is unchanged.
      */
     private String buildBlindedJson(String uri, FocusMap map) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -822,7 +975,7 @@ public final class FocusHeatmap {
         m.put("durationMs", map.getTotalWeight());
         m.put("date", java.time.LocalDate.now().toString());
         m.put("grid", map.getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
-        m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h,dsMilli] points; defensive snapshot
+        m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h,dsMilli,mouseX,mouseY] points; defensive snapshot
         m.put("pathTruncated", blindedPathCapped);   // true if MAX_PATH_POINTS was hit and points were dropped
         Double baseMag = null;
         try {
@@ -833,7 +986,50 @@ public final class FocusHeatmap {
             // currentImageData/server/metadata unavailable, or magnification unreadable -- leave null.
         }
         m.put("baseMagnification", baseMag);   // objective power for the fragment's slide, or null if unknown
+        m.put("annotations", buildAnnotationsFeatureCollection());   // schema/4: GeoJSON FeatureCollection, never null
         return new GsonBuilder().create().toJson(m);
+    }
+
+    /**
+     * Snapshot the current slide's annotations as a GeoJSON {@code FeatureCollection} {@link
+     * JsonElement} for embedding in {@link #buildBlindedJson}. Best-effort/no-throw: on any failure
+     * (no image loaded, closed hierarchy, serialization error) this returns an empty {@code
+     * FeatureCollection} rather than propagating -- a blinded save must never fail because of this.
+     * <p>
+     * Serializes via {@link GsonTools#getInstance()}'s {@code toJson(Object, Type)} (a JSON
+     * <em>string</em>), then reparses with {@link JsonParser} -- deliberately <strong>not</strong>
+     * {@code Gson.toJsonTree}: QuPath's own {@code ROITypeAdapters.writeCoordinates} calls the
+     * streaming-only {@code JsonWriter.jsonValue(String)} to emit raw coordinate literals, which
+     * {@code Gson}'s tree writer (used internally by {@code toJsonTree}) throws {@code
+     * UnsupportedOperationException} on for any non-empty geometry (confirmed empirically). The
+     * string round-trip avoids that path entirely and still yields a real nested {@link JsonElement}
+     * once parsed -- never a quoted string in the final fragment.
+     * <p>
+     * Threading: {@link #checkpointBlinded()} and {@link #saveBlindedSync} both run on the FX thread
+     * (driven by the sampling {@link Timeline}/a menu action), so {@code currentImageData} and its
+     * hierarchy are read safely there. {@link #flushOnShutdown()} is the one caller that runs off the
+     * FX thread (a JVM shutdown hook, by its own javadoc) -- {@link
+     * qupath.lib.objects.hierarchy.PathObjectHierarchy#getAnnotationObjects()} returns a fresh {@code
+     * ArrayList} snapshot (verified via the 0.6.0 bytecode), so collection iteration itself can't throw
+     * a {@code ConcurrentModificationException}; only a per-object torn read of in-flight name/class
+     * edits is possible in that narrow window, which this method's try/catch bounds to "fall back to
+     * empty" -- the same tradeoff {@link #flushOnShutdown()} already accepts for {@code currentMap}.
+     */
+    private JsonElement buildAnnotationsFeatureCollection() {
+        try {
+            var hierarchy = currentImageData == null ? null : currentImageData.getHierarchy();
+            var annotations = hierarchy == null ? java.util.List.<qupath.lib.objects.PathObject>of()
+                    : hierarchy.getAnnotationObjects();
+            FeatureCollection featureCollection = FeatureCollection.wrap(annotations);
+            String json = GsonTools.getInstance().toJson(featureCollection, FeatureCollection.class);
+            return JsonParser.parseString(json);
+        } catch (Exception e) {
+            logger.debug("Could not capture annotations for blinded fragment: {}", e.getMessage(), e);
+            JsonObject empty = new JsonObject();
+            empty.addProperty("type", "FeatureCollection");
+            empty.add("features", new JsonArray());
+            return empty;
+        }
     }
 
     /** Stable per-slide key for aggregation: the DZI URL without any query (e.g. no {@code ?mpp=}). */

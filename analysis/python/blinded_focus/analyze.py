@@ -10,36 +10,48 @@ Usage::
 
 Output files (written to ``--out DIR``):
 
-- ``metrics.csv`` — one row per (slide, session); now includes the Phase-1 zoom/navigation
-  metric family (``avgZoom``, ``zoomVariance``, ``zoomRange``, ``magnificationPercentage``,
+- ``metrics.csv`` — one row per (slide, session); includes the Phase-1 zoom/navigation metric
+  family (``avgZoom``, ``zoomVariance``, ``zoomRange``, ``magnificationPercentage``,
   ``scanningRatePxPerMin``, ``drillingRatePerMin``, ``pathVelocityPxPerSec``, ``linearity``,
   ``searchFocusRatio``) plus ``baseMagnification``/``pathTruncated`` passthrough — blank for
-  sessions with no ``path`` (schema /1, /2, or path-less recordings).
+  sessions with no ``path`` (schema /1, /2, or path-less recordings) — and (Phase 2) annotation
+  metrics ``nAnnotations``, ``annotatedAreaPx``, ``dwellInAnnotationPct``,
+  ``annotationReentryCount``, ``enrichmentRatio`` (the first three populated for every session —
+  0/0.0 when a session has no ``annotations``; ``annotationReentryCount`` blank without a
+  ``path``; ``enrichmentRatio`` blank when its mask has no in/out split to compare) plus cursor
+  metrics ``cursorOverSlidePct``, ``mouseViewportCouplingPx`` (blank unless the session's ``path``
+  carries schema/5 8-element points with ``mouseX``/``mouseY``).
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
-  ``consensus_<slug>.png``. Now also carries a slide-level ``coincidenceLevel`` (one row) and a
+  ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus).
 - per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``.
-- per slide, when any session has a schema/3 or /4 ``path``: ``scanpath_<slug>.csv``, and
-  (Phase 1) ``magbands_<slug>.csv`` — per-session dwell time in each of ``--magbands`` (default 3)
+- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv``, and (Phase 1)
+  ``magbands_<slug>.csv`` — per-session dwell time in each of ``--magbands`` (default 3)
   within-path zoom bands (tidy long format; see :func:`blinded_focus.metrics.zoom_band_labels`).
-- ``summary.md`` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers.
+- per slide, when any session has at least one annotation: (Phase 2) ``annotations_<slug>.csv`` —
+  pairwise IoU of each session's own rasterized annotated region (tidy long format, same
+  diagonal-reuse convention as ``compare_<slug>.csv``) plus a slide-level ``coincidenceLevel``
+  over those same regions.
+- ``summary.md`` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers,
+  and (Phase 2) headline annotation-coverage + cursor-coupling numbers.
 - with ``--figures``: per-(slide,session) heatmap/scanpath/coverage-over-time PNGs under
   ``<out>/<slug>/``, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
   ``--res`` resolution (``..._scanpath_raster.png`` — the trustworthy high-magnification map,
   independent of the recorded grid) and one heatmap per magnification band
   (``..._magband<N>.png``).
 
-Design note on "matrices" (``compare_<slug>.csv`` / ``scanpath_<slug>.csv`` / ``magbands_<slug>.csv``):
-these are written as *tidy long-format* tables (one row per pair or per (session, band)) rather
-than 2D matrix-shaped CSVs, so a single file can carry multiple metrics and stays trivial to
-`pivot()`/parse in either Python or R. As a compact way to attach per-session (not per-pair)
-values, the *diagonal* row of each pair table also carries extra columns
+Design note on "matrices" (``compare_<slug>.csv`` / ``scanpath_<slug>.csv`` / ``magbands_<slug>.csv``
+/ ``annotations_<slug>.csv``): these are written as *tidy long-format* tables (one row per pair or
+per (session, band)) rather than 2D matrix-shaped CSVs, so a single file can carry multiple metrics
+and stays trivial to `pivot()`/parse in either Python or R. As a compact way to attach per-session
+(not per-pair) values, the *diagonal* row of each pair table also carries extra columns
 (``diffFromConsensus``/``regionCoveragePct`` in ``compare_<slug>.csv``, ``transitionEntropy`` in
 ``scanpath_<slug>.csv``) — off-diagonal rows leave them blank. ``coincidenceLevel`` is a
 slide-level (not per-session) statistic; by convention it is written on exactly one row per
 slide — the diagonal row of the *first* session in insertion order (``session_ids[0]``) — all
-other rows leave it blank. An R port must place it identically for the two toolkits' CSVs to
-diff-match.
+other rows leave it blank. ``annotations_<slug>.csv`` reuses this exact same diagonal-reuse
+convention for its own (annotation-region) ``coincidenceLevel``. An R port must place it
+identically for the two toolkits' CSVs to diff-match.
 """
 import argparse
 import csv
@@ -116,19 +128,112 @@ def _extract_rings(geometry):
     return rings
 
 
+def rings_from_feature_collection(fc):
+    """Same ring-extraction as :func:`load_roi_rings`, but from an already-parsed GeoJSON dict
+    (a ``Feature``, ``FeatureCollection``, or bare geometry) rather than a file path -- used for
+    a fragment's embedded ``annotations`` field (Phase 2), which arrives as parsed JSON, not a
+    file on disk. Returns a flat list of rings (image-px coordinates) suitable for
+    :func:`rasterize_roi`/point-in-polygon (holes handled via the even-odd rule). ``[]`` for a
+    falsy/malformed input (e.g. an empty ``{"type": "FeatureCollection", "features": []}``, the
+    default from :func:`blinded_focus.io.get_annotations`)."""
+    if not fc or not isinstance(fc, dict):
+        return []
+    if fc.get("type") == "FeatureCollection":
+        rings = []
+        for feat in fc.get("features", []) or []:
+            if not isinstance(feat, dict):
+                continue
+            rings.extend(_extract_rings(feat.get("geometry", {}) or {}))
+        return rings
+    if fc.get("type") == "Feature":
+        return _extract_rings(fc.get("geometry", {}) or {})
+    return _extract_rings(fc)
+
+
 def load_roi_rings(roi_path):
     """Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon and
     return its rings (image-px coordinates) for rasterization."""
     with open(roi_path, "r", encoding="utf-8") as fh:
         d = json.load(fh)
-    if d.get("type") == "FeatureCollection":
-        rings = []
-        for feat in d.get("features", []):
-            rings.extend(_extract_rings(feat.get("geometry", {}) or {}))
-        return rings
-    if d.get("type") == "Feature":
-        return _extract_rings(d.get("geometry", {}) or {})
-    return _extract_rings(d)
+    return rings_from_feature_collection(d)
+
+
+def load_roi_fc(roi_path):
+    """Load a QuPath-exported GeoJSON (Feature, FeatureCollection, or bare geometry) polygon file
+    and return the parsed dict (not its flattened rings), for per-Feature union rasterization via
+    :func:`rasterize_feature_collection` -- a multi-polygon/overlapping reference ROI must be
+    rasterized feature-by-feature and unioned, not with a single pooled-rings even-odd test (see
+    that function's docstring); this is the ``--roi`` counterpart to the annotation-mask fix."""
+    with open(roi_path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _shoelace_area(ring):
+    """Absolute area (px^2) of a simple polygon ring (a list of ``(x, y)`` tuples) via the
+    shoelace formula: ``abs(sum(x_i*y_{i+1} - x_{i+1}*y_i)) / 2``. ``0.0`` for a degenerate ring
+    (fewer than 3 points)."""
+    n = len(ring)
+    if n < 3:
+        return 0.0
+    s = 0.0
+    for i in range(n):
+        x1, y1 = ring[i]
+        x2, y2 = ring[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+    return abs(s) / 2.0
+
+
+def _polygon_area(poly_coords):
+    """Area (px^2) of one GeoJSON ``Polygon`` geometry's ``coordinates`` array: the exterior
+    ring's area (first ring) minus each hole ring's area (subsequent rings), each computed via
+    :func:`_shoelace_area` -- using the *absolute* area of every ring sidesteps any ambiguity in
+    ring winding order (CW vs CCW), which GeoJSON does not strictly mandate a producer follow.
+    Clamped at 0.0 (a malformed polygon whose holes exceed its exterior should never report a
+    negative area). ``0.0`` for an empty ``coordinates`` array."""
+    if not poly_coords:
+        return 0.0
+    rings = [[(pt[0], pt[1]) for pt in ring] for ring in poly_coords]
+    area = _shoelace_area(rings[0])
+    for hole in rings[1:]:
+        area -= _shoelace_area(hole)
+    return max(area, 0.0)
+
+
+def _feature_geometry_area(geometry):
+    """Area (px^2) of one GeoJSON ``Polygon``/``MultiPolygon`` geometry: :func:`_polygon_area` of
+    each constituent polygon, summed for ``MultiPolygon``. ``0.0`` for any other geometry type
+    (e.g. ``Point``/``LineString`` annotations, which QuPath also allows but which have no area)."""
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates") or []
+    if gtype == "Polygon":
+        return _polygon_area(coords)
+    if gtype == "MultiPolygon":
+        return sum(_polygon_area(poly) for poly in coords)
+    return 0.0
+
+
+def annotations_area_px(fc):
+    """Total area (image px^2) of every ``Polygon``/``MultiPolygon`` feature in a GeoJSON
+    ``FeatureCollection`` dict (a fragment's ``annotations`` field), via
+    :func:`_feature_geometry_area` summed across features -- the ``annotatedAreaPx`` column.
+    ``0.0`` for an empty/missing/malformed FeatureCollection (including non-area annotation
+    geometries only, e.g. a lone point annotation).
+
+    Caveat: this is the **sum of per-feature areas, not de-duplicated for overlap** -- two
+    overlapping/nested annotation Features (unlike the mask-based metrics, which correctly union
+    them via :func:`rasterize_feature_collection`) report a combined ``annotatedAreaPx`` larger
+    than their true union area. True polygon-union area would need geometric clipping, which
+    neither toolkit implements."""
+    if not fc or not isinstance(fc, dict) or fc.get("type") != "FeatureCollection":
+        return 0.0
+    total = 0.0
+    for feat in fc.get("features", []) or []:
+        if not isinstance(feat, dict):
+            continue
+        geom = feat.get("geometry")
+        if isinstance(geom, dict):
+            total += _feature_geometry_area(geom)
+    return total
 
 
 def rasterize_roi(rings, gw, gh, img_w, img_h):
@@ -142,6 +247,44 @@ def rasterize_roi(rings, gw, gh, img_w, img_h):
             cx = (col + 0.5) / gw * img_w
             mask[row, col] = _point_in_poly(cx, cy, rings)
     return mask.flatten()
+
+
+def rasterize_feature_collection(fc, gw, gh, img_w, img_h):
+    """Rasterize a GeoJSON dict (``FeatureCollection``, ``Feature``, or bare geometry -- the same
+    shapes :func:`rings_from_feature_collection` accepts) to a flat ``(gw*gh,)`` boolean mask by
+    rasterizing **each Feature's own rings separately** (that Feature's exterior + its own holes --
+    even-odd within the Feature, via :func:`rasterize_roi`) and taking the **union (logical OR)**
+    across Features.
+
+    This is deliberately NOT the same as pooling every Feature's rings into one flat list and
+    running a single even-odd test across all of them (:func:`rings_from_feature_collection` +
+    :func:`rasterize_roi`): even-odd correctly handles holes *within one polygon*, but pooling
+    rings from separate Features breaks down when two distinct Features geometrically overlap
+    (e.g. a coarse "tumor" annotation with a smaller "high-grade focus" annotation nested inside
+    it) -- a point inside both gets even parity under the pooled test and is wrongly reported
+    outside. Rasterizing feature-by-feature and OR-ing the results sidesteps this: single-feature
+    and hole-within-one-feature behaviour is unchanged (this is a strict superset of the
+    pooled-rings result -- only cross-feature overlap changes, from wrongly-excluded to
+    correctly-included).
+
+    A falsy/malformed ``fc``, or one with no features/rings at all, returns an all-``False`` mask
+    without walking any grid cell (same short-circuit the pooled-rings call sites relied on)."""
+    gw, gh = int(gw), int(gh)
+    if not fc or not isinstance(fc, dict):
+        return np.zeros(gw * gh, dtype=bool)
+    if fc.get("type") == "FeatureCollection":
+        features = [feat for feat in (fc.get("features", []) or []) if isinstance(feat, dict)]
+    elif fc.get("type") == "Feature":
+        features = [fc]
+    else:
+        features = [{"geometry": fc}]  # bare geometry: treat as a single implicit feature
+    mask = np.zeros(gw * gh, dtype=bool)
+    for feat in features:
+        rings = _extract_rings(feat.get("geometry", {}) or {})
+        if not rings:
+            continue
+        mask |= rasterize_roi(rings, gw, gh, img_w, img_h)
+    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +353,17 @@ def analyze(
     fragments = bf_io.load_fragments(inputs)
     if not fragments:
         print(
-            "warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3,4})",
+            "warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3,4,5})",
             file=sys.stderr,
         )
     labels = bf_io.load_labels(labels_csv)
     groups = bf_io.group_by_slide(fragments)
-    roi_rings = load_roi_rings(roi) if roi else None
+    roi_fc = load_roi_fc(roi) if roi else None
+    # Kept only for the reference/ROI gate below (truthy iff the ROI file has >=1 ring) -- the
+    # actual reference mask is built per-Feature + unioned via
+    # rasterize_feature_collection(roi_fc, ...) below, so a multi-polygon/overlapping reference
+    # ROI composes correctly (same fix as the annotation mask; see its docstring).
+    roi_rings = rings_from_feature_collection(roi_fc) if roi_fc else None
 
     metrics_rows = []
     slide_summaries = []
@@ -241,6 +389,8 @@ def analyze(
         resampled = {}      # sessionId -> resampled (tw*th,) np.array, raw units
         native_grid = {}     # sessionId -> (grid list, gw, gh)
         path_seq = {}        # sessionId -> visited-cell sequence (schema/3 only)
+        common_ann_masks = {}  # sessionId -> this session's own annotated region, resampled to
+                                # (tw, th) boolean -- used only by the cross-user annotations_<slug>.csv
 
         for sid, f in sessions:
             gw, gh = int(f["gridWidth"]), int(f["gridHeight"])
@@ -252,6 +402,28 @@ def analyze(
             base_mag = f.get("baseMagnification")
             img_w = f.get("imageWidth", 1)
             img_h = f.get("imageHeight", 1)
+
+            # ---- Phase 2: this session's own annotations, rasterized to its native (gw, gh)
+            # grid (matching the resolution `grid`/`dwell` are already in) -- reuses the same
+            # GeoJSON-polygon-to-grid rasterizer as the `--roi` CLI flag. Each annotation Feature
+            # is rasterized on its own and the per-feature masks are unioned (OR'd), NOT pooled
+            # into one flat ring list and tested with a single even-odd pass -- pooling
+            # misclassifies a point inside two overlapping/nested Features (e.g. a "high-grade
+            # focus" annotation drawn inside a coarser "tumor" annotation) as outside the annotated
+            # region. See rasterize_feature_collection's docstring. It also keeps the short-circuit
+            # for the no-annotations case (all-False, no per-cell work).
+            ann_fc = bf_io.get_annotations(f)
+            n_ann = len(ann_fc.get("features", []) or [])
+            ann_area = annotations_area_px(ann_fc)
+            native_ann_mask = rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
+            # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the
+            # slide's common (tw, th) grid -- resample the already-rasterized native mask (as
+            # 0.0/1.0 floats) via the same nearest-neighbour resampler used for dwell grids,
+            # rather than re-rasterizing from scratch at (tw, th).
+            common_ann_masks[sid] = (
+                m.resample_nn(native_ann_mask.astype(float), gw, gh, tw, th) > 0.5
+            )
+
             row = {
                 "slide": slide_key,
                 "session": _session_label(f, labels),
@@ -276,9 +448,22 @@ def analyze(
                 "pathVelocityPxPerSec": "",
                 "linearity": "",
                 "searchFocusRatio": "",
-                # Passthrough fragment-level fields (schema/4; blank for /1,/2,/3 which lack them).
+                # Passthrough fragment-level fields (schema/4+; blank for /1,/2,/3 which lack them).
                 "baseMagnification": base_mag if base_mag is not None else "",
                 "pathTruncated": f.get("pathTruncated", ""),
+                # Phase 2 annotation metrics: nAnnotations/annotatedAreaPx/dwellInAnnotationPct
+                # only need the grid + this session's own annotation mask (no path required), so
+                # they're always populated (0/0.0 when there are no annotations at all).
+                # enrichmentRatio is likewise grid-only, but blank (NaN) whenever its mask has no
+                # meaningful in/out split to compare -- see metrics.enrichment_ratio.
+                "nAnnotations": n_ann,
+                "annotatedAreaPx": ann_area,
+                "dwellInAnnotationPct": m.dwell_in_mask_pct(grid, native_ann_mask),
+                "enrichmentRatio": m.enrichment_ratio(grid, native_ann_mask),
+                # Path-dependent Phase 2 metrics: blank without a path at all (schema /1, /2).
+                "annotationReentryCount": "",
+                "cursorOverSlidePct": "",
+                "mouseViewportCouplingPx": "",
             }
 
             path = f.get("path")
@@ -300,6 +485,15 @@ def analyze(
                 row["pathVelocityPxPerSec"] = m.path_velocity_px_per_sec(path)
                 row["linearity"] = m.linearity(path)
                 row["searchFocusRatio"] = m.search_focus_ratio(path, base_mag, img_w)
+                # Phase 2: reentry uses the session's own NATIVE (gw, gh) mask/grid resolution
+                # (not the slide's common (tw, th)) -- a per-session metric, not a cross-session
+                # one, so it should stay at the resolution the fragment actually recorded.
+                row["annotationReentryCount"] = m.annotation_reentry_count(
+                    path, native_ann_mask, gw, gh, img_w, img_h
+                )
+                if m.has_mouse_data(path):
+                    row["cursorOverSlidePct"] = m.cursor_over_slide_pct(path)
+                    row["mouseViewportCouplingPx"] = m.mouse_viewport_coupling_px(path)
 
             metrics_rows.append(row)
 
@@ -348,6 +542,40 @@ def analyze(
             os.path.join(out_dir, f"consensus_{slide_slug}.png"),
         )
 
+        # ------------------------------------------------------------------
+        # Phase 2: cross-user annotation agreement -- pairwise IoU of each session's own
+        # rasterized annotated region + a coincidence level, mirroring compare_<slug>.csv's
+        # tidy-long + diagonal-reuse convention exactly. Gated on at least one session having
+        # drawn at least one annotation (mirrors the scanpath_<slug>.csv path-presence gate), so a
+        # slide with zero annotations anywhere doesn't emit a trivially-all-zero file.
+        # ------------------------------------------------------------------
+        annotation_coincidence_val = float("nan")
+        if any(r["nAnnotations"] > 0 for r in slide_metric_rows):
+            annotation_coincidence_val = m.coincidence_level(
+                [common_ann_masks[sid].astype(float) for sid in session_ids], IOU_THRESH
+            )
+            ann_rows = []
+            for idx_a, a in enumerate(session_ids):
+                for b in session_ids:
+                    ann_row = {
+                        "sessionA": labels.get(a, a),
+                        "sessionB": labels.get(b, b),
+                        "iou": m.iou(
+                            common_ann_masks[a].astype(float),
+                            common_ann_masks[b].astype(float),
+                            IOU_THRESH,
+                        ),
+                        "coincidenceLevel": "",
+                    }
+                    if a == b and idx_a == 0:
+                        ann_row["coincidenceLevel"] = annotation_coincidence_val
+                    ann_rows.append(ann_row)
+            _write_csv(
+                os.path.join(out_dir, f"annotations_{slide_slug}.csv"),
+                ann_rows,
+                ["sessionA", "sessionB", "iou", "coincidenceLevel"],
+            )
+
         mean_cc = m.mean_pairwise_cc([resampled[sid] for sid in session_ids])
         icc_val = m.icc([resampled[sid] for sid in session_ids])
         coverages = [m.coverage(native_grid[sid][0]) * 100.0 for sid in session_ids]
@@ -372,6 +600,10 @@ def analyze(
             "meanScanningRatePxPerMin": _mean_of("scanningRatePxPerMin"),
             "meanDrillingRatePerMin": _mean_of("drillingRatePerMin"),
             "meanMagnificationPercentage": _mean_of("magnificationPercentage"),
+            # Phase 2 headline numbers.
+            "meanDwellInAnnotationPct": _mean_of("dwellInAnnotationPct"),
+            "annotationCoincidenceLevel": annotation_coincidence_val,
+            "meanCursorOverSlidePct": _mean_of("cursorOverSlidePct"),
         })
 
         # ------------------------------------------------------------------
@@ -389,7 +621,7 @@ def analyze(
             if roi_rings:
                 img_w = sessions[0][1].get("imageWidth", 1)
                 img_h = sessions[0][1].get("imageHeight", 1)
-                ref_mask = rasterize_roi(roi_rings, tw, th, img_w, img_h)
+                ref_mask = rasterize_feature_collection(roi_fc, tw, th, img_w, img_h)
                 ref_map = ref_mask.astype(float)
             if reference and reference in resampled:
                 ref_grid = resampled[reference]
@@ -548,7 +780,9 @@ def analyze(
          "nRevisits", "transitionEntropy",
          "avgZoom", "zoomVariance", "zoomRange", "magnificationPercentage",
          "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
-         "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated"],
+         "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
+         "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
+         "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"],
     )
     _write_summary(out_dir, groups, slide_summaries, reference_summaries)
     return metrics_rows
@@ -579,6 +813,15 @@ def _write_summary(out_dir, groups, slide_summaries, reference_summaries):
             f"{_fmt(s['meanDrillingRatePerMin'], 2)} / "
             f"{_fmt(s['meanMagnificationPercentage'], 3)}"
         )
+        lines.append(
+            f"- annotation coverage: mean dwell-in-annotation % = "
+            f"{_fmt(s['meanDwellInAnnotationPct'], 1)}, cross-user annotation coincidence "
+            f"(>=2 readers, thresh={IOU_THRESH}) = {_fmt(s['annotationCoincidenceLevel'], 3)}"
+        )
+        lines.append(
+            f"- cursor coupling: mean % of path time cursor was over the slide = "
+            f"{_fmt(s['meanCursorOverSlidePct'], 1)}"
+        )
         lines.append("")
     if reference_summaries:
         lines.append("## Reference ranking (higher NSS/CC = closer to the reference/ROI)")
@@ -603,10 +846,12 @@ def _write_summary(out_dir, groups, slide_summaries, reference_summaries):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="python -m blinded_focus.analyze",
-        description="Analyze blinded-focus fragments (schema atlas-focus-contribution/1,2,3,4): "
-                    "per-session metrics (incl. zoom/scanning/drilling navigation metrics), "
-                    "cross-user agreement, reference/ROI comparison, scanpath sequence metrics, "
-                    "scanpath-rasterized fine heatmaps, and magnification-band split.",
+        description="Analyze blinded-focus fragments (schema atlas-focus-contribution/1,2,3,4,5): "
+                    "per-session metrics (incl. zoom/scanning/drilling navigation metrics, "
+                    "annotation coverage, and cursor coupling), cross-user agreement (incl. "
+                    "annotation-region IoU/coincidence), reference/ROI comparison, scanpath "
+                    "sequence metrics, scanpath-rasterized fine heatmaps, and magnification-band "
+                    "split.",
     )
     ap.add_argument("inputs", nargs="+", help="fragment JSON files, directories, and/or .zip archives")
     ap.add_argument("--out", required=True, help="output directory")

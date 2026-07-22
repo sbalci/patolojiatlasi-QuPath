@@ -1,10 +1,10 @@
 """Fragment loading for blinded-focus contribution JSON.
 
 Fragment schema (produced by the QuPath extension's blinded-focus recording feature):
-``atlas-focus-contribution/{1,2,3,4}``. Common fields: ``slideKey``, ``sessionId``,
+``atlas-focus-contribution/{1,2,3,4,5}``. Common fields: ``slideKey``, ``sessionId``,
 ``imageWidth``, ``imageHeight``, ``gridWidth``, ``gridHeight``, ``grid`` (row-major, length
-``gridWidth*gridHeight``; milliseconds for schema /2, /3, /4, fixed-weight sample counts for
-schema /1), ``durationMs`` (/2, /3, /4), ``sampleCount``, ``date``. Schema /3 and /4 additionally
+``gridWidth*gridHeight``; milliseconds for schema /2, /3, /4, /5, fixed-weight sample counts for
+schema /1), ``durationMs`` (/2, /3, /4, /5), ``sampleCount``, ``date``. Schema /3+ additionally
 carry an ordered ``path`` (viewport center + visible extent in image pixels, time relative to the
 start of that slide's blinded recording):
 
@@ -12,14 +12,25 @@ start of that slide's blinded recording):
 - schema/4 points are 6-element ``[tRelMs, cx, cy, w, h, dsMilli]`` — ``dsMilli`` is the viewer's
   downsample factor at that tick, times 1000 (integer, so ``downsample = dsMilli / 1000.0``).
   Schema/4 also adds a fragment-level ``baseMagnification`` (the slide's objective power as a
-  number, or ``null``/absent when unknown) and ``pathTruncated`` (bool: true if the recorder's
-  point cap was hit and further points were dropped). See ``blinded_focus.metrics.point_zoom``
-  for how ``dsMilli``/``baseMagnification`` combine (or fall back) into a magnification value.
+  number, or ``null``/absent when unknown), ``pathTruncated`` (bool: true if the recorder's point
+  cap was hit and further points were dropped), and ``annotations`` (a GeoJSON
+  ``FeatureCollection`` snapshot of the reader's slide annotations at save time — geometry in
+  image pixels, plus each feature's ``properties`` which may include ``name``,
+  ``classification.name``, and ``metadata.ANNOTATION_DESCRIPTION``).
+- schema/5 points are 8-element ``[tRelMs, cx, cy, w, h, dsMilli, mouseX, mouseY]`` — purely
+  additive over /4's 6-element shape: ``mouseX``/``mouseY`` are the cursor's position at that
+  tick, in the same image-pixel coordinate space as ``cx``/``cy``, or the sentinel ``-1, -1`` when
+  the cursor was not over the slide viewer at that tick (or its position is unknown).
+
+See ``blinded_focus.metrics.point_zoom`` for how ``dsMilli``/``baseMagnification`` combine (or
+fall back) into a magnification value, and ``blinded_focus.metrics.cursor_over_slide_pct`` /
+``mouse_viewport_coupling_px`` for the schema/5-only cursor metrics.
 
 This module treats schema purely by field shape — it does not branch on the ``schema`` string
 beyond membership in :data:`SCHEMAS`; downstream code (``metrics.py``, ``analyze.py``) detects
-5- vs 6-element points by ``len(point)`` and reads ``baseMagnification``/``pathTruncated`` via
-``dict.get(...)`` so /1, /2, /3 fragments (which lack those fields) degrade gracefully.
+5- vs 6- vs 8-element points by ``len(point)`` (never indexing a slot the point doesn't have) and
+reads ``baseMagnification``/``pathTruncated``/``annotations`` via ``dict.get(...)`` (see
+:func:`get_annotations`) so /1, /2, /3 fragments (which lack those fields) degrade gracefully.
 
 "User" = ``sessionId`` (one recording sitting); identity mapping to a human label is out-of-band
 (see ``load_labels``) — the fragment data itself stays anonymous.
@@ -34,14 +45,43 @@ import sys
 import zipfile
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
-#: /2, /3, /4 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ add a "path"; /4 path
-#: points carry a 6th element dsMilli (downsample×1000) and the fragment carries baseMagnification.
+#: /2, /3, /4, /5 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ add a "path"; /4 path
+#: points carry a 6th element dsMilli (downsample×1000), the fragment carries baseMagnification,
+#: and the fragment carries an "annotations" GeoJSON FeatureCollection; /5 path points carry two
+#: more trailing elements, mouseX/mouseY (cursor position, or -1,-1 when off the slide viewer).
 SCHEMAS = {
     "atlas-focus-contribution/1",
     "atlas-focus-contribution/2",
     "atlas-focus-contribution/3",
     "atlas-focus-contribution/4",
+    "atlas-focus-contribution/5",
 }
+
+#: Fallback returned by :func:`get_annotations` for fragments with no (or a malformed)
+#: ``annotations`` field. A fresh dict is constructed on every call (not a shared reference) so
+#: no caller can mutate a "default" and corrupt it for a later fragment.
+def _empty_feature_collection():
+    return {"type": "FeatureCollection", "features": []}
+
+
+def get_annotations(fragment):
+    """Return a fragment's ``annotations`` GeoJSON ``FeatureCollection`` dict, defaulting to an
+    empty one (see :func:`_empty_feature_collection`) when the field is absent or malformed.
+
+    Present (additively) from schema /4 onward — the recorder always writes it there, real or
+    empty; schema /1, /2, /3 fragments never carry the field at all. Returning a well-formed
+    default for every case (rather than ``None``) keeps every downstream annotation metric
+    (``nAnnotations``, ``annotatedAreaPx``, ``dwellInAnnotationPct``, ...) well-defined — 0, 0.0,
+    or a blank cell, never a crash — regardless of schema.
+    """
+    ann = fragment.get("annotations")
+    if (
+        isinstance(ann, dict)
+        and ann.get("type") == "FeatureCollection"
+        and isinstance(ann.get("features"), list)
+    ):
+        return ann
+    return _empty_feature_collection()
 
 
 def _is_valid_fragment(d):
@@ -84,7 +124,7 @@ def load_fragments(paths):
 
     ``paths`` may mix any of: a single fragment ``.json`` file, a directory (recursively globbed
     for ``*.json``), or a ``.zip`` archive (its ``*.json`` entries are read directly, no
-    extraction to disk). Only dicts whose ``schema`` is in :data:`SCHEMAS` (``{1,2,3,4}``) and
+    extraction to disk). Only dicts whose ``schema`` is in :data:`SCHEMAS` (``{1,2,3,4,5}``) and
     that carry
     ``slideKey``/``grid``/``gridWidth``/``gridHeight`` are kept; anything else (unreadable JSON,
     unrelated files, wrong schema) is silently skipped.
