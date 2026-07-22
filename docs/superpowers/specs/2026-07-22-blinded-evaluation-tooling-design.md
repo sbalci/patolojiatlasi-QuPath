@@ -123,6 +123,31 @@ portable, no pip). PNGs reuse the aggregator's hand-rolled colormap/writer.
   it's numpy-free) generating synthetic fragments and validating outputs; plus a
   `tools/test-blinded-tooling.sh`/py runner. Verified end-to-end on synthetic data before commit.
 
+## 7b. Revision (user, 2026-07-22): advanced R + Python for experts, separate environments
+
+The analysis tools are for **experts running in their own R / Python environments** — so the
+stdlib-only constraint is lifted for the *analysis* layer (the extension stays untouched; the
+aggregator stays stdlib). Deliver **two parallel advanced toolkits** under a top-level `analysis/`
+tree (standalone, "outside the extension"):
+
+- `analysis/python/` — a `blinded_focus` package using **numpy / pandas / matplotlib / scipy**
+  (`requirements.txt`, install in a venv), with a CLI + importable API + a synthetic `selftest`.
+- `analysis/R/` — a parallel toolkit using **jsonlite / dplyr / tidyr / ggplot2 / irr / proxy**
+  (a `requirements.R` installer), with a `run_analysis.R` + functions + a synthetic `selftest.R`.
+
+Both compute the standard eye-tracking/saliency evaluation set (not just cosine/IoU): spatial
+similarity **CC (Pearson), SIM (histogram intersection), KLD, NSS, AUC-Judd/IoU**; inter-observer
+agreement (**ICC / mean pairwise CC**, a per-slide consensus/"inter-observer congruency" map);
+reference-vs-participant (NSS/AUC of each participant against the reference fixation/ROI map,
+time-on-ROI); and **scanpath** metrics (ScanMatch-/Levenshtein-style sequence similarity over the
+visited-cell sequence, plus a transition matrix + transition entropy). Publication-quality figures
+(matplotlib / ggplot2): per-user heatmap, scanpath overlay (time-graded), consensus, difference,
+coverage-over-time. Env note: **R 4.4 + those packages are already available; the Python stack
+installs via the requirements file in a venv** — both ship a numpy/ggplot-driven synthetic selftest.
+(A tiny zero-dep `tools/quicklook-blinded-focus.py` stdlib PNG viewer is a bonus for a no-setup
+glance, reusing the aggregator's colormap.) This supersedes §4–§5's stdlib `render`/`analyze`
+scripts.
+
 ## 8. Non-goals
 
 - No numpy/matplotlib/scipy (stdlib-only). No network/upload. No full MultiMatch (a documented
