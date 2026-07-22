@@ -3,13 +3,14 @@
 Aggregate per-reader focus-map contributions into per-slide crowd attention maps.
 
 Phase 2 of docs/focus-aggregation-plan.md. Reads the anonymised contribution JSONs
-produced by the QuPath extension — both schema "atlas-focus-contribution/1" (fixed-weight
+produced by the QuPath extension — schema "atlas-focus-contribution/1" (fixed-weight
 sample counts, from "Araştırmaya katkıda bulun…") and schema "atlas-focus-contribution/2"
-(real dwell-milliseconds, weightUnit="ms", from blinded recording) — groups them by
-slideKey, normalises each contribution (so one long session, or one unit, can't dominate:
-each grid is divided by its own max before averaging, which makes ms-vs-count irrelevant),
-averages them, and writes static assets the atlas website can overlay on its OpenSeadragon
-viewer:
+or "/3" (real dwell-milliseconds, weightUnit="ms", from blinded recording; /3 additionally
+carries an ordered "path" scanpath time-series, which this aggregator ignores — it only
+reads "grid") — groups them by slideKey, normalises each contribution (so one long session,
+or one unit, can't dominate: each grid is divided by its own max before averaging, which
+makes ms-vs-count irrelevant), averages them, and writes static assets the atlas website can
+overlay on its OpenSeadragon viewer:
 
     <out>/<hash>.json    aggregate grid + readers + dimensions   (hash = sha1(slideKey)[:16])
     <out>/<hash>.png     heat preview (same colormap as the extension)
@@ -36,11 +37,14 @@ import sys
 import zlib
 from datetime import date
 
-# schema/1: fixed-weight sample counts (visible-mode "Contribute"). schema/2: real dwell-ms
-# (blinded recording, weightUnit="ms"). Both are accepted — normalise() below scales each
-# contribution's grid by its own max before averaging, so the unit difference washes out.
+# schema/1: fixed-weight sample counts (visible-mode "Contribute"). schema/2 and /3: real
+# dwell-ms (blinded recording, weightUnit="ms"); /3 additionally carries an ordered "path"
+# scanpath, which this aggregator ignores (grid-only). All are accepted — normalise() below
+# scales each contribution's grid by its own max before averaging, so the unit difference
+# washes out.
 SCHEMA_IN = "atlas-focus-contribution/1"
 SCHEMA_IN_BLINDED = "atlas-focus-contribution/2"
+SCHEMA_IN_BLINDED_V3 = "atlas-focus-contribution/3"
 SCHEMA_OUT = "atlas-focus-aggregate/1"
 
 
@@ -53,7 +57,8 @@ def load_contributions(indir):
         except Exception as e:  # noqa: BLE001
             print(f"  skip (unreadable) {path}: {e}", file=sys.stderr)
             continue
-        if d.get("schema") not in (SCHEMA_IN, SCHEMA_IN_BLINDED) or "slideKey" not in d or "grid" not in d:
+        if d.get("schema") not in (SCHEMA_IN, SCHEMA_IN_BLINDED, SCHEMA_IN_BLINDED_V3) \
+                or "slideKey" not in d or "grid" not in d:
             continue
         items.append(d)
     return items

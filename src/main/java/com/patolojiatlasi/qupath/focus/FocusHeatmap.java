@@ -84,9 +84,15 @@ public final class FocusHeatmap {
      * Blinded (research) recording schema: same anonymised shape, but {@code grid} holds real dwell
      * milliseconds (not fixed-weight sample counts) — {@code weightUnit="ms"} tells a reader which.
      * tools/aggregate-focus.py accepts both schemas: it normalises each contribution by its own max
-     * before averaging, so ms-vs-count units don't need reconciling.
+     * before averaging, so ms-vs-count units don't need reconciling. Schema/3 additionally carries
+     * the ordered {@code path} time-series (see {@link #blindedPath}); {@code grid} is unchanged, so
+     * schema/2 readers that ignore unknown fields still work.
      */
-    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/2";
+    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/3";
+    /** Hard cap on recorded scanpath points per blinded slide session — a safety bound against an
+     *  unbounded list on a pathologically long session, not an expected ceiling in practice (20000
+     *  points at the ~250ms sample interval is ~83 minutes of continuous active dwell). */
+    private static final int MAX_PATH_POINTS = 20000;
 
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
@@ -117,6 +123,24 @@ public final class FocusHeatmap {
     /** Ticks since the last blinded checkpoint write; reset in {@link #startBlinded()} and whenever a
      *  fresh slide map is created while blinded (see {@link #switchTo}). */
     private int blindedTicks;
+    /**
+     * Ordered scanpath for the <b>current</b> blinded slide session: one {@code [tRelMs, cx, cy, w,
+     * h]} point per active deposit tick (viewport center + extent, all in slide pixel coordinates,
+     * plus milliseconds since {@link #blindedSlideStartMs}). Appended only in {@link #tickBlinded}
+     * alongside the existing dwell-grid deposit — same guard, same data source ({@code now}/{@code
+     * b}), so it carries no information the grid deposit doesn't already carry, just in sequence.
+     * Reset (cleared) in {@link #startBlinded()} and in {@link #switchTo} whenever a fresh blinded
+     * slide map is created, mirroring {@link #blindedTicks}'s reset points. FX-thread-only to write;
+     * read only via a defensive snapshot ({@code new ArrayList<>(blindedPath)}) at serialization time
+     * in {@link #buildBlindedJson}, so a concurrent append can't corrupt an in-flight write.
+     */
+    private final java.util.List<int[]> blindedPath = new java.util.ArrayList<>();
+    /** Wall-clock start of the current blinded slide session, for {@code blindedPath}'s relative
+     *  timestamps; reset alongside {@code blindedPath} in {@link #startBlinded()} / {@link #switchTo}. */
+    private long blindedSlideStartMs;
+    /** True once {@link #blindedPath} has hit {@link #MAX_PATH_POINTS} for the current slide session,
+     *  so the drop is logged once rather than on every subsequent tick. */
+    private boolean blindedPathCapped;
     /** Guards against registering {@link #flushOnShutdown()} more than once across repeated
      *  start/stop cycles within the same JVM (a shutdown hook can't be usefully "un-added" per
      *  session, so it's registered once and self-guards on {@link #blindedRecording} at fire time). */
@@ -274,6 +298,9 @@ public final class FocusHeatmap {
         File projectDir = qupath.getProject() == null ? null : BlindedResearch.projectDir(qupath.getProject());
         blindedDir = BlindedStore.blindedDir(projectDir, new File(defaultDir(), "contributions"));
         blindedTicks = 0;
+        blindedPath.clear();
+        blindedPathCapped = false;
+        blindedSlideStartMs = System.currentTimeMillis();
         if (!shutdownHookAdded) {
             Runtime.getRuntime().addShutdownHook(new Thread(this::flushOnShutdown, "atlas-blinded-shutdown"));
             shutdownHookAdded = true;
@@ -388,6 +415,17 @@ public final class FocusHeatmap {
                     if (blindedTicks % CHECKPOINT_EVERY_TICKS == 0)
                         checkpointBlinded();
                 }
+                // Ordered scanpath point for this same active-deposit tick — reuses `now` and `b`
+                // from the dwell-grid deposit above; best-effort, must never throw into tick().
+                if (blindedPath.size() < MAX_PATH_POINTS) {
+                    long tRel = now - blindedSlideStartMs;
+                    blindedPath.add(new int[]{(int) tRel, (int) Math.round(b.getX() + b.getWidth() / 2.0),
+                            (int) Math.round(b.getY() + b.getHeight() / 2.0),
+                            (int) Math.round(b.getWidth()), (int) Math.round(b.getHeight())});
+                } else if (!blindedPathCapped) {
+                    blindedPathCapped = true;
+                    logger.info("Blinded scanpath reached {} points; further points dropped.", MAX_PATH_POINTS);
+                }
             }
         }
     }
@@ -486,8 +524,12 @@ public final class FocusHeatmap {
             currentMapBlinded = blindedRecording;
             currentSlide = server.getMetadata().getName();
             currentUri = firstUri(server);
-            if (blindedRecording)
+            if (blindedRecording) {
                 blindedTicks = 0;   // fresh slide map while blinded -> restart the checkpoint cadence
+                blindedPath.clear();
+                blindedPathCapped = false;
+                blindedSlideStartMs = System.currentTimeMillis();
+            }
         } else {
             currentMap = null;
             currentMapBlinded = false;
@@ -718,7 +760,7 @@ public final class FocusHeatmap {
      * artifact of blinded viewing should ever be produced, on disk or otherwise). Written
      * <b>synchronously</b> on the calling thread into {@link #blindedDir} -- the project's
      * {@code atlas-focus/} folder if one was open when {@link #startBlinded()} ran, else the
-     * home-dir fallback -- under schema/2.
+     * home-dir fallback -- under schema/3.
      * <p>
      * Both call sites need the write to have completed before they proceed: {@link #switchTo}
      * deletes the checkpoint immediately after (an in-flight async write followed by a crash would
@@ -748,6 +790,10 @@ public final class FocusHeatmap {
      * Blinded contribution payload — same anonymised shape as {@link #buildContributionJson}, but
      * {@code grid} holds real dwell-milliseconds (not fixed-weight sample counts): {@code
      * weightUnit="ms"} and {@code durationMs} (= {@link FocusMap#getTotalWeight()}) make that explicit.
+     * Schema/3 additionally carries {@code path}: the ordered scanpath for this slide session, one
+     * {@code [tRelMs, cx, cy, w, h]} point per active tick (see {@link #blindedPath}) — a defensive
+     * snapshot ({@code new ArrayList<>(blindedPath)}) is taken here so a concurrent FX-thread append
+     * can't corrupt Gson's in-flight serialization of the list.
      */
     private String buildBlindedJson(String uri, FocusMap map) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -763,6 +809,7 @@ public final class FocusHeatmap {
         m.put("durationMs", map.getTotalWeight());
         m.put("date", java.time.LocalDate.now().toString());
         m.put("grid", map.getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
+        m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h] points; defensive snapshot
         return new GsonBuilder().create().toJson(m);
     }
 
