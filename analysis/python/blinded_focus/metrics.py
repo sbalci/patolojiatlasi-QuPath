@@ -10,6 +10,15 @@ Formulas follow the standard saliency/eye-tracking evaluation literature (Bylins
 "What do different evaluation metrics tell us about saliency models?", IEEE TPAMI 2019, for
 CC/SIM/KLD/NSS/AUC-Judd definitions) and are pinned exactly as specified in the project's design
 doc so that a parallel R toolkit can reproduce the same numbers.
+
+Phase 1 additions (navigation-research upgrade, docs/superpowers/specs/2026-07-22-...): a
+scanpath-rasterized fine dwell grid (``raster_from_path``, independent of the recorded ``grid``
+resolution) plus a zoom/navigation metric family motivated by the literature review's strongest
+diagnostic-accuracy correlates -- avg/variance/range zoom, "magnification percentage" (Ghezloo),
+scanning vs drilling rate (Drew), path velocity/linearity/search-focus (Roa-Peña), and
+cross-session coincidence/region-coverage (Xu/Nan, Roa-Peña). All new formulas are documented
+per-function with the exact edge-case behavior (blank-vs-0.0, ddof, quantile method) an R port
+must match -- see each docstring below.
 """
 import math
 from collections import Counter
@@ -201,7 +210,7 @@ def iou(a, b, thresh=0.1):
 
 
 # ---------------------------------------------------------------------------
-# Scanpath (schema/3 "path" only)
+# Scanpath (schema/3, /4 "path" only)
 # ---------------------------------------------------------------------------
 
 def visited_sequence(path, gw, gh, img_w, img_h):
@@ -293,6 +302,361 @@ def n_revisits(seq):
             revisits += 1
         seen.add(idx)
     return revisits
+
+
+# ---------------------------------------------------------------------------
+# Scanpath -> fine dwell raster (schema/3, /4; independent of the recorded grid resolution)
+# ---------------------------------------------------------------------------
+
+def step_durations_ms(path):
+    """Per-step (``path[i] -> path[i+1]``) time delta in ms, length ``len(path)-1``.
+
+    A step with non-positive ``Δt`` (out-of-order or duplicate timestamps -- defensive, should not
+    happen with a monotonic recorder clock) is clamped to ``0.0`` rather than raising or going
+    negative, so every consumer of this helper (raster_from_path, the zoom-unchanged/velocity
+    helpers below) treats "no time elapsed" uniformly. ``[]`` if ``path`` has fewer than 2 points.
+    R equivalent: ``pmax(0, diff(t))``.
+    """
+    if not path or len(path) < 2:
+        return []
+    out = []
+    for i in range(len(path) - 1):
+        dt = float(path[i + 1][0]) - float(path[i][0])
+        out.append(dt if dt > 0 else 0.0)
+    return out
+
+
+def raster_from_path(path, img_w, img_h, gw, gh, step_mask=None):
+    """Rebuild a ``gh x gw`` dwell-ms grid directly from the scanpath, independent of the
+    recorded ``grid`` resolution -- this is what makes a 40x+ (very zoomed-in) navigation
+    faithfully resolvable at any chosen output resolution (``gw``, ``gh``), unlike the recorder's
+    fixed-size ``grid``.
+
+    For each consecutive pair of points ``path[i] -> path[i+1]``: the elapsed time
+    ``Δt = step_durations_ms(path)[i]`` is attributed to the **viewport rectangle of point i**
+    (center ``(cx, cy)``, extent ``(w, h)``, all in image px) -- i.e. the view the user was
+    actually looking at during that interval -- clamped to the image bounds ``[0, img_w] x
+    [0, img_h]``, then divided **evenly** across every grid cell the clamped rectangle overlaps
+    (cell membership by the standard "floor" cell-index convention used throughout this module:
+    a rect spanning image-px range ``[x0, x1)`` covers grid columns
+    ``floor(x0/img_w*gw) .. ceil(x1/img_w*gw)-1`` -- the ``ceil(...)-1`` upper bound, rather than
+    ``floor``, is so a rect edge sitting exactly on a cell boundary does not spuriously include
+    the next cell; same convention for rows). If the clamped rectangle collapses to nothing
+    (viewport entirely off-image), the whole ``Δt`` instead lands on the single cell containing
+    the (clamped) center point. Steps with ``Δt <= 0`` contribute nothing.
+
+    ``step_mask``, if given, is a boolean sequence of length ``len(path)-1``; steps where it is
+    ``False`` are skipped entirely (used by the magnification-band split to build one raster per
+    zoom band from the same path). Default (``None``) includes every step.
+
+    Returns a flat ``(gw*gh,)`` float array (dwell-ms per cell), or **``None``** if ``path`` has
+    fewer than 2 points (a Δt requires two points; single-point/empty paths carry no raster).
+    """
+    if not path or len(path) < 2:
+        return None
+    gw, gh = int(gw), int(gh)
+    img_w = float(img_w) if img_w else 1.0
+    img_h = float(img_h) if img_h else 1.0
+    dts = step_durations_ms(path)
+    grid = np.zeros((gh, gw), dtype=float)
+    for i, dt in enumerate(dts):
+        if dt <= 0:
+            continue
+        if step_mask is not None and not step_mask[i]:
+            continue
+        cx, cy = float(path[i][1]), float(path[i][2])
+        w = float(path[i][3]) if float(path[i][3]) > 0 else 1.0
+        h = float(path[i][4]) if float(path[i][4]) > 0 else 1.0
+        x0, x1 = max(0.0, cx - w / 2.0), min(img_w, cx + w / 2.0)
+        y0, y1 = max(0.0, cy - h / 2.0), min(img_h, cy + h / 2.0)
+        if x1 <= x0 or y1 <= y0:
+            # Viewport rect is entirely outside the image after clamping -- fall back to the
+            # single cell containing the (clamped) center point rather than dropping the Δt.
+            ccx = min(max(cx, 0.0), img_w - EPS)
+            ccy = min(max(cy, 0.0), img_h - EPS)
+            col = min(max(int(math.floor(ccx / img_w * gw)), 0), gw - 1)
+            row = min(max(int(math.floor(ccy / img_h * gh)), 0), gh - 1)
+            grid[row, col] += dt
+            continue
+        col0 = min(max(int(math.floor(x0 / img_w * gw)), 0), gw - 1)
+        col1 = min(max(int(math.ceil(x1 / img_w * gw)) - 1, 0), gw - 1)
+        row0 = min(max(int(math.floor(y0 / img_h * gh)), 0), gh - 1)
+        row1 = min(max(int(math.ceil(y1 / img_h * gh)) - 1, 0), gh - 1)
+        if col1 < col0:
+            col1 = col0
+        if row1 < row0:
+            row1 = row0
+        n_cells = (col1 - col0 + 1) * (row1 - row0 + 1)
+        grid[row0:row1 + 1, col0:col1 + 1] += dt / n_cells
+    return grid.flatten()
+
+
+# ---------------------------------------------------------------------------
+# Zoom / magnification (schema/4 dsMilli+baseMagnification; schema/3 w-proxy fallback)
+# ---------------------------------------------------------------------------
+
+def point_zoom(point, base_mag=None, img_w=None):
+    """Magnification (or a zoom proxy, when the true value is unavailable) for one scanpath
+    point, in documented fallback order -- **higher value always means "more zoomed in"** in
+    every branch, so the three cases stay comparable within one path/session even when they
+    can't be compared in absolute terms across sessions with different fallback levels:
+
+    1. ``base_mag`` known (fragment-level, schema/4) **and** the point has a 6th element
+       (``dsMilli``, schema/4): true magnification = ``base_mag / (dsMilli / 1000.0)``.
+    2. Point has ``dsMilli`` (6 elements, schema/4) but ``base_mag`` is ``None``/unknown: a
+       unitless zoom level = ``1000.0 / dsMilli`` (== ``1 / downsample``).
+    3. Point has no ``dsMilli`` (5 elements, schema/3): a width-proxy zoom =
+       ``img_w / w`` (``w`` = visible viewport width in image px at that tick; since ``w``
+       grows with the downsample factor, this ratio also grows with true zoom, on the same
+       "larger = more zoomed in" convention as branches 1/2 -- but on a different, session/
+       window-size-dependent numeric scale, so it must not be compared across sessions or mixed
+       with branches 1/2 within one metric).
+
+    ``dsMilli <= 0`` or ``w <= 0`` are treated defensively as full-resolution / 1px respectively
+    (malformed-data guard; should not occur with a well-behaved recorder).
+    """
+    has_ds = len(point) >= 6
+    if has_ds:
+        ds_milli = float(point[5])
+        if ds_milli <= 0:
+            ds_milli = 1000.0
+        if base_mag is not None and float(base_mag) > 0:
+            return float(base_mag) / (ds_milli / 1000.0)
+        return 1000.0 / ds_milli
+    w = float(point[3])
+    if w <= 0:
+        w = 1.0
+    iw = float(img_w) if img_w else 1.0
+    return iw / w
+
+
+def _zoom_series(path, base_mag=None, img_w=None):
+    """``point_zoom`` for every point in ``path``, as a numpy array (empty if ``path`` is
+    empty/``None``)."""
+    if not path:
+        return np.array([], dtype=float)
+    return np.array([point_zoom(p, base_mag, img_w) for p in path], dtype=float)
+
+
+def avg_zoom(path, base_mag=None, img_w=None):
+    """Mean of :func:`point_zoom` over every point in the path. ``0.0`` for an empty path."""
+    z = _zoom_series(path, base_mag, img_w)
+    return float(z.mean()) if z.size else 0.0
+
+
+def zoom_variance(path, base_mag=None, img_w=None):
+    """Sample variance (``ddof=1`` -- matches R's default ``var()``) of :func:`point_zoom` over
+    every point in the path. ``0.0`` (not NaN/NA) if the path has fewer than 2 points -- R's
+    ``var()`` returns ``NA`` on a length-1 input, so an R port must special-case ``n<2 -> 0`` to
+    match this."""
+    z = _zoom_series(path, base_mag, img_w)
+    return float(z.var(ddof=1)) if z.size >= 2 else 0.0
+
+
+def zoom_range(path, base_mag=None, img_w=None):
+    """``max(point_zoom) - min(point_zoom)`` over the path. ``0.0`` for an empty path."""
+    z = _zoom_series(path, base_mag, img_w)
+    return float(z.max() - z.min()) if z.size else 0.0
+
+
+def magnification_percentage(path, base_mag=None, img_w=None):
+    """Fraction of consecutive scanpath transitions that are zoom-IN or same-zoom (a
+    "consecutive zooming" measure after Ghezloo): ``|{i : zoom[i+1] >= zoom[i]}| / (n-1)`` where
+    ``zoom = point_zoom(path[i])`` and ``n = len(path)``. Exact ``>=`` comparison, no tolerance:
+    :func:`point_zoom` is a deterministic function of integer-quantized inputs (``dsMilli``,
+    rounded ``w``) plus a fragment-constant ``base_mag``, so two ticks at a held zoom level
+    produce bit-identical floats -- a tolerance would only be needed if this were re-derived from
+    a noisy/continuous zoom signal, which it is not.
+
+    ``0.0`` if the path has fewer than 2 points (no transitions -- not NaN/NA)."""
+    if not path or len(path) < 2:
+        return 0.0
+    zooms = _zoom_series(path, base_mag, img_w)
+    diffs = zooms[1:] - zooms[:-1]
+    return float(np.count_nonzero(diffs >= 0)) / len(diffs)
+
+
+def _step_zoom_changed(path, base_mag=None, img_w=None):
+    """Per-step boolean (length ``len(path)-1``): ``True`` iff ``point_zoom`` differs (exact
+    ``!=``, see :func:`magnification_percentage`'s determinism note) between the step's two
+    endpoints. Caveat for schema/3 (w-proxy) paths: a mid-session viewer-window resize changes
+    ``w`` without the user having zoomed, and would misread here as a zoom-change step; schema/4
+    (``dsMilli``-based) zoom is not affected by window resizes."""
+    zooms = _zoom_series(path, base_mag, img_w)
+    return zooms[1:] != zooms[:-1]
+
+
+def scanning_rate_px_per_min(path, base_mag=None, img_w=None):
+    """"Scanning" rate (px/min): total center pan-distance (Euclidean, consecutive points)
+    accumulated over steps where zoom is unchanged (see :func:`_step_zoom_changed`) -- panning
+    around at a held zoom level, as opposed to "drilling" (see :func:`drilling_rate_per_min`) --
+    **normalized by the path's total duration** (``t[-1] - t[0]``, in minutes; the design doc
+    does not pin this denominator, so this is documented as the deliberate choice: total session
+    time, not time-spent-scanning, so the rate is comparable across sessions with different
+    scanning/drilling mixes). ``0.0`` if the path has fewer than 2 points or non-positive total
+    duration."""
+    if not path or len(path) < 2:
+        return 0.0
+    duration_min = (float(path[-1][0]) - float(path[0][0])) / 60000.0
+    if duration_min <= 0:
+        return 0.0
+    changed = _step_zoom_changed(path, base_mag, img_w)
+    pan = 0.0
+    for i in range(len(path) - 1):
+        if not changed[i]:
+            x0, y0 = float(path[i][1]), float(path[i][2])
+            x1, y1 = float(path[i + 1][1]), float(path[i + 1][2])
+            pan += math.hypot(x1 - x0, y1 - y0)
+    return pan / duration_min
+
+
+def drilling_rate_per_min(path, base_mag=None, img_w=None):
+    """"Drilling" rate (events/min): count of zoom-change steps (see :func:`_step_zoom_changed`)
+    per minute of the path's total duration (same denominator as
+    :func:`scanning_rate_px_per_min`). ``0.0`` if the path has fewer than 2 points or non-positive
+    total duration."""
+    if not path or len(path) < 2:
+        return 0.0
+    duration_min = (float(path[-1][0]) - float(path[0][0])) / 60000.0
+    if duration_min <= 0:
+        return 0.0
+    changed = _step_zoom_changed(path, base_mag, img_w)
+    return float(np.count_nonzero(changed)) / duration_min
+
+
+def zoom_band_labels(path, base_mag=None, img_w=None, n_bands=3):
+    """Assign each *step* (``path[i] -> path[i+1]``, the point-i-owns-the-step convention used by
+    :func:`raster_from_path`) to one of ``n_bands`` zoom bands (band ``0`` = lowest zoom,
+    ``n_bands-1`` = highest), by **within-path quantile cut points** (terciles by default: cuts at
+    the ``1/n_bands, 2/n_bands, ...`` quantiles of the per-step :func:`point_zoom` values).
+
+    Quantiles use numpy's default (linear-interpolation) method, which is numerically identical
+    to R's ``quantile(x, probs, type=7)`` (R's default) on the same input -- so an R port using
+    plain ``quantile()`` reproduces the same cut points bit-for-bit. Band assignment is
+    ``np.searchsorted(cuts, zooms, side="right")``, equivalent to R's ``findInterval(zooms,
+    cuts)``.
+
+    Returns a list of length ``len(path)-1`` (one band index per step), or ``[]`` if the path has
+    fewer than 2 points.
+    """
+    if not path or len(path) < 2:
+        return []
+    zooms = np.array([point_zoom(p, base_mag, img_w) for p in path[:-1]], dtype=float)
+    if n_bands < 2:
+        return [0] * len(zooms)
+    qs = [i / n_bands for i in range(1, n_bands)]
+    cuts = np.quantile(zooms, qs)
+    bands = np.searchsorted(cuts, zooms, side="right")
+    return bands.tolist()
+
+
+# ---------------------------------------------------------------------------
+# Path descriptors (Roa-Peña)
+# ---------------------------------------------------------------------------
+
+def _step_velocities_px_per_sec(path):
+    """Per-step instantaneous speed (image px/sec): ``distance(i, i+1) / (Δt/1000)``. A step with
+    non-positive ``Δt`` (see :func:`step_durations_ms`) gets velocity ``0.0`` (treated as "no
+    motion" rather than undefined/dropped) so every step contributes a well-defined value.
+    Length ``len(path)-1``; ``[]`` if ``path`` has fewer than 2 points."""
+    if not path or len(path) < 2:
+        return []
+    dts = step_durations_ms(path)
+    out = []
+    for i, dt in enumerate(dts):
+        if dt <= 0:
+            out.append(0.0)
+            continue
+        x0, y0 = float(path[i][1]), float(path[i][2])
+        x1, y1 = float(path[i + 1][1]), float(path[i + 1][2])
+        out.append(math.hypot(x1 - x0, y1 - y0) / (dt / 1000.0))
+    return out
+
+
+def path_velocity_px_per_sec(path):
+    """Median of per-step velocities (see :func:`_step_velocities_px_per_sec`). ``0.0`` (not
+    NaN/NA) if the path has fewer than 2 points."""
+    vels = _step_velocities_px_per_sec(path)
+    return float(np.median(vels)) if vels else 0.0
+
+
+def linearity(path):
+    """Net displacement (straight-line first-point -> last-point distance) divided by the total
+    scanpath length (:func:`scanpath_length_px`, sum of consecutive-step distances) -- 1.0 for a
+    dead-straight path, near 0 for a path that wanders back on itself. ``0.0`` if the total length
+    is 0 (degenerate/empty/stationary path -- avoids division by zero)."""
+    if not path or len(path) < 2:
+        return 0.0
+    x0, y0 = float(path[0][1]), float(path[0][2])
+    x1, y1 = float(path[-1][1]), float(path[-1][2])
+    net = math.hypot(x1 - x0, y1 - y0)
+    total = scanpath_length_px(path)
+    return net / total if total > 0 else 0.0
+
+
+def search_focus_ratio(path, base_mag=None, img_w=None):
+    """Fraction of dwell-time spent in "focused" steps, Δt-weighted (same
+    step-i-owns-point-i convention as :func:`raster_from_path`/:func:`step_durations_ms`).
+
+    A step (``path[i] -> path[i+1]``) counts as **focused** iff *either*:
+
+    - ``point_zoom(path[i]) >= median(per-step zooms for this path)`` (high zoom), **or**
+    - its velocity (:func:`_step_velocities_px_per_sec`) ``<= median(per-step velocities for this
+      path)`` (low velocity -- includes stationary/paused steps, which get velocity 0 and are
+      always <= the median).
+
+    Both thresholds are the path's own median (data-driven per session, not a fixed absolute
+    pixel/magnification cutoff -- documented here for an R port to reuse ``median()`` identically).
+    ``0.0`` if the path has fewer than 2 points or zero total Δt."""
+    if not path or len(path) < 2:
+        return 0.0
+    n = len(path) - 1
+    zooms = np.array([point_zoom(path[i], base_mag, img_w) for i in range(n)], dtype=float)
+    dts = np.array(step_durations_ms(path), dtype=float)
+    vels = np.array(_step_velocities_px_per_sec(path), dtype=float)
+    zoom_thresh = float(np.median(zooms))
+    vel_thresh = float(np.median(vels))
+    focused = (zooms >= zoom_thresh) | (vels <= vel_thresh)
+    total_dt = float(dts.sum())
+    if total_dt <= 0:
+        return 0.0
+    return float(dts[focused].sum() / total_dt)
+
+
+# ---------------------------------------------------------------------------
+# Cross-session consistency (dwell grids; Xu/Nan, Roa-Peña)
+# ---------------------------------------------------------------------------
+
+def coincidence_level(grids, thresh=0.1):
+    """Fraction of cells that are above-threshold (``> thresh`` of each grid's own max, via
+    :func:`normalise_max`) in **2 or more** of the given grids (already resampled to a common
+    shape). Roa-Peña reports ~70.5% with this style of rule on real multi-reader data.
+
+    ``float("nan")`` if fewer than 2 grids are given (undefined for a single reader); ``0.0`` for
+    an empty (zero-cell) grid shape."""
+    grids = list(grids)
+    if len(grids) < 2:
+        return float("nan")
+    normed = [normalise_max(g) for g in grids]
+    counts = np.zeros_like(normed[0], dtype=float)
+    for g in normed:
+        counts += (g > thresh).astype(float)
+    return float(np.count_nonzero(counts >= 2)) / counts.size if counts.size else 0.0
+
+
+def region_coverage_pct(session_grid, consensus_grid, thresh=0.1):
+    """Percentage of the consensus's above-threshold cells (``> thresh`` of its own max) that
+    this session's grid *also* has above its own threshold -- "how much of the group's attended
+    region did this reader cover", per session. ``0.0`` if the consensus grid has no
+    above-threshold cells (nothing to cover)."""
+    cons = normalise_max(consensus_grid)
+    sess = normalise_max(session_grid)
+    cons_mask = cons > thresh
+    n = int(cons_mask.sum())
+    if n == 0:
+        return 0.0
+    covered = int(np.logical_and(cons_mask, sess > thresh).sum())
+    return float(covered) / n * 100.0
 
 
 # ---------------------------------------------------------------------------

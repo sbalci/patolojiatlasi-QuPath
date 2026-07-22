@@ -64,7 +64,7 @@ public final class FocusHeatmap {
 
     private static final Logger logger = LoggerFactory.getLogger(FocusHeatmap.class);
 
-    private static final int GRID_MAX = 256;      // longest grid side, in cells
+    private static final int GRID_MAX = 512;      // longest grid side, in cells
     private static final int SAMPLE_MS = 250;     // viewport sampling interval
     private static final int REFRESH_EVERY = 4;   // rebuild the overlay every N samples (~1s)
     private static final double OVERLAY_OPACITY = 0.5;
@@ -86,9 +86,12 @@ public final class FocusHeatmap {
      * tools/aggregate-focus.py accepts both schemas: it normalises each contribution by its own max
      * before averaging, so ms-vs-count units don't need reconciling. Schema/3 additionally carries
      * the ordered {@code path} time-series (see {@link #blindedPath}); {@code grid} is unchanged, so
-     * schema/2 readers that ignore unknown fields still work.
+     * schema/2 readers that ignore unknown fields still work. Schema/4 additionally carries a
+     * per-point downsample ({@code dsMilli}, see {@link #blindedPath}) and a fragment-level {@code
+     * baseMagnification} (nullable) — both additive; a schema/3 reader that ignores unknown fields
+     * still works.
      */
-    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/3";
+    private static final String CONTRIBUTION_SCHEMA_BLINDED = "atlas-focus-contribution/4";
     /** Hard cap on recorded scanpath points per blinded slide session — a safety bound against an
      *  unbounded list on a pathologically long session, not an expected ceiling in practice (20000
      *  points at the ~250ms sample interval is ~83 minutes of continuous active dwell). */
@@ -125,12 +128,14 @@ public final class FocusHeatmap {
     private int blindedTicks;
     /**
      * Ordered scanpath for the <b>current</b> blinded slide session: one {@code [tRelMs, cx, cy, w,
-     * h]} point per active tick (viewport center + extent, all in slide pixel coordinates, plus
-     * milliseconds since {@link #blindedSlideStartMs}). Appended in {@link #tickBlinded} for every
-     * tick where the app is focused and a slide is open (i.e. {@code ms > 0}), independent of
-     * whether the same tick's dwell-grid deposit ({@code currentMap.deposit(...)}) actually landed
-     * on the image — so {@code path} may carry a point for a tick the {@code grid} accumulation
-     * didn't credit.
+     * h, dsMilli]} point per active tick (viewport center + extent, all in slide pixel coordinates,
+     * plus milliseconds since {@link #blindedSlideStartMs}, plus the viewer's downsample factor at
+     * that tick times 1000, rounded to an integer — {@code dsMilli = round(viewer.getDownsampleFactor()
+     * * 1000)} — kept as a scaled integer so the JSON stays compact; 1.0 downsample = full resolution,
+     * higher = more zoomed out). Appended in {@link #tickBlinded} for every tick where the app is
+     * focused and a slide is open (i.e. {@code ms > 0}), independent of whether the same tick's
+     * dwell-grid deposit ({@code currentMap.deposit(...)}) actually landed on the image — so {@code
+     * path} may carry a point for a tick the {@code grid} accumulation didn't credit.
      * Reset (cleared) in {@link #startBlinded()} and in {@link #switchTo} whenever a fresh blinded
      * slide map is created, mirroring {@link #blindedTicks}'s reset points. FX-thread-only to write;
      * read only via a defensive snapshot ({@code new ArrayList<>(blindedPath)}) at serialization time
@@ -421,9 +426,10 @@ public final class FocusHeatmap {
                 // from the dwell-grid deposit above; best-effort, must never throw into tick().
                 if (blindedPath.size() < MAX_PATH_POINTS) {
                     long tRel = now - blindedSlideStartMs;
+                    int dsMilli = (int) Math.round(v.getDownsampleFactor() * 1000);
                     blindedPath.add(new int[]{(int) tRel, (int) Math.round(b.getX() + b.getWidth() / 2.0),
                             (int) Math.round(b.getY() + b.getHeight() / 2.0),
-                            (int) Math.round(b.getWidth()), (int) Math.round(b.getHeight())});
+                            (int) Math.round(b.getWidth()), (int) Math.round(b.getHeight()), dsMilli});
                 } else if (!blindedPathCapped) {
                     blindedPathCapped = true;
                     logger.info("Blinded scanpath reached {} points; further points dropped.", MAX_PATH_POINTS);
@@ -795,7 +801,12 @@ public final class FocusHeatmap {
      * Schema/3 additionally carries {@code path}: the ordered scanpath for this slide session, one
      * {@code [tRelMs, cx, cy, w, h]} point per active tick (see {@link #blindedPath}) — a defensive
      * snapshot ({@code new ArrayList<>(blindedPath)}) is taken here so a concurrent FX-thread append
-     * can't corrupt Gson's in-flight serialization of the list.
+     * can't corrupt Gson's in-flight serialization of the list. Schema/4 extends each path point to
+     * {@code [tRelMs, cx, cy, w, h, dsMilli]} (the viewer's downsample factor at that tick, ×1000) and
+     * adds a fragment-level {@code baseMagnification} (the slide's objective power, or {@code null}
+     * when unavailable) so a later analysis pass can derive true magnification as {@code
+     * baseMagnification / (dsMilli / 1000.0)}. Both additions are read defensively — no throw into the
+     * sampling timer or a checkpoint/shutdown write if metadata is missing.
      */
     private String buildBlindedJson(String uri, FocusMap map) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -811,8 +822,17 @@ public final class FocusHeatmap {
         m.put("durationMs", map.getTotalWeight());
         m.put("date", java.time.LocalDate.now().toString());
         m.put("grid", map.getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
-        m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h] points; defensive snapshot
+        m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h,dsMilli] points; defensive snapshot
         m.put("pathTruncated", blindedPathCapped);   // true if MAX_PATH_POINTS was hit and points were dropped
+        Double baseMag = null;
+        try {
+            double x = currentImageData.getServer().getMetadata().getMagnification();
+            if (!Double.isNaN(x) && x > 0)
+                baseMag = x;
+        } catch (Exception ignored) {
+            // currentImageData/server/metadata unavailable, or magnification unreadable -- leave null.
+        }
+        m.put("baseMagnification", baseMag);   // objective power for the fragment's slide, or null if unknown
         return new GsonBuilder().create().toJson(m);
     }
 

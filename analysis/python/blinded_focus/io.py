@@ -1,12 +1,25 @@
 """Fragment loading for blinded-focus contribution JSON.
 
 Fragment schema (produced by the QuPath extension's blinded-focus recording feature):
-``atlas-focus-contribution/{1,2,3}``. Common fields: ``slideKey``, ``sessionId``,
+``atlas-focus-contribution/{1,2,3,4}``. Common fields: ``slideKey``, ``sessionId``,
 ``imageWidth``, ``imageHeight``, ``gridWidth``, ``gridHeight``, ``grid`` (row-major, length
-``gridWidth*gridHeight``; milliseconds for schema /2 and /3, fixed-weight sample counts for
-schema /1), ``durationMs`` (/2, /3), ``sampleCount``, ``date``. Schema /3 additionally carries an
-ordered ``path``: a list of ``[tRelMs, cx, cy, w, h]`` integers (viewport center + visible extent
-in image pixels, time relative to the start of that slide's blinded recording).
+``gridWidth*gridHeight``; milliseconds for schema /2, /3, /4, fixed-weight sample counts for
+schema /1), ``durationMs`` (/2, /3, /4), ``sampleCount``, ``date``. Schema /3 and /4 additionally
+carry an ordered ``path`` (viewport center + visible extent in image pixels, time relative to the
+start of that slide's blinded recording):
+
+- schema/3 points are 5-element ``[tRelMs, cx, cy, w, h]``.
+- schema/4 points are 6-element ``[tRelMs, cx, cy, w, h, dsMilli]`` — ``dsMilli`` is the viewer's
+  downsample factor at that tick, times 1000 (integer, so ``downsample = dsMilli / 1000.0``).
+  Schema/4 also adds a fragment-level ``baseMagnification`` (the slide's objective power as a
+  number, or ``null``/absent when unknown) and ``pathTruncated`` (bool: true if the recorder's
+  point cap was hit and further points were dropped). See ``blinded_focus.metrics.point_zoom``
+  for how ``dsMilli``/``baseMagnification`` combine (or fall back) into a magnification value.
+
+This module treats schema purely by field shape — it does not branch on the ``schema`` string
+beyond membership in :data:`SCHEMAS`; downstream code (``metrics.py``, ``analyze.py``) detects
+5- vs 6-element points by ``len(point)`` and reads ``baseMagnification``/``pathTruncated`` via
+``dict.get(...)`` so /1, /2, /3 fragments (which lack those fields) degrade gracefully.
 
 "User" = ``sessionId`` (one recording sitting); identity mapping to a human label is out-of-band
 (see ``load_labels``) — the fragment data itself stays anonymous.
@@ -21,11 +34,13 @@ import sys
 import zipfile
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
-#: /2, /3 = real dwell-ms (blinded recording, weightUnit="ms"). /3 additionally has "path".
+#: /2, /3, /4 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ add a "path"; /4 path
+#: points carry a 6th element dsMilli (downsample×1000) and the fragment carries baseMagnification.
 SCHEMAS = {
     "atlas-focus-contribution/1",
     "atlas-focus-contribution/2",
     "atlas-focus-contribution/3",
+    "atlas-focus-contribution/4",
 }
 
 
@@ -69,7 +84,8 @@ def load_fragments(paths):
 
     ``paths`` may mix any of: a single fragment ``.json`` file, a directory (recursively globbed
     for ``*.json``), or a ``.zip`` archive (its ``*.json`` entries are read directly, no
-    extraction to disk). Only dicts whose ``schema`` is in :data:`SCHEMAS` and that carry
+    extraction to disk). Only dicts whose ``schema`` is in :data:`SCHEMAS` (``{1,2,3,4}``) and
+    that carry
     ``slideKey``/``grid``/``gridWidth``/``gridHeight`` are kept; anything else (unreadable JSON,
     unrelated files, wrong schema) is silently skipped.
 
