@@ -362,7 +362,11 @@ get_annotations <- function(fragment) {
 
 #' Return a fragment's `decision` object (a list with at least a single-string `diagnosis`) or an
 #' empty list when the field is absent or malformed -- so schema/1-5 fragments recorded without a
-#' decision (or with a corrupt one) degrade to blank decision columns, never a crash.
+#' decision (or with a corrupt one) degrade to blank decision columns, never a crash. The returned
+#' list is passed through as-is, so an optional `promptShownMs` (Tier 3 C5, added 2026-07-23) reads
+#' normally via `dec$promptShownMs` when present and is simply absent (`NULL`) for a decision
+#' recorded before the recorder gained that field -- the caller degrades that to a blank
+#' `decisions.csv` cell, never a crash.
 get_decision <- function(fragment) {
   dec <- fragment$decision
   if (!is.null(dec) && is.list(dec) && !is.null(dec$diagnosis) &&
@@ -3071,6 +3075,21 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         NA_real_
       }
       decision_ms <- if (!is.null(dec$decisionMs)) as.numeric(dec$decisionMs) else NA_real_
+      # Tier 3 C5 (2026-07-23): promptShownMs is a passthrough, mirroring decisionMs's own handling
+      # immediately above -- absent (older fragment, recorded before the recorder gained this
+      # field) degrades to NA/blank, never a crash. responseLatencyMs = decisionMs - promptShownMs
+      # is computed only when BOTH are real numbers (is.numeric already excludes logical values,
+      # same rationale as confidence's guard below).
+      prompt_shown_ms <- if (!is.null(dec$promptShownMs) && is.numeric(dec$promptShownMs)) {
+        as.numeric(dec$promptShownMs)
+      } else {
+        NA_real_
+      }
+      response_latency_ms <- if (!is.na(decision_ms) && !is.na(prompt_shown_ms)) {
+        decision_ms - prompt_shown_ms
+      } else {
+        NA_real_
+      }
       # Blank iff absent/NULL or its string form is empty; otherwise the string form -- so a
       # numeric 0 sessionId stably maps to "0" (this already matched that rule before the Python
       # parity fix: `nzchar(as.character(0))` is TRUE since "0" has 1 char, so this line needs no
@@ -3093,14 +3112,20 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         confidence = if (!is.null(confidence) && is.numeric(confidence)) as.numeric(confidence) else NA_real_,
         confidenceScaled = conf_scaled,
         decisionMs = decision_ms,
-        # == decisionMs (both are relative to the slide's recording start); kept as a separate
-        # column so a future recorder revision that captures a distinct "time from leave-prompt to
-        # submit" value has a column ready to diverge into.
+        # == decisionMs (both relative to the slide's recording start): "time from slide open to
+        # submit". Tier 3 C5 (2026-07-23) added the recorder's promptShownMs, which made the
+        # previously-anticipated "time from leave-prompt to submit" column real -- that's
+        # responseLatencyMs below, appended as its own column rather than replacing this one.
+        # decisionLatencyMs itself stays permanently == decisionMs.
         decisionLatencyMs = decision_ms,
         correctDx = correct_dx,
         # blank unless --graded supplied a (slideKey, sessionId) row -- NEVER auto-derived from
         # diagnosis == correctDx string comparison.
-        correct = graded_val
+        correct = graded_val,
+        # Tier 3 C5 (appended, additive): passthrough of the recorder's dialog-shown timestamp and
+        # the derived once-prompted response latency. See the guard comments above.
+        promptShownMs = prompt_shown_ms,
+        responseLatencyMs = response_latency_ms
       )
     }
 
@@ -3613,7 +3638,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     write_csv_tidy(
       decision_rows, file.path(out_dir, "decisions.csv"),
       c("slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
-        "decisionMs", "decisionLatencyMs", "correctDx", "correct")
+        "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+        # Tier 3 C5 (2026-07-23): appended, existing column order above is unchanged.
+        "promptShownMs", "responseLatencyMs")
     )
   } else {
     message("warning: no decisions found in any fragment; decisions.csv not written")

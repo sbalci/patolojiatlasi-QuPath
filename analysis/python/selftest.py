@@ -240,11 +240,16 @@ def _fragment(
     return d
 
 
-def _decision(diagnosis, confidence, decision_ms):
+def _decision(diagnosis, confidence, decision_ms, prompt_shown_ms=None):
     """A synthetic hand-entered decision object -- {"diagnosis", "confidence", "decisionMs"} --
     matching what the QuPath extension's blinded-focus recorder writes into a fragment's
-    ``decision`` field."""
-    return {"diagnosis": diagnosis, "confidence": confidence, "decisionMs": decision_ms}
+    ``decision`` field. ``prompt_shown_ms`` (Tier 3 C5, added 2026-07-23) is OPTIONAL and omitted
+    by default -- a decision built without it is deliberately old-style, exercising the
+    absent-``promptShownMs`` blank-degrade path in ``decisions.csv``."""
+    d = {"diagnosis": diagnosis, "confidence": confidence, "decisionMs": decision_ms}
+    if prompt_shown_ms is not None:
+        d["promptShownMs"] = prompt_shown_ms
+    return d
 
 
 def build_fragments():
@@ -257,16 +262,19 @@ def build_fragments():
 
     # s1: schema/5, 8-element path (varying dsMilli + mouse, some off-slide) + a known
     # baseMagnification + an annotation overlapping its own dwell center. Also carries a Phase 3
-    # decision (diagnosis="tumor", confidence=4 -> confidenceScaled=(4-1)/4=0.75).
+    # decision (diagnosis="tumor", confidence=4 -> confidenceScaled=(4-1)/4=0.75), now WITH a Tier
+    # 3 C5 promptShownMs=1200 -> responseLatencyMs = 5000-1200 = 3800.
     f1 = _fragment(
         "s1", 5, grid_s1, 40 * 250, 40,
         path=_make_path_v5(2, 2, n=40, seed=101),
         base_magnification=40.0, path_truncated=False,
         annotations=shared_annotation,
-        decision=_decision("tumor", 4, 5000),
+        decision=_decision("tumor", 4, 5000, prompt_shown_ms=1200),
     )
     # s2: schema/3, 5-element path (w-proxy zoom fallback; no dsMilli/baseMagnification/annotations).
-    # Also carries a Phase 3 decision (diagnosis="benign", confidence=2).
+    # Also carries a Phase 3 decision (diagnosis="benign", confidence=2) -- deliberately OLD-STYLE
+    # (no promptShownMs), exercising the C5 blank-degrade path for a fragment recorded before the
+    # recorder gained promptShownMs.
     f2 = _fragment(
         "s2", 3, grid_s2, 35 * 250, 35, path=_make_path(2, 2, n=35, seed=102),
         decision=_decision("benign", 2, 5000),
@@ -658,7 +666,11 @@ def check_decisions(out_dir):
     """Phase 3: ``decisions.csv`` exists with one row per (slide, session), hand-grade-only
     columns populated for the sessions that carry a ``decision`` (s1, s2) and blank for the ones
     that don't (s3, s4) -- and, absent ``--graded``, every row's ``correct`` is blank (nothing is
-    ever auto-derived from ``diagnosis``)."""
+    ever auto-derived from ``diagnosis``).
+
+    Tier 3 C5: ``promptShownMs``/``responseLatencyMs`` are populated only for s1 (the one fixture
+    decision carrying a synthetic ``promptShownMs``); s2's decision is deliberately old-style (no
+    ``promptShownMs``) and must degrade both new columns to blank, never crash."""
     path = os.path.join(out_dir, "decisions.csv")
     assert os.path.isfile(path), "decisions.csv missing"
     with open(path, newline="", encoding="utf-8") as fh:
@@ -667,6 +679,7 @@ def check_decisions(out_dir):
     expected_cols = [
         "slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
         "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+        "promptShownMs", "responseLatencyMs",
     ]
     assert list(rows[0].keys()) == expected_cols, list(rows[0].keys())
 
@@ -677,11 +690,30 @@ def check_decisions(out_dir):
     assert s1["confidenceScaled"] == "0.75", s1["confidenceScaled"]
     assert s1["decisionMs"] not in ("", None), "s1 decisionMs should be non-empty"
     assert s1["decisionLatencyMs"] not in ("", None), "s1 decisionLatencyMs should be non-empty"
+    # Tier 3 C5: s1 carries a synthetic promptShownMs=1200 (decisionMs=5000) -> responseLatencyMs
+    # = decisionMs - promptShownMs = 3800.
+    assert s1["promptShownMs"] == "1200", s1["promptShownMs"]
+    assert s1["responseLatencyMs"] == "3800", s1["responseLatencyMs"]
+
+    s2 = by_session["s2"]
+    assert s2["diagnosis"] == "benign", s2["diagnosis"]
+    # s2's decision is deliberately old-style (no promptShownMs) -- both new columns must degrade
+    # to blank, never crash, and decisionMs/decisionLatencyMs must stay unaffected.
+    assert s2["decisionMs"] not in ("", None), "s2 decisionMs should be non-empty (unaffected by C5)"
+    assert s2["promptShownMs"] == "", f"s2 (old-style, no promptShownMs) should be blank, got {s2['promptShownMs']!r}"
+    assert s2["responseLatencyMs"] == "", (
+        f"s2 (old-style, no promptShownMs) should have blank responseLatencyMs, got {s2['responseLatencyMs']!r}"
+    )
 
     s3 = by_session["s3"]
     assert s3["diagnosis"] == "", f"undecided session should have blank diagnosis, got {s3['diagnosis']!r}"
     assert s3["confidence"] == "", f"undecided session should have blank confidence, got {s3['confidence']!r}"
     assert s3["correct"] == "", f"undecided session should have blank correct, got {s3['correct']!r}"
+    # No decision at all -> both C5 columns blank too, never crash.
+    assert s3["promptShownMs"] == "", f"undecided session should have blank promptShownMs, got {s3['promptShownMs']!r}"
+    assert s3["responseLatencyMs"] == "", (
+        f"undecided session should have blank responseLatencyMs, got {s3['responseLatencyMs']!r}"
+    )
 
     # Without --graded, every row's `correct` is blank -- HAND-GRADE ONLY, never auto-derived.
     for r in rows:

@@ -112,14 +112,19 @@ public final class FocusHeatmap {
     private static final long MIN_DWELL_FOR_PROMPT_MS = 3000;
 
     /** One reader's per-slide diagnostic decision. decisionMs is relative to blindedSlideStartMs
-     *  (decision latency), never absolute wall-clock — anonymization-safe like path timestamps. */
-    private record Decision(String diagnosis, Integer confidence, long decisionMs) {
-        /** Fragment JSON shape: {diagnosis, confidence(nullable), decisionMs}. */
+     *  (decision latency), never absolute wall-clock — anonymization-safe like path timestamps.
+     *  promptShownMs is likewise relative to blindedSlideStartMs: the moment the decision dialog
+     *  was shown (captured immediately before {@code DecisionDialog.show(...)}), so {@code
+     *  decisionMs - promptShownMs} is the true response latency once prompted, distinct from
+     *  decisionMs's "time since slide open" (additive, schema stays /5 — see toMap). */
+    private record Decision(String diagnosis, Integer confidence, long decisionMs, long promptShownMs) {
+        /** Fragment JSON shape: {diagnosis, confidence(nullable), decisionMs, promptShownMs}. */
         Map<String, Object> toMap() {
             Map<String, Object> d = new LinkedHashMap<>();
             d.put("diagnosis", diagnosis);
             d.put("confidence", confidence);   // null ⇒ Gson (no serializeNulls) OMITS the key; analysis treats absent/null as blank
             d.put("decisionMs", decisionMs);
+            d.put("promptShownMs", promptShownMs);   // additive: dialog-shown time, relative to blindedSlideStartMs
             return d;
         }
     }
@@ -398,12 +403,14 @@ public final class FocusHeatmap {
     }
 
     /** Record (or overwrite) the current slide's decision; stamps decisionMs relative to the slide's
-     *  blinded-recording start. FX thread only (menu / deferred prompt). No-op if not blinded / no slide. */
-    void recordDecision(String diagnosis, Integer confidence) {
+     *  blinded-recording start, and stores promptShownMs (the dialog-shown moment, also relative to
+     *  that same start, captured by the caller immediately before showing the dialog). FX thread
+     *  only (menu / deferred prompt). No-op if not blinded / no slide. */
+    void recordDecision(String diagnosis, Integer confidence, long promptShownMs) {
         if (!blindedRecording || currentMap == null)
             return;
         long ms = System.currentTimeMillis() - blindedSlideStartMs;
-        currentDecision = new Decision(diagnosis, confidence, ms);
+        currentDecision = new Decision(diagnosis, confidence, ms, promptShownMs);
     }
 
     String getCurrentDecisionDiagnosis() { Decision d = currentDecision; return d == null ? null : d.diagnosis(); }
@@ -426,10 +433,14 @@ public final class FocusHeatmap {
             return;
         }
         String header = currentSlide == null ? "Bu slayt" : "Bu slayt: " + currentSlide;
+        // Captured immediately before showing the dialog, relative to the same slide-start
+        // reference recordDecision uses for decisionMs, so decisionMs - promptShownMs is the true
+        // response latency once prompted (C5).
+        long promptShownRel = System.currentTimeMillis() - blindedSlideStartMs;
         DecisionDialog.DecisionInput in = DecisionDialog.show(qupath,
                 getCurrentDecisionDiagnosis(), getCurrentDecisionConfidence(), header);
         if (in != null)
-            recordDecision(in.diagnosis(), in.confidence());
+            recordDecision(in.diagnosis(), in.confidence(), promptShownRel);
     }
 
     /** Leave path gate: prompt on leaving the current slide only if enabled, no decision yet, not
@@ -460,11 +471,16 @@ public final class FocusHeatmap {
         try {
             String header = leavingSlide == null ? "Az önce görüntülediğiniz slayt"
                     : "Az önce görüntülediğiniz slayt: " + leavingSlide;
+            // Captured immediately before showing the dialog, relative to the departed slide's own
+            // start (snap.slideStartMs(), not the instance field — the instance may have already
+            // moved on to the next slide by the time this deferred continuation runs); same C5
+            // reasoning as the menu path above.
+            long promptShownRel = System.currentTimeMillis() - snap.slideStartMs();
             DecisionDialog.DecisionInput in = DecisionDialog.show(qupath, null, null, header);
             Decision decision = null;
             if (in != null) {
                 long ms = System.currentTimeMillis() - snap.slideStartMs();
-                decision = new Decision(in.diagnosis(), in.confidence(), ms);
+                decision = new Decision(in.diagnosis(), in.confidence(), ms, promptShownRel);
             } else if (leavingUri != null) {
                 decisionPromptedSlides.add(leavingUri);   // declined — don't nag on revisit
             }
@@ -1158,10 +1174,12 @@ public final class FocusHeatmap {
      * ({@code grid}, {@code annotations}, etc.) is unchanged.
      * <p>
      * Schema/5 fragments MAY additionally carry an optional top-level {@code decision} object
-     * ({@code {diagnosis, confidence, decisionMs}}, {@code decisionMs} relative to slide-record start)
-     * when the reader recorded a per-slide diagnosis (added 2026-07). Purely additive; the schema
-     * number stays 5 so an older analysis reader still accepts the fragment (it ignores the unknown
-     * key). Omitted entirely when no decision was entered.
+     * ({@code {diagnosis, confidence, decisionMs, promptShownMs}}, both {@code decisionMs} and
+     * {@code promptShownMs} relative to slide-record start) when the reader recorded a per-slide
+     * diagnosis (added 2026-07; {@code promptShownMs} added 2026-07-23, C5). Purely additive; the
+     * schema number stays 5 so an older analysis reader still accepts the fragment (it ignores the
+     * unknown key; a fragment recorded before this change simply lacks {@code promptShownMs}).
+     * Omitted entirely when no decision was entered.
      */
     private String buildBlindedJson(BlindedSnapshot snap, Decision decision) {
         Map<String, Object> m = new LinkedHashMap<>();

@@ -75,10 +75,15 @@ Output files (written to ``--out DIR``):
   object (``diagnosis``, ``confidence``, ``decisionMs``): ``slide``, ``sessionId`` (stable join
   key), ``session`` (display label), ``diagnosis``, ``confidence``, ``confidenceScaled``
   (``(confidence-1)/4``, blank if ``confidence`` isn't numeric), ``decisionMs``,
-  ``decisionLatencyMs`` (currently ``== decisionMs``), ``correctDx`` (DISPLAY-ONLY, from
+  ``decisionLatencyMs`` (``== decisionMs``, i.e. time-from-slide-open — this is now permanently
+  distinct from ``responseLatencyMs`` below, not a placeholder), ``correctDx`` (DISPLAY-ONLY, from
   ``--key``), ``correct`` (HAND-GRADED ONLY, from ``--graded`` — blank otherwise; never
-  auto-derived by comparing ``diagnosis`` to ``correctDx``). Written only if at least one
-  fragment carries a decision; otherwise a stderr warning and no file.
+  auto-derived by comparing ``diagnosis`` to ``correctDx``), (Tier 3 C5, appended) ``promptShownMs``
+  (passthrough of the recorder's dialog-shown timestamp, relative to slide-record start; blank for
+  a fragment recorded before the recorder gained this field) and ``responseLatencyMs`` (=
+  ``decisionMs - promptShownMs``, the true once-prompted deliberation time; blank unless BOTH are
+  numeric). Written only if at least one fragment carries a decision; otherwise a stderr warning
+  and no file.
 - (Phase 3) ``nav_accuracy.csv`` — written only when ``--graded`` supplies at least one graded
   decision: one row per :data:`NAV_ACCURACY_COLS` navigation metric (Tier 1 A1: extended with
   ``durationMs``, ``cursorOverSlidePct``, ``mouseViewportCouplingPx``) plus one row for
@@ -873,6 +878,18 @@ def analyze(
                 else (float(confidence) - 1.0) / 4.0
             )
             decision_ms = dec.get("decisionMs", "")
+            # Tier 3 C5: promptShownMs is a passthrough, mirroring decisionMs's own handling above
+            # -- absent (older fragment, recorded before the recorder gained this field) degrades
+            # to blank, never a crash. responseLatencyMs = decisionMs - promptShownMs is computed
+            # only when BOTH are real numbers (never bool -- same guard style as confidence below).
+            prompt_shown_ms = dec.get("promptShownMs", "")
+            _decision_ms_numeric = isinstance(decision_ms, (int, float)) and not isinstance(decision_ms, bool)
+            _prompt_shown_ms_numeric = isinstance(prompt_shown_ms, (int, float)) and not isinstance(prompt_shown_ms, bool)
+            response_latency_ms = (
+                decision_ms - prompt_shown_ms
+                if _decision_ms_numeric and _prompt_shown_ms_numeric
+                else ""
+            )
             # Blank iff absent/None or its string form is empty; otherwise the string form -- so a
             # numeric 0 sessionId stably maps to "0" (matches the R toolkit's
             # nzchar(as.character(...)) rule exactly; the prior `f.get("sessionId") or ""` treated
@@ -899,14 +916,21 @@ def analyze(
                 ),
                 "confidenceScaled": conf_scaled,
                 "decisionMs": decision_ms,
-                # == decisionMs (both are relative to the slide's recording start); kept as a
-                # separate column so a future recorder revision that captures a distinct
-                # "time from leave-prompt to submit" value has a column ready to diverge into.
+                # == decisionMs (both relative to the slide's recording start): "time from slide
+                # open to submit". Tier 3 C5 (2026-07-23) added the recorder's promptShownMs, which
+                # made the previously-anticipated "time from leave-prompt to submit" column real --
+                # that's responseLatencyMs below, appended as its own column rather than replacing
+                # this one. decisionLatencyMs itself stays permanently == decisionMs.
                 "decisionLatencyMs": decision_ms,
                 "correctDx": correct_dx,
                 # blank unless --graded supplied a (slideKey, sessionId) row -- NEVER auto-derived
                 # from diagnosis == correctDx string comparison.
                 "correct": graded_val,
+                # Tier 3 C5 (appended, additive): passthrough of the recorder's dialog-shown
+                # timestamp and the derived once-prompted response latency. See the guard comments
+                # above prompt_shown_ms/response_latency_ms.
+                "promptShownMs": prompt_shown_ms,
+                "responseLatencyMs": response_latency_ms,
             })
 
         # ------------------------------------------------------------------
@@ -1394,7 +1418,9 @@ def analyze(
         _write_csv(
             os.path.join(out_dir, "decisions.csv"), decision_rows,
             ["slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
-             "decisionMs", "decisionLatencyMs", "correctDx", "correct"],
+             "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+             # Tier 3 C5 (2026-07-23): appended, existing column order above is unchanged.
+             "promptShownMs", "responseLatencyMs"],
         )
     else:
         print(

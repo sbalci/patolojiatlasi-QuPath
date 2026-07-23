@@ -244,9 +244,15 @@ IMG_W <- 2000; IMG_H <- 1500
 
 #' A synthetic hand-entered decision object -- `list(diagnosis=, confidence=, decisionMs=)` --
 #' matching what the QuPath extension's blinded-focus recorder writes into a fragment's `decision`
-#' field.
-.decision <- function(diagnosis, confidence, decision_ms) {
-  list(diagnosis = diagnosis, confidence = confidence, decisionMs = decision_ms)
+#' field. `prompt_shown_ms` (Tier 3 C5, added 2026-07-23) is OPTIONAL and omitted by default -- a
+#' decision built without it is deliberately old-style, exercising the absent-`promptShownMs`
+#' blank-degrade path in `decisions.csv`.
+.decision <- function(diagnosis, confidence, decision_ms, prompt_shown_ms = NULL) {
+  d <- list(diagnosis = diagnosis, confidence = confidence, decisionMs = decision_ms)
+  if (!is.null(prompt_shown_ms)) {
+    d$promptShownMs <- prompt_shown_ms
+  }
+  d
 }
 
 build_fragments <- function() {
@@ -259,16 +265,19 @@ build_fragments <- function() {
 
   # s1: schema/5, 8-element path (varying dsMilli + mouse, some off-slide) + a known
   # baseMagnification + an annotation overlapping its own dwell center. Also carries a Phase 3
-  # decision (diagnosis="tumor", confidence=4 -> confidenceScaled=(4-1)/4=0.75).
+  # decision (diagnosis="tumor", confidence=4 -> confidenceScaled=(4-1)/4=0.75), now WITH a Tier 3
+  # C5 promptShownMs=1200 -> responseLatencyMs = 5000-1200 = 3800.
   f1 <- .fragment(
     "s1", 5, grid_s1, 40 * 250, 40,
     path = .make_path_v5(2, 2, n = 40, seed = 101),
     base_magnification = 40.0, path_truncated = FALSE,
     annotations = shared_annotation,
-    decision = .decision("tumor", 4, 5000)
+    decision = .decision("tumor", 4, 5000, prompt_shown_ms = 1200)
   )
   # s2: schema/3, 5-element path (w-proxy zoom fallback; no dsMilli/baseMagnification/annotations).
-  # Also carries a Phase 3 decision (diagnosis="benign", confidence=2).
+  # Also carries a Phase 3 decision (diagnosis="benign", confidence=2) -- deliberately OLD-STYLE
+  # (no promptShownMs), exercising the C5 blank-degrade path for a fragment recorded before the
+  # recorder gained promptShownMs.
   f2 <- .fragment(
     "s2", 3, grid_s2, 35 * 250, 35, path = .make_path(2, 2, n = 35, seed = 102),
     decision = .decision("benign", 2, 5000)
@@ -675,6 +684,10 @@ write_fragments_to_zip <- function(fragments, zip_path) {
 #' auto-derived from `diagnosis`). Reads the CSV back with `colClasses = "character"` so blank
 #' cells come back as `""` uniformly (mirrors Python's `csv.DictReader`, sidestepping R's
 #' blank-becomes-NA `read.csv` auto-typing for numeric/logical columns).
+#'
+#' Tier 3 C5: `promptShownMs`/`responseLatencyMs` are populated only for s1 (the one fixture
+#' decision carrying a synthetic `promptShownMs`); s2's decision is deliberately old-style (no
+#' `promptShownMs`) and must degrade both new columns to blank, never crash.
 check_decisions <- function(out_dir) {
   path <- file.path(out_dir, "decisions.csv")
   stopifnot("decisions.csv missing" = file.exists(path))
@@ -682,7 +695,8 @@ check_decisions <- function(out_dir) {
   stopifnot("expected 4 decisions rows (one per slide,session)" = nrow(rows) == 4)
   expected_cols <- c(
     "slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
-    "decisionMs", "decisionLatencyMs", "correctDx", "correct"
+    "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+    "promptShownMs", "responseLatencyMs"
   )
   stopifnot("decisions.csv columns mismatch" = identical(colnames(rows), expected_cols))
 
@@ -692,11 +706,31 @@ check_decisions <- function(out_dir) {
   stopifnot("s1 confidenceScaled mismatch" = s1$confidenceScaled == "0.75")
   stopifnot("s1 decisionMs should be non-empty" = nzchar(s1$decisionMs))
   stopifnot("s1 decisionLatencyMs should be non-empty" = nzchar(s1$decisionLatencyMs))
+  # Tier 3 C5: s1 carries a synthetic promptShownMs=1200 (decisionMs=5000) -> responseLatencyMs =
+  # decisionMs - promptShownMs = 3800.
+  stopifnot("s1 promptShownMs mismatch" = identical(s1$promptShownMs, "1200"))
+  stopifnot("s1 responseLatencyMs mismatch" = identical(s1$responseLatencyMs, "3800"))
+
+  s2 <- rows[rows$session == "s2", ][1, ]
+  stopifnot("s2 diagnosis mismatch" = s2$diagnosis == "benign")
+  # s2's decision is deliberately old-style (no promptShownMs) -- both new columns must degrade to
+  # blank, never crash, and decisionMs/decisionLatencyMs must stay unaffected.
+  stopifnot("s2 decisionMs should be non-empty (unaffected by C5)" = nzchar(s2$decisionMs))
+  stopifnot("s2 (old-style, no promptShownMs) should be blank" = identical(s2$promptShownMs, ""))
+  stopifnot(
+    "s2 (old-style, no promptShownMs) should have blank responseLatencyMs" =
+      identical(s2$responseLatencyMs, "")
+  )
 
   s3 <- rows[rows$session == "s3", ][1, ]
   stopifnot("undecided session should have blank diagnosis" = s3$diagnosis == "")
   stopifnot("undecided session should have blank confidence" = s3$confidence == "")
   stopifnot("undecided session should have blank correct" = s3$correct == "")
+  # No decision at all -> both C5 columns blank too, never crash.
+  stopifnot("undecided session should have blank promptShownMs" = identical(s3$promptShownMs, ""))
+  stopifnot(
+    "undecided session should have blank responseLatencyMs" = identical(s3$responseLatencyMs, "")
+  )
 
   # Without --graded, every row's `correct` is blank -- HAND-GRADE ONLY, never auto-derived.
   stopifnot("correct should be blank without --graded" = all(rows$correct == ""))
