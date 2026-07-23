@@ -965,7 +965,7 @@ def mouse_path_length_px(path):
         mx1, my1 = float(path[i + 1][6]), float(path[i + 1][7])
         if not ((mx0 != -1 or my0 != -1) and (mx1 != -1 or my1 != -1)):
             continue
-        total += math.hypot(mx1 - mx0, my1 - my0)
+        total += math.sqrt((mx1 - mx0) ** 2 + (my1 - my0) ** 2)  # sqrt (not hypot) to bit-match R's sqrt(dx^2+dy^2)
         n_segments += 1
     if n_segments == 0:
         return float("nan")
@@ -993,7 +993,7 @@ def mouse_velocity_px_per_sec(path):
         dt = float(path[i + 1][0]) - float(path[i][0])
         if dt <= 0:
             continue
-        dist = math.hypot(mx1 - mx0, my1 - my0)
+        dist = math.sqrt((mx1 - mx0) ** 2 + (my1 - my0) ** 2)  # sqrt (not hypot) to bit-match R's sqrt(dx^2+dy^2)
         vels.append(dist / (dt / 1000.0))
     if not vels:
         return float("nan")
