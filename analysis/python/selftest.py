@@ -500,6 +500,39 @@ def check_nav_accuracy(nongraded_out_dir, graded_out_dir):
         f"sparse/incorrect ones), got {cov['meanDiff']}"
     )
 
+    # --- Tier 1 A1: the extended NAV_ACCURACY_COLS + decisionLatencyMs (sourced from
+    # decision_rows, not metrics_rows) all appear as rows ---
+    for extra_col in ("durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx", "decisionLatencyMs"):
+        assert extra_col in by_metric, f"{extra_col} missing from nav_accuracy.csv (Tier 1 A1)"
+
+    # durationMs: grid-only (always populated), but constant (6000) across every graded session
+    # here -> zero variance -> blank pointBiserialR (same guard as dwellInAnnotationPct above).
+    assert by_metric["durationMs"]["n"] == "6", by_metric["durationMs"]
+    assert by_metric["durationMs"]["pointBiserialR"] == "", (
+        f"durationMs is constant across the graded fixture -> zero variance -> blank r, "
+        f"got {by_metric['durationMs']}"
+    )
+
+    # cursorOverSlidePct/mouseViewportCouplingPx: none of the graded fixture's sessions carry a
+    # path at all -> n=0, exercising the same n<5 guard as avgZoom above.
+    assert by_metric["cursorOverSlidePct"]["n"] == "0", by_metric["cursorOverSlidePct"]
+    assert by_metric["cursorOverSlidePct"]["pointBiserialR"] == "", by_metric["cursorOverSlidePct"]
+    assert by_metric["mouseViewportCouplingPx"]["n"] == "0", by_metric["mouseViewportCouplingPx"]
+
+    # decisionLatencyMs: sourced directly from decision_rows (decisionMs=4000+i*50, correct
+    # decreasing from 1 to 0) -- a real, non-degenerate n=6 correlation, unlike the two guards
+    # above -- and its meanDiff should be negative (higher latency associates with the
+    # graded-incorrect group in this synthetic fixture).
+    lat = by_metric["decisionLatencyMs"]
+    assert lat["n"] == "6", lat
+    assert lat["pointBiserialR"] != "", (
+        f"decisionLatencyMs has n=6 with real variance on both sides -> should be a real r, got {lat}"
+    )
+    assert float(lat["meanDiff"]) < 0, (
+        f"graded fixture's decisionLatencyMs increases while correct decreases -> expected a "
+        f"negative meanDiff, got {lat['meanDiff']}"
+    )
+
     with open(os.path.join(graded_out_dir, "summary.md"), encoding="utf-8") as fh:
         graded_summary = fh.read()
     assert "## Navigation ↔ diagnostic accuracy" in graded_summary, (
@@ -611,6 +644,8 @@ def run():
             "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
             "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
             "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
+            "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx",
+            "mouseVelocityPxPerSec", "activeFractionPct",
         ]
         assert list(metrics.columns) == expected_cols, metrics.columns.tolist()
         assert metrics["dwellInAnnotationPct"].between(0, 100).all(), metrics["dwellInAnnotationPct"].tolist()
@@ -682,6 +717,53 @@ def run():
         assert set(magbands["session"].unique()) == {"s1", "s2", "s4"}, (
             f"magbands sessions mismatch: {magbands['session'].unique()}"
         )
+
+        # --- hotspots_<slug>.csv (Tier 1 A5): written for every session (grid always present),
+        # rank ascending + dwellMs descending within each session ---
+        hotspot_files = [f for f in os.listdir(out_dir) if f.startswith("hotspots_")]
+        assert len(hotspot_files) == 1, hotspot_files
+        hotspots = pd.read_csv(os.path.join(out_dir, hotspot_files[0]))
+        assert list(hotspots.columns) == [
+            "session", "rank", "cellRow", "cellCol", "centerImageX", "centerImageY",
+            "dwellMs", "dwellFrac",
+        ], hotspots.columns.tolist()
+        assert set(hotspots["session"].unique()) == {"s1", "s2", "s3", "s4"}, (
+            f"hotspots should cover every session (grid always present): {hotspots['session'].unique()}"
+        )
+        assert hotspots["dwellFrac"].between(0, 1).all(), hotspots["dwellFrac"].tolist()
+        for sess, grp in hotspots.groupby("session"):
+            grp_sorted = grp.sort_values("rank")
+            ranks = grp_sorted["rank"].tolist()
+            assert ranks == list(range(1, len(ranks) + 1)), f"{sess}: rank should be 1..N: {ranks}"
+            dwells = grp_sorted["dwellMs"].tolist()
+            assert all(dwells[i] >= dwells[i + 1] - 1e-9 for i in range(len(dwells) - 1)), (
+                f"{sess}: hotspots not sorted descending by dwellMs: {dwells}"
+            )
+
+        # --- transitions_<slug>.csv (Tier 1 A5): path sessions only, <=15 rows/session, count desc ---
+        transitions_files = [f for f in os.listdir(out_dir) if f.startswith("transitions_")]
+        assert len(transitions_files) == 1, transitions_files
+        transitions = pd.read_csv(os.path.join(out_dir, transitions_files[0]))
+        assert list(transitions.columns) == ["session", "fromCell", "toCell", "count"], (
+            transitions.columns.tolist()
+        )
+        assert set(transitions["session"].unique()) <= {"s1", "s2", "s4"}, (
+            transitions["session"].unique()
+        )
+        assert "s3" not in transitions["session"].values, (
+            "schema/2 (no path) session should be absent from transitions_<slug>.csv"
+        )
+        for sess, grp in transitions.groupby("session"):
+            assert len(grp) <= 15, f"{sess}: expected <=15 transitions, got {len(grp)}"
+            counts = grp["count"].tolist()
+            assert counts == sorted(counts, reverse=True), (
+                f"{sess}: transitions not sorted by count descending: {counts}"
+            )
+
+        # --- overlay_<slug>_scanpaths.png (Tier 1 A6): written when path sessions exist ---
+        overlay_files = [f for f in os.listdir(out_dir) if f.startswith("overlay_")]
+        assert len(overlay_files) == 1, overlay_files
+        _assert_png(os.path.join(out_dir, overlay_files[0]))
 
         # --- annotations_<slug>.csv (Phase 2): symmetric IoU, 1.0 diagonal for annotated
         # sessions, 1.0 cross-IoU for s1/s4 (identical rectangles), and a coincidence level of
@@ -803,6 +885,40 @@ def run():
         assert not pd.isna(row_s1["mouseViewportCouplingPx"]), "schema/5 path has mouse data -> should be populated"
         assert row_s1["mouseViewportCouplingPx"] >= 0.0, row_s1["mouseViewportCouplingPx"]
 
+        # --- Tier 1 A2 (turn-angle) / A3 (mouse kinematics) / A4 (active fraction) columns ---
+        for row, label in ((row_s1, "s1"), (row_s2, "s2"), (row_s4, "s4")):
+            assert not pd.isna(row["meanAbsTurnAngleDeg"]), f"{label} missing meanAbsTurnAngleDeg"
+            assert 0.0 <= row["meanAbsTurnAngleDeg"] <= 180.0, (label, row["meanAbsTurnAngleDeg"])
+            assert not pd.isna(row["turnAngleEntropy"]), f"{label} missing turnAngleEntropy"
+            assert -1e-6 <= row["turnAngleEntropy"] <= 1.0 + 1e-6, (label, row["turnAngleEntropy"])
+            assert not pd.isna(row["activeFractionPct"]), f"{label} missing activeFractionPct"
+        assert pd.isna(row_s3["meanAbsTurnAngleDeg"]), "schema/2 (no path) should have blank meanAbsTurnAngleDeg"
+        assert pd.isna(row_s3["turnAngleEntropy"]), "schema/2 (no path) should have blank turnAngleEntropy"
+        assert pd.isna(row_s3["activeFractionPct"]), "schema/2 (no path) should have blank activeFractionPct"
+
+        # A4 hand-derived, NOT clamped at 100%: s1's synthetic path's first sample sits at
+        # tRelMs=250 (not 0), so durationMs (== n*250) exceeds the wall-clock span (== (n-1)*250)
+        # by construction -- a real, not-clamped-away >100% result.
+        s1_frag, s1_path_full = fragments[0], fragments[0]["path"]
+        expected_active_s1 = 100.0 * s1_frag["durationMs"] / (s1_path_full[-1][0] - s1_path_full[0][0])
+        assert abs(row_s1["activeFractionPct"] - expected_active_s1) < 1e-6, (
+            f"expected activeFractionPct == {expected_active_s1}, got {row_s1['activeFractionPct']}"
+        )
+        assert row_s1["activeFractionPct"] > 100.0, (
+            f"activeFractionPct should not be clamped at 100%, got {row_s1['activeFractionPct']}"
+        )
+
+        # A3 mouse kinematics: populated only for s1 (schema/5, has mouse data), blank elsewhere.
+        assert not pd.isna(row_s1["mousePathLengthPx"]), "s1 (schema/5) missing mousePathLengthPx"
+        assert row_s1["mousePathLengthPx"] > 0, row_s1["mousePathLengthPx"]
+        assert not pd.isna(row_s1["mouseVelocityPxPerSec"]), "s1 (schema/5) missing mouseVelocityPxPerSec"
+        assert row_s1["mouseVelocityPxPerSec"] > 0, row_s1["mouseVelocityPxPerSec"]
+        for row, label in ((row_s2, "s2"), (row_s3, "s3"), (row_s4, "s4")):
+            assert pd.isna(row["mousePathLengthPx"]), f"{label} should have blank mousePathLengthPx (no mouse data)"
+            assert pd.isna(row["mouseVelocityPxPerSec"]), (
+                f"{label} should have blank mouseVelocityPxPerSec (no mouse data)"
+            )
+
         # --- direct metrics-function unit checks (raster_from_path, w-proxy zoom, magPct/scanRate) ---
         s1_path = fragments[0]["path"]  # schema/5, 8-element points, varying dsMilli + mouse
         s2_path = fragments[1]["path"]  # schema/3, 5-element points, constant w
@@ -920,6 +1036,101 @@ def run():
             f"which the union mask correctly includes); the pre-fix pooled-rings bug would instead "
             f"yield 0.0 (the overlap zone misclassified as outside) -- got {overlap_pct}"
         )
+
+        # --- A2 targeted assert: turn-angle metrics on a hand-derivable minimal L-shaped path ---
+        # 3 points: (0,0) -> (10,0) -> (10,10) -- one segment heading east (0deg), one heading
+        # south (90deg) -- exactly one interior point -> exactly one turn of 90deg.
+        l_path = [
+            [0, 0, 0, 400, 300],
+            [100, 10, 0, 400, 300],
+            [200, 10, 10, 400, 300],
+        ]
+        mean_turn = bf_metrics.mean_abs_turn_angle_deg(l_path)
+        assert abs(mean_turn - 90.0) < 1e-6, (
+            f"minimal L-shaped path should have a mean abs turn angle of 90deg, got {mean_turn}"
+        )
+        turn_ent = bf_metrics.turn_angle_entropy(l_path)
+        assert abs(turn_ent) < 1e-6, (
+            f"a single-turn path concentrates all mass in one of 8 bins -> entropy ~= 0, got {turn_ent}"
+        )
+        # <3 points -> blank (NaN), not a crash.
+        assert math.isnan(bf_metrics.mean_abs_turn_angle_deg(l_path[:2])), (
+            "turn-angle metrics should be blank (NaN) for a <3-point path"
+        )
+        assert math.isnan(bf_metrics.turn_angle_entropy(l_path[:2])), (
+            "turn-angle metrics should be blank (NaN) for a <3-point path"
+        )
+        assert math.isnan(bf_metrics.mean_abs_turn_angle_deg([])), "blank for an empty path"
+
+        # --- A3 targeted assert: mouse kinematics skip segments touching the (-1,-1) sentinel,
+        # not bridge across them ---
+        mk_path = [
+            [0, 0, 0, 400, 300, 1000, 0, 0],
+            [100, 10, 0, 400, 300, 1000, 10, 0],    # on-slide segment from point0: dist 10 [counted]
+            [200, 20, 0, 400, 300, 1000, -1, -1],   # sentinel -- both adjoining segments skipped
+            [300, 30, 0, 400, 300, 1000, 40, 0],
+            [400, 40, 0, 400, 300, 1000, 50, 0],    # on-slide segment into point4: dist 10 [counted]
+        ]
+        mplen = bf_metrics.mouse_path_length_px(mk_path)
+        assert abs(mplen - 20.0) < 1e-6, (
+            f"expected mousePathLengthPx == 20.0 (sentinel-touching segments skipped, not "
+            f"bridged), got {mplen}"
+        )
+        mvel = bf_metrics.mouse_velocity_px_per_sec(mk_path)
+        assert mvel > 0, f"mouseVelocityPxPerSec should be positive over the 2 valid segments, got {mvel}"
+
+        # schema/3 5-element path (no mouse data at all) -> both blank.
+        assert math.isnan(bf_metrics.mouse_path_length_px(s2_path)), (
+            "mouse kinematics should be blank for a path with no mouse data"
+        )
+        assert math.isnan(bf_metrics.mouse_velocity_px_per_sec(s2_path)), (
+            "mouse kinematics should be blank for a path with no mouse data"
+        )
+
+        # all-off-slide path -> blank (no valid on-slide segment at all, distinct from a "0" path
+        # length -- there is nothing measurable, not a measured-and-stationary cursor).
+        off_path = [
+            [0, 0, 0, 400, 300, 1000, -1, -1],
+            [100, 10, 0, 400, 300, 1000, -1, -1],
+        ]
+        assert math.isnan(bf_metrics.mouse_path_length_px(off_path)), (
+            "an all-off-slide path should yield a blank mousePathLengthPx, not 0.0"
+        )
+        assert math.isnan(bf_metrics.mouse_velocity_px_per_sec(off_path)), (
+            "an all-off-slide path should yield a blank mouseVelocityPxPerSec"
+        )
+
+        # --- A4 targeted assert: activeFractionPct, hand-derivable, NOT clamped above 100% ---
+        af_path = [[0, 0, 0, 400, 300], [5000, 10, 0, 400, 300]]  # span = 5000ms
+        af = bf_metrics.active_fraction_pct(af_path, 7500)  # durationMs=7500 -> 150%
+        assert abs(af - 150.0) < 1e-6, f"expected activeFractionPct == 150.0 (not clamped), got {af}"
+        assert math.isnan(bf_metrics.active_fraction_pct(af_path[:1], 1000)), (
+            "expected blank activeFractionPct for a <2-point path"
+        )
+        assert math.isnan(bf_metrics.active_fraction_pct(
+            [[0, 0, 0, 400, 300], [0, 1, 1, 400, 300]], 1000
+        )), "expected blank activeFractionPct for a zero-span path"
+        assert math.isnan(bf_metrics.active_fraction_pct(af_path, None)), (
+            "expected blank activeFractionPct for a missing durationMs"
+        )
+
+        # --- A5 targeted assert: top_hotspots deterministic tie-break (value desc, flat-index asc) ---
+        tie_grid = [5.0, 5.0, 3.0, 5.0]  # 2x2 grid: ties at value 5.0 in flat cells 0, 1, 3
+        top3 = bf_metrics.top_hotspots(tie_grid, 2, 2, n=3)
+        assert [(r, c) for r, c, v in top3] == [(0, 0), (0, 1), (1, 1)], (
+            f"expected value-desc/index-asc tie-break order, got {top3}"
+        )
+
+        # --- A5 targeted assert: top_transitions deterministic tie-break (count desc, then
+        # fromCell/toCell asc) ---
+        seq_tie = [0, 1, 0, 2, 0, 1]  # transitions: 0->1 (x2), 1->0 (x1), 0->2 (x1), 2->0 (x1)
+        tt = bf_metrics.top_transitions(seq_tie, top_n=10)
+        assert tt[0] == (0, 1, 2), f"expected the count=2 transition first, got {tt}"
+        assert [(f, t) for f, t, c in tt[1:]] == [(0, 2), (1, 0), (2, 0)], (
+            f"expected count-1 ties broken by (fromCell,toCell) ascending, got {tt}"
+        )
+        assert bf_metrics.top_transitions([]) == [], "top_transitions should be [] for an empty sequence"
+        assert bf_metrics.top_transitions([0]) == [], "top_transitions should be [] for a 1-element sequence"
 
         # --- .zip input also works ---
         zip_path = os.path.join(tmp, "fragments.zip")

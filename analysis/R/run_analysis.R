@@ -9,10 +9,12 @@
 # in any mix. Writes the SAME output files as the Python toolkit's `python -m
 # blinded_focus.analyze` (see ../python/README.md and ./README.md for the full contract):
 # metrics.csv, compare_<slug>.csv, consensus_<slug>.png, reference_<slug>.csv, scanpath_<slug>.csv,
-# magbands_<slug>.csv, (Phase 3, when at least one fragment carries a decision) decisions.csv,
+# magbands_<slug>.csv, (Tier 1, always) hotspots_<slug>.csv, (Tier 1, path sessions only)
+# transitions_<slug>.csv, (Phase 3, when at least one fragment carries a decision) decisions.csv,
 # (Phase 3, when --graded supplies at least one graded decision) nav_accuracy.csv, summary.md, and
 # (with --figures) per-(slide,session) PNGs under <out>/<slug>/ (incl. the Phase-1 scanpath-raster
-# and magnification-band heatmaps).
+# and magnification-band heatmaps), plus (Tier 1, path sessions only)
+# overlay_<slug>_scanpaths.png at <out> root.
 
 # Resolve this script's own directory so `source()` works regardless of the caller's working
 # directory (Rscript does not chdir to the script's location).

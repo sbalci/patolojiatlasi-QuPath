@@ -519,6 +519,46 @@ check_nav_accuracy <- function(nongraded_out_dir, graded_out_dir) {
       as.numeric(cov$meanDiff) > 0
   )
 
+  # --- Tier 1 A1: the extended NAV_ACCURACY_COLS + decisionLatencyMs (sourced from decision_rows,
+  # not metrics_rows) all appear as rows ---
+  for (extra_col in c("durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx", "decisionLatencyMs")) {
+    if (!(extra_col %in% nav_rows$metric)) {
+      stop(sprintf("%s missing from nav_accuracy.csv (Tier 1 A1)", extra_col))
+    }
+  }
+
+  # durationMs: grid-only (always populated), but constant (6000) across every graded session
+  # here -> zero variance -> blank pointBiserialR (same guard as dwellInAnnotationPct above).
+  duration_row <- .by_metric("durationMs")
+  stopifnot("durationMs n mismatch" = duration_row$n == "6")
+  stopifnot(
+    "durationMs is constant across the graded fixture -> zero variance -> blank r" =
+      duration_row$pointBiserialR == ""
+  )
+
+  # cursorOverSlidePct/mouseViewportCouplingPx: none of the graded fixture's sessions carry a path
+  # at all -> n=0, exercising the same n<5 guard as avgZoom above.
+  cursor_row <- .by_metric("cursorOverSlidePct")
+  stopifnot("cursorOverSlidePct n mismatch" = cursor_row$n == "0")
+  stopifnot("cursorOverSlidePct pointBiserialR should be blank" = cursor_row$pointBiserialR == "")
+  coupling_row <- .by_metric("mouseViewportCouplingPx")
+  stopifnot("mouseViewportCouplingPx n mismatch" = coupling_row$n == "0")
+
+  # decisionLatencyMs: sourced directly from decision_rows (decisionMs=4000+i*50, correct
+  # decreasing from 1 to 0) -- a real, non-degenerate n=6 correlation, unlike the two guards
+  # above -- and its meanDiff should be negative (higher latency associates with the
+  # graded-incorrect group in this synthetic fixture).
+  lat_row <- .by_metric("decisionLatencyMs")
+  stopifnot("decisionLatencyMs n mismatch" = lat_row$n == "6")
+  stopifnot(
+    "decisionLatencyMs has n=6 with real variance on both sides -> should be a real r" =
+      lat_row$pointBiserialR != ""
+  )
+  stopifnot(
+    "graded fixture's decisionLatencyMs increases while correct decreases -> expected a negative meanDiff" =
+      as.numeric(lat_row$meanDiff) < 0
+  )
+
   graded_summary <- paste(readLines(file.path(graded_out_dir, "summary.md"), warn = FALSE), collapse = "\n")
   stopifnot(
     "nav-accuracy summary section missing from summary.md" =
@@ -632,7 +672,9 @@ run <- function() {
     "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
     "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
     "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
-    "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"
+    "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
+    "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx",
+    "mouseVelocityPxPerSec", "activeFractionPct"
   )
   stopifnot("metrics.csv columns mismatch" = identical(colnames(metrics), expected_cols))
   stopifnot(
@@ -704,6 +746,71 @@ run <- function() {
     "magbands sessions mismatch" =
       setequal(unique(magbands_df$session), c("s1", "s2", "s4"))
   )
+
+  # --- hotspots_<slug>.csv (Tier 1 A5): written for every session (grid always present), rank
+  # ascending + dwellMs descending within each session ---
+  hotspot_files <- out_files[startsWith(out_files, "hotspots_")]
+  stopifnot("expected exactly one hotspots_ file" = length(hotspot_files) == 1)
+  hotspots_df <- utils::read.csv(file.path(out_dir, hotspot_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "hotspots.csv columns mismatch" =
+      identical(
+        colnames(hotspots_df),
+        c("session", "rank", "cellRow", "cellCol", "centerImageX", "centerImageY", "dwellMs", "dwellFrac")
+      )
+  )
+  stopifnot(
+    "hotspots should cover every session (grid always present)" =
+      setequal(unique(hotspots_df$session), c("s1", "s2", "s3", "s4"))
+  )
+  stopifnot("dwellFrac out of [0,1]" = all(hotspots_df$dwellFrac >= 0 & hotspots_df$dwellFrac <= 1))
+  for (sess in unique(hotspots_df$session)) {
+    grp <- hotspots_df[hotspots_df$session == sess, ]
+    grp <- grp[order(grp$rank), ]
+    if (!identical(grp$rank, seq_len(nrow(grp)))) {
+      stop(sprintf("%s: rank should be 1..N", sess))
+    }
+    dwells <- grp$dwellMs
+    if (length(dwells) > 1) {
+      for (i in seq_len(length(dwells) - 1)) {
+        if (dwells[i] < dwells[i + 1] - 1e-9) {
+          stop(sprintf("%s: hotspots not sorted descending by dwellMs", sess))
+        }
+      }
+    }
+  }
+
+  # --- transitions_<slug>.csv (Tier 1 A5): path sessions only, <=15 rows/session, count desc ---
+  transitions_files <- out_files[startsWith(out_files, "transitions_")]
+  stopifnot("expected exactly one transitions_ file" = length(transitions_files) == 1)
+  transitions_df <- utils::read.csv(file.path(out_dir, transitions_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "transitions.csv columns mismatch" =
+      identical(colnames(transitions_df), c("session", "fromCell", "toCell", "count"))
+  )
+  stopifnot(
+    "transitions sessions should be a subset of path-carrying sessions" =
+      all(unique(transitions_df$session) %in% c("s1", "s2", "s4"))
+  )
+  stopifnot(
+    "schema/2 (no path) session should be absent from transitions_<slug>.csv" =
+      !("s3" %in% transitions_df$session)
+  )
+  for (sess in unique(transitions_df$session)) {
+    grp <- transitions_df[transitions_df$session == sess, ]
+    if (nrow(grp) > 15) {
+      stop(sprintf("%s: expected <=15 transitions, got %d", sess, nrow(grp)))
+    }
+    counts <- grp$count
+    if (!identical(counts, sort(counts, decreasing = TRUE))) {
+      stop(sprintf("%s: transitions not sorted by count descending", sess))
+    }
+  }
+
+  # --- overlay_<slug>_scanpaths.png (Tier 1 A6): written when path sessions exist ---
+  overlay_files <- out_files[startsWith(out_files, "overlay_")]
+  stopifnot("expected exactly one overlay_ file" = length(overlay_files) == 1)
+  .assert_png(file.path(out_dir, overlay_files[1]))
 
   # --- figures: at least one valid PNG per session, under <out>/<slug>/ ---
   slide_dirs <- out_files[file.info(file.path(out_dir, out_files))$isdir]
@@ -868,6 +975,49 @@ run <- function() {
   )
   stopifnot("mouseViewportCouplingPx should be non-negative" = row_s1$mouseViewportCouplingPx >= 0.0)
 
+  # --- Tier 1 A2 (turn-angle) / A3 (mouse kinematics) / A4 (active fraction) columns ---
+  for (r in list(row_s1, row_s2, row_s4)) {
+    stopifnot("missing meanAbsTurnAngleDeg" = !is.na(r$meanAbsTurnAngleDeg))
+    stopifnot(
+      "meanAbsTurnAngleDeg out of [0,180]" =
+        r$meanAbsTurnAngleDeg >= 0.0 && r$meanAbsTurnAngleDeg <= 180.0
+    )
+    stopifnot("missing turnAngleEntropy" = !is.na(r$turnAngleEntropy))
+    stopifnot(
+      "turnAngleEntropy out of [0,1]" = r$turnAngleEntropy >= -1e-6 && r$turnAngleEntropy <= 1.0 + 1e-6
+    )
+    stopifnot("missing activeFractionPct" = !is.na(r$activeFractionPct))
+  }
+  stopifnot("schema/2 (no path) should have blank meanAbsTurnAngleDeg" = is.na(row_s3$meanAbsTurnAngleDeg))
+  stopifnot("schema/2 (no path) should have blank turnAngleEntropy" = is.na(row_s3$turnAngleEntropy))
+  stopifnot("schema/2 (no path) should have blank activeFractionPct" = is.na(row_s3$activeFractionPct))
+
+  # A4 hand-derived, NOT clamped at 100%: s1's synthetic path's first sample sits at tRelMs=250
+  # (not 0), so durationMs (== n*250) exceeds the wall-clock span (== (n-1)*250) by construction --
+  # a real, not-clamped-away >100% result.
+  s1_frag <- fragments[[1]]
+  s1_path_full <- s1_frag$path
+  n_s1 <- length(s1_path_full)
+  span_s1 <- s1_path_full[[n_s1]][1] - s1_path_full[[1]][1]
+  expected_active_s1 <- 100.0 * s1_frag$durationMs / span_s1
+  stopifnot(
+    "expected activeFractionPct matching hand-derived value" =
+      abs(row_s1$activeFractionPct - expected_active_s1) < 1e-6
+  )
+  stopifnot(
+    "activeFractionPct should not be clamped at 100%" = row_s1$activeFractionPct > 100.0
+  )
+
+  # A3 mouse kinematics: populated only for s1 (schema/5, has mouse data), blank elsewhere.
+  stopifnot("s1 missing mousePathLengthPx" = !is.na(row_s1$mousePathLengthPx))
+  stopifnot("s1 mousePathLengthPx should be positive" = row_s1$mousePathLengthPx > 0)
+  stopifnot("s1 missing mouseVelocityPxPerSec" = !is.na(row_s1$mouseVelocityPxPerSec))
+  stopifnot("s1 mouseVelocityPxPerSec should be positive" = row_s1$mouseVelocityPxPerSec > 0)
+  for (r in list(row_s2, row_s3, row_s4)) {
+    stopifnot("expected blank mousePathLengthPx (no mouse data)" = is.na(r$mousePathLengthPx))
+    stopifnot("expected blank mouseVelocityPxPerSec (no mouse data)" = is.na(r$mouseVelocityPxPerSec))
+  }
+
   # --- direct metrics-function unit checks (raster_from_path, w-proxy zoom, magPct/scanRate) ---
   s1_path <- fragments[[1]]$path # schema/5, 8-element points, varying dsMilli + mouse
   s2_path <- fragments[[2]]$path # schema/3, 5-element points, constant w
@@ -994,6 +1144,107 @@ run <- function() {
     "expected dwellInAnnotationPct == 100.0 (union mask includes the overlap zone; the pre-fix pooled-rings bug would instead yield 0.0)" =
       abs(overlap_pct - 100.0) < 1e-6
   )
+
+  # --- A2 targeted assert: turn-angle metrics on a hand-derivable minimal L-shaped path ---
+  # 3 points: (0,0) -> (10,0) -> (10,10) -- one segment heading east (0deg), one heading south
+  # (90deg) -- exactly one interior point -> exactly one turn of 90deg.
+  l_path <- list(
+    c(0, 0, 0, 400, 300),
+    c(100, 10, 0, 400, 300),
+    c(200, 10, 10, 400, 300)
+  )
+  mean_turn <- mean_abs_turn_angle_deg(l_path)
+  stopifnot(
+    "minimal L-shaped path should have a mean abs turn angle of 90deg" = abs(mean_turn - 90.0) < 1e-6
+  )
+  turn_ent <- turn_angle_entropy(l_path)
+  stopifnot(
+    "a single-turn path concentrates all mass in one of 8 bins -> entropy ~= 0" = abs(turn_ent) < 1e-6
+  )
+  # <3 points -> blank (NA), not a crash.
+  stopifnot(
+    "turn-angle metrics should be blank (NA) for a <3-point path" =
+      is.na(mean_abs_turn_angle_deg(l_path[1:2])) && is.na(turn_angle_entropy(l_path[1:2]))
+  )
+  stopifnot("blank for an empty path" = is.na(mean_abs_turn_angle_deg(list())))
+
+  # --- A3 targeted assert: mouse kinematics skip segments touching the (-1,-1) sentinel, not
+  # bridge across them ---
+  mk_path <- list(
+    c(0, 0, 0, 400, 300, 1000, 0, 0),
+    c(100, 10, 0, 400, 300, 1000, 10, 0),   # on-slide segment from point1: dist 10 [counted]
+    c(200, 20, 0, 400, 300, 1000, -1, -1),  # sentinel -- both adjoining segments skipped
+    c(300, 30, 0, 400, 300, 1000, 40, 0),
+    c(400, 40, 0, 400, 300, 1000, 50, 0)    # on-slide segment into point5: dist 10 [counted]
+  )
+  mplen <- mouse_path_length_px(mk_path)
+  stopifnot(
+    "expected mousePathLengthPx == 20.0 (sentinel-touching segments skipped, not bridged)" =
+      abs(mplen - 20.0) < 1e-6
+  )
+  mvel <- mouse_velocity_px_per_sec(mk_path)
+  stopifnot("mouseVelocityPxPerSec should be positive over the 2 valid segments" = mvel > 0)
+
+  # schema/3 5-element path (no mouse data at all) -> both blank.
+  stopifnot(
+    "mouse kinematics should be blank for a path with no mouse data" =
+      is.na(mouse_path_length_px(s2_path)) && is.na(mouse_velocity_px_per_sec(s2_path))
+  )
+
+  # all-off-slide path -> blank (no valid on-slide segment at all, distinct from a "0" path length
+  # -- there is nothing measurable, not a measured-and-stationary cursor).
+  off_path <- list(
+    c(0, 0, 0, 400, 300, 1000, -1, -1),
+    c(100, 10, 0, 400, 300, 1000, -1, -1)
+  )
+  stopifnot(
+    "an all-off-slide path should yield a blank mousePathLengthPx, not 0.0" =
+      is.na(mouse_path_length_px(off_path))
+  )
+  stopifnot(
+    "an all-off-slide path should yield a blank mouseVelocityPxPerSec" =
+      is.na(mouse_velocity_px_per_sec(off_path))
+  )
+
+  # --- A4 targeted assert: activeFractionPct, hand-derivable, NOT clamped above 100% ---
+  af_path <- list(c(0, 0, 0, 400, 300), c(5000, 10, 0, 400, 300)) # span = 5000ms
+  af <- active_fraction_pct(af_path, 7500) # durationMs=7500 -> 150%
+  stopifnot("expected activeFractionPct == 150.0 (not clamped)" = abs(af - 150.0) < 1e-6)
+  stopifnot(
+    "expected blank activeFractionPct for a <2-point path" =
+      is.na(active_fraction_pct(af_path[1], 1000))
+  )
+  stopifnot(
+    "expected blank activeFractionPct for a zero-span path" =
+      is.na(active_fraction_pct(list(c(0, 0, 0, 400, 300), c(0, 1, 1, 400, 300)), 1000))
+  )
+  stopifnot(
+    "expected blank activeFractionPct for a missing durationMs" =
+      is.na(active_fraction_pct(af_path, NULL))
+  )
+
+  # --- A5 targeted assert: top_hotspots deterministic tie-break (value desc, flat-index asc) ---
+  tie_grid <- c(5.0, 5.0, 3.0, 5.0) # 2x2 grid: ties at value 5.0 in flat cells 0, 1, 3
+  top3 <- top_hotspots(tie_grid, 2, 2, n = 3)
+  top3_rc <- as.numeric(unlist(lapply(top3, function(h) c(h$row, h$col))))
+  expected_rc <- as.numeric(c(0, 0, 0, 1, 1, 1))
+  stopifnot("expected value-desc/index-asc tie-break order" = all(top3_rc == expected_rc))
+
+  # --- A5 targeted assert: top_transitions deterministic tie-break (count desc, then
+  # fromCell/toCell asc) ---
+  seq_tie <- c(0, 1, 0, 2, 0, 1) # transitions: 0->1 (x2), 1->0 (x1), 0->2 (x1), 2->0 (x1)
+  tt <- top_transitions(seq_tie, top_n = 10)
+  stopifnot(
+    "expected the count=2 transition first" =
+      tt[[1]]$fromCell == 0 && tt[[1]]$toCell == 1 && tt[[1]]$count == 2
+  )
+  tt_rest <- as.numeric(unlist(lapply(tt[2:length(tt)], function(t) c(t$fromCell, t$toCell))))
+  expected_rest <- as.numeric(c(0, 2, 1, 0, 2, 0))
+  stopifnot(
+    "expected count-1 ties broken by (fromCell,toCell) ascending" = all(tt_rest == expected_rest)
+  )
+  stopifnot("top_transitions should be empty for an empty sequence" = length(top_transitions(c())) == 0)
+  stopifnot("top_transitions should be empty for a 1-element sequence" = length(top_transitions(c(0))) == 0)
 
   # --- .zip input also works ---
   zip_path <- file.path(tmp, "fragments.zip")

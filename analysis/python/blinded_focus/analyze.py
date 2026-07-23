@@ -21,7 +21,10 @@ Output files (written to ``--out DIR``):
   0/0.0 when a session has no ``annotations``; ``annotationReentryCount`` blank without a
   ``path``; ``enrichmentRatio`` blank when its mask has no in/out split to compare) plus cursor
   metrics ``cursorOverSlidePct``, ``mouseViewportCouplingPx`` (blank unless the session's ``path``
-  carries schema/5 8-element points with ``mouseX``/``mouseY``).
+  carries schema/5 8-element points with ``mouseX``/``mouseY``) plus (Tier 1, additive) turn-angle
+  directionality ``meanAbsTurnAngleDeg``/``turnAngleEntropy`` (path-only, blank for <3 points),
+  mouse kinematics ``mousePathLengthPx``/``mouseVelocityPxPerSec`` (schema/5 only), and
+  ``activeFractionPct`` (path-only, ``100*durationMs/(tRel_last-tRel_first)``, not clamped >100%).
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus).
@@ -42,12 +45,23 @@ Output files (written to ``--out DIR``):
   auto-derived by comparing ``diagnosis`` to ``correctDx``). Written only if at least one
   fragment carries a decision; otherwise a stderr warning and no file.
 - (Phase 3) ``nav_accuracy.csv`` — written only when ``--graded`` supplies at least one graded
-  decision: one row per :data:`NAV_ACCURACY_COLS` navigation metric, joined to ``correct`` by
-  ``(slide, sessionId)`` — ``metric``, ``n``, ``pointBiserialR`` (plain Pearson, blank unless
-  ``n >= 5`` and both sides have non-zero variance — see :func:`_pearson_guarded`),
-  ``meanCorrect``, ``meanIncorrect``, ``medianCorrect``, ``medianIncorrect``, ``meanDiff``
-  (blank unless both groups have ``n >= 2``). No p-values or confidence intervals at this
-  pilot scale.
+  decision: one row per :data:`NAV_ACCURACY_COLS` navigation metric (Tier 1 A1: extended with
+  ``durationMs``, ``cursorOverSlidePct``, ``mouseViewportCouplingPx``) plus one row for
+  ``decisionLatencyMs`` (Tier 1 A1, sourced directly from ``decision_rows``, not ``metrics_rows``),
+  joined to ``correct`` by ``(slide, sessionId)`` — ``metric``, ``n``, ``pointBiserialR`` (plain
+  Pearson, blank unless ``n >= 5`` and both sides have non-zero variance — see
+  :func:`_pearson_guarded`), ``meanCorrect``, ``meanIncorrect``, ``medianCorrect``,
+  ``medianIncorrect``, ``meanDiff`` (blank unless both groups have ``n >= 2``). No p-values or
+  confidence intervals at this pilot scale.
+- per slide (Tier 1 A5): ``hotspots_<slug>.csv`` — top-:data:`HOTSPOT_TOP_N` dwell cells per
+  session (every session, at its own native grid resolution): ``session``, ``rank``, ``cellRow``,
+  ``cellCol``, ``centerImageX``, ``centerImageY``, ``dwellMs``, ``dwellFrac``. Ties broken
+  deterministically (value descending, flat index ascending — see
+  :func:`blinded_focus.metrics.top_hotspots`).
+- per slide, when any session has a schema/3+ ``path`` (Tier 1 A5): ``transitions_<slug>.csv`` —
+  top-:data:`TRANSITIONS_TOP_N` directed cell-to-cell transitions per session: ``session``,
+  ``fromCell``, ``toCell``, ``count`` (ties broken deterministically — see
+  :func:`blinded_focus.metrics.top_transitions`).
 - ``summary.md`` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers,
   (Phase 2) headline annotation-coverage + cursor-coupling numbers, and (Phase 3, gated on
   ``--graded``) a "Navigation ↔ diagnostic accuracy" section — overall accuracy, per-metric r/n/
@@ -57,7 +71,9 @@ Output files (written to ``--out DIR``):
   ``<out>/<slug>/``, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
   ``--res`` resolution (``..._scanpath_raster.png`` — the trustworthy high-magnification map,
   independent of the recorded grid) and one heatmap per magnification band
-  (``..._magband<N>.png``).
+  (``..._magband<N>.png``); plus, per slide when any session has a path (Tier 1 A6):
+  ``overlay_<slug>_scanpaths.png`` — every path-carrying session's viewport-center path on one
+  shared axis (not part of the numeric-parity contract — a PNG, existence/valid-magic only).
 
 Design note on "matrices" (``compare_<slug>.csv`` / ``scanpath_<slug>.csv`` / ``magbands_<slug>.csv``
 / ``annotations_<slug>.csv``): these are written as *tidy long-format* tables (one row per pair or
@@ -97,6 +113,11 @@ DEFAULT_RES = 512
 #: Default number of within-path zoom bands (terciles) for the magnification-split analysis,
 #: overridable via ``--magbands``.
 DEFAULT_MAGBANDS = 3
+#: Tier 1 A5: number of top-dwell cells exported per session to ``hotspots_<slug>.csv``.
+HOTSPOT_TOP_N = 5
+#: Tier 1 A5: number of top directed cell-transitions exported per session to
+#: ``transitions_<slug>.csv``.
+TRANSITIONS_TOP_N = 15
 
 
 def _res_grid_dims(img_w, img_h, res):
@@ -363,10 +384,17 @@ def _fmt(x, nd=3):
 #: Navigation-metric columns (from ``metrics.csv``) correlated against graded diagnostic accuracy
 #: in :func:`_nav_accuracy_rows`. All are grid/path-level per-session metrics already present as
 #: ``row`` keys in the main loop above.
+#:
+#: Tier 1 A1 extension: ``durationMs``, ``cursorOverSlidePct``, ``mouseViewportCouplingPx`` close
+#: the "recorded-but-uncorrelated" gap identified by the data-dimension audit -- they were already
+#: written to ``metrics.csv`` but never joined against graded accuracy. (``decisionLatencyMs``, the
+#: fourth recorded-but-uncorrelated dimension, is sourced directly from ``decision_rows`` rather
+#: than this metrics.csv-backed list -- see :func:`_nav_accuracy_rows`'s dedicated block below.)
 NAV_ACCURACY_COLS = [
     "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
     "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
     "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
+    "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx",
 ]
 #: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or
 #: with zero variance on either side) :func:`_pearson_guarded` returns blank, never a numerically
@@ -385,10 +413,43 @@ def _pearson_guarded(xs, ys, min_n=MIN_CORRELATION_N):
     return float(np.corrcoef(xs, ys)[0, 1])
 
 
+def _nav_stat_row(metric_name, xs, ys):
+    """Shared point-biserial-r + group mean/median/meanDiff computation for one navigation metric,
+    given already-filtered/zipped ``(xs, ys)`` pairs (``xs`` = the metric's value, ``ys`` = the
+    matching 0/1 graded ``correct``). Factored out of :func:`_nav_accuracy_rows`'s per-column loop
+    so the Tier 1 A1 ``decisionLatencyMs`` row (sourced directly from ``decision_rows``, not via
+    the ``metrics_rows`` column loop) computes its stats identically, not via a parallel
+    reimplementation that could silently drift from the original."""
+    r = _pearson_guarded(ys, xs)
+    correct_vals = [x for x, y in zip(xs, ys) if y == 1]
+    incorrect_vals = [x for x, y in zip(xs, ys) if y == 0]
+    mean_correct = float(statistics.mean(correct_vals)) if correct_vals else float("nan")
+    mean_incorrect = float(statistics.mean(incorrect_vals)) if incorrect_vals else float("nan")
+    median_correct = float(statistics.median(correct_vals)) if correct_vals else float("nan")
+    median_incorrect = float(statistics.median(incorrect_vals)) if incorrect_vals else float("nan")
+    mean_diff = (
+        (mean_correct - mean_incorrect)
+        if (len(correct_vals) >= 2 and len(incorrect_vals) >= 2)
+        else float("nan")
+    )
+    return {
+        "metric": metric_name,
+        "n": len(xs),
+        "pointBiserialR": r,
+        "meanCorrect": mean_correct,
+        "meanIncorrect": mean_incorrect,
+        "medianCorrect": median_correct,
+        "medianIncorrect": median_incorrect,
+        "meanDiff": mean_diff,
+    }
+
+
 def _nav_accuracy_rows(metrics_rows, decision_rows):
     """Join decisions' hand-graded ``correct`` (0/1) onto ``metrics_rows`` by the stable
     ``(slide, sessionId)`` key (never the display label), then compute a guarded point-biserial r
-    plus group means/medians per navigation column in :data:`NAV_ACCURACY_COLS`.
+    plus group means/medians per navigation column in :data:`NAV_ACCURACY_COLS` (via
+    :func:`_nav_stat_row`), plus (Tier 1 A1) a ``decisionLatencyMs`` row sourced directly from
+    ``decision_rows``.
 
     Returns ``(rows, had_any_graded)`` -- ``had_any_graded`` gates whether ``nav_accuracy.csv`` and
     the summary section get written at all (only when at least one ``--graded`` row was supplied).
@@ -420,28 +481,27 @@ def _nav_accuracy_rows(metrics_rows, decision_rows):
                 continue
             xs.append(float(v))
             ys.append(correct_by[key])
-        r = _pearson_guarded(ys, xs)
-        correct_vals = [x for x, y in zip(xs, ys) if y == 1]
-        incorrect_vals = [x for x, y in zip(xs, ys) if y == 0]
-        mean_correct = float(statistics.mean(correct_vals)) if correct_vals else float("nan")
-        mean_incorrect = float(statistics.mean(incorrect_vals)) if incorrect_vals else float("nan")
-        median_correct = float(statistics.median(correct_vals)) if correct_vals else float("nan")
-        median_incorrect = float(statistics.median(incorrect_vals)) if incorrect_vals else float("nan")
-        mean_diff = (
-            (mean_correct - mean_incorrect)
-            if (len(correct_vals) >= 2 and len(incorrect_vals) >= 2)
-            else float("nan")
-        )
-        rows.append({
-            "metric": col,
-            "n": len(xs),
-            "pointBiserialR": r,
-            "meanCorrect": mean_correct,
-            "meanIncorrect": mean_incorrect,
-            "medianCorrect": median_correct,
-            "medianIncorrect": median_incorrect,
-            "meanDiff": mean_diff,
-        })
+        rows.append(_nav_stat_row(col, xs, ys))
+
+    # Tier 1 A1: decisionLatencyMs is sourced directly from decision_rows -- it and `correct`
+    # already live on the SAME (slide, sessionId) decision entry, so there is no cross-table join
+    # to perform here at all (unlike the metrics_rows columns above); iterating decision_rows
+    # directly is itself the (slide, sessionId)-keyed join, with no label bridge in sight.
+    lat_xs, lat_ys = [], []
+    for r in decision_rows:
+        if r["correct"] not in (0, 1):
+            continue
+        lat = r.get("decisionLatencyMs")
+        if lat == "" or lat is None:
+            continue
+        try:
+            lat_val = float(lat)
+        except (TypeError, ValueError):
+            continue
+        lat_xs.append(lat_val)
+        lat_ys.append(r["correct"])
+    rows.append(_nav_stat_row("decisionLatencyMs", lat_xs, lat_ys))
+
     return rows, had_any_graded
 
 
@@ -615,6 +675,16 @@ def analyze(
                 "annotationReentryCount": "",
                 "cursorOverSlidePct": "",
                 "mouseViewportCouplingPx": "",
+                # Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-...): A2 turn-angle
+                # directionality + A4 active fraction are path-only (blank without a path at all,
+                # like the block above); A3 mouse kinematics is additionally gated on schema/5
+                # mouse data (populated in the `has_mouse_data` branch below, alongside the
+                # existing Phase 2 cursor metrics).
+                "meanAbsTurnAngleDeg": "",
+                "turnAngleEntropy": "",
+                "mousePathLengthPx": "",
+                "mouseVelocityPxPerSec": "",
+                "activeFractionPct": "",
             }
 
             path = f.get("path")
@@ -642,9 +712,19 @@ def analyze(
                 row["annotationReentryCount"] = m.annotation_reentry_count(
                     path, native_ann_mask, gw, gh, img_w, img_h
                 )
+                # Tier 1 A2 (turn-angle directionality) + A4 (active fraction): path-only, no
+                # mouse data or annotation needed -- populated whenever a path exists at all
+                # (blank/NaN internally on their own documented degenerate cases, e.g. <3 points).
+                row["meanAbsTurnAngleDeg"] = m.mean_abs_turn_angle_deg(path)
+                row["turnAngleEntropy"] = m.turn_angle_entropy(path)
+                row["activeFractionPct"] = m.active_fraction_pct(path, f.get("durationMs"))
                 if m.has_mouse_data(path):
                     row["cursorOverSlidePct"] = m.cursor_over_slide_pct(path)
                     row["mouseViewportCouplingPx"] = m.mouse_viewport_coupling_px(path)
+                    # Tier 1 A3: mouse kinematics, schema/5 only (same gate as the two cursor
+                    # metrics above).
+                    row["mousePathLengthPx"] = m.mouse_path_length_px(path)
+                    row["mouseVelocityPxPerSec"] = m.mouse_velocity_px_per_sec(path)
 
             metrics_rows.append(row)
 
@@ -741,6 +821,41 @@ def analyze(
         fig.heatmap(
             consensus_grid, tw, th, f"Consensus - {slide_key}",
             os.path.join(out_dir, f"consensus_{slide_slug}.png"),
+        )
+
+        # ------------------------------------------------------------------
+        # Tier 1 A5: top-hotspots export -- surfaces the already-implemented
+        # blinded_focus.metrics.top_hotspots at each session's own NATIVE (gw, gh) grid
+        # resolution (per-session metric, not cross-session -- same resolution convention as
+        # annotationReentryCount above). Written for every session unconditionally ("when any
+        # session has a grid, i.e. always" -- every fragment always carries a grid).
+        # ------------------------------------------------------------------
+        hotspot_rows = []
+        for sid in session_ids:
+            grid, gw, gh = native_grid[sid]
+            f = frag_by_sid[sid]
+            img_w = f.get("imageWidth", 1)
+            img_h = f.get("imageHeight", 1)
+            total = float(sum(grid))
+            label = labels.get(sid, sid)
+            for rank, (row_i, col_i, value) in enumerate(
+                m.top_hotspots(grid, gw, gh, HOTSPOT_TOP_N), start=1
+            ):
+                hotspot_rows.append({
+                    "session": label,
+                    "rank": rank,
+                    "cellRow": row_i,
+                    "cellCol": col_i,
+                    "centerImageX": (col_i + 0.5) / gw * img_w,
+                    "centerImageY": (row_i + 0.5) / gh * img_h,
+                    "dwellMs": value,
+                    "dwellFrac": (value / total) if total > 0 else "",
+                })
+        _write_csv(
+            os.path.join(out_dir, f"hotspots_{slide_slug}.csv"),
+            hotspot_rows,
+            ["session", "rank", "cellRow", "cellCol", "centerImageX", "centerImageY",
+             "dwellMs", "dwellFrac"],
         )
 
         # ------------------------------------------------------------------
@@ -889,6 +1004,28 @@ def analyze(
             )
 
         # ------------------------------------------------------------------
+        # Tier 1 A5: top-15 per-session directed cell-transitions (path sessions only) -- surfaces
+        # the already-implemented blinded_focus.metrics.transition_matrix (via top_transitions'
+        # deterministic top-N ranking) on each session's own visited-cell sequence (path_seq,
+        # already computed above at the slide's common (tw, th) grid, same sequence
+        # nRevisits/transitionEntropy use).
+        # ------------------------------------------------------------------
+        if scan_sids:
+            transition_rows = []
+            for sid in scan_sids:
+                label = labels.get(sid, sid)
+                for frm, to, cnt in m.top_transitions(path_seq[sid], TRANSITIONS_TOP_N):
+                    transition_rows.append({
+                        "session": label, "fromCell": frm, "toCell": to, "count": cnt,
+                    })
+            if transition_rows:
+                _write_csv(
+                    os.path.join(out_dir, f"transitions_{slide_slug}.csv"),
+                    transition_rows,
+                    ["session", "fromCell", "toCell", "count"],
+                )
+
+        # ------------------------------------------------------------------
         # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
         # ------------------------------------------------------------------
         if scan_sids:
@@ -973,6 +1110,17 @@ def analyze(
                                     os.path.join(slide_out, f"{sess_slug}_magband{band}.png"),
                                 )
 
+            # Tier 1 A6: multi-reader scanpath overlay -- one PNG per slide, every path-carrying
+            # session's viewport-center path on a shared axis. Gated on scan_sids (same
+            # path-presence gate as scanpath_<slug>.csv/magbands_<slug>.csv) so a slide with no
+            # paths at all doesn't emit a trivially-empty overlay.
+            if scan_sids:
+                overlay_sessions = [(labels.get(sid, sid), frag_by_sid[sid]["path"]) for sid in scan_sids]
+                fig.scanpath_multi_overlay(
+                    overlay_sessions, f"{slide_key} - all scanpaths",
+                    os.path.join(out_dir, f"overlay_{slide_slug}_scanpaths.png"),
+                )
+
     _write_csv(
         os.path.join(out_dir, "metrics.csv"),
         metrics_rows,
@@ -983,7 +1131,11 @@ def analyze(
          "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
          "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
          "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
-         "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"],
+         "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
+         # Tier 1 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above is unchanged.
+         "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx", "mouseVelocityPxPerSec",
+         "activeFractionPct"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):

@@ -108,12 +108,23 @@ def center_of_mass(grid, gw, gh):
 
 
 def top_hotspots(grid, gw, gh, n=5):
-    """Top-``n`` ``(row, col, value)`` cells by dwell value, descending."""
+    """Top-``n`` ``(row, col, value)`` cells by dwell value, descending.
+
+    Tie-break is **deterministic**: value descending, then flat row-major index ascending
+    (``sorted(..., key=lambda idx: (-flat[idx], idx))``) -- ``np.argsort`` alone is not
+    guaranteed stable (default ``kind="quicksort"``), so two cells sharing the same dwell value
+    (common for sparse/all-zero grids) could otherwise come back in a different order on every
+    call, and in a different order than the R port's tie-break. This matters once the function is
+    wired into a written CSV (``hotspots_<slug>.csv``, Tier 1 A5) where the ordering itself is
+    part of the file contents an R port must reproduce to 1e-6 (well, exactly, since indices are
+    integers) parity.
+    """
     gw, gh = int(gw), int(gh)
     g = np.asarray(grid, dtype=float).reshape(gh, gw)
-    flat_idx = np.argsort(g.flatten())[::-1][:n]
+    flat = g.flatten()
+    order = sorted(range(flat.size), key=lambda idx: (-flat[idx], idx))[:n]
     out = []
-    for idx in flat_idx:
+    for idx in order:
         row, col = divmod(int(idx), gw)
         out.append((row, col, float(g[row, col])))
     return out
@@ -279,6 +290,19 @@ def transition_matrix(seq):
     """``Counter`` of consecutive-transition pairs ``(seq[i], seq[i+1])``."""
     seq = list(seq)
     return Counter(zip(seq, seq[1:]))
+
+
+def top_transitions(seq, top_n=15):
+    """Top-``top_n`` ``(fromCell, toCell, count)`` directed transitions from :func:`transition_matrix`,
+    by count descending, ties broken by ``(fromCell, toCell)`` ascending -- **deterministic**
+    across languages. ``Counter.items()`` (Python) and ``table()`` (R) do not promise the same
+    iteration order for equal-count entries, so an unordered tie-break would let the two toolkits'
+    ``transitions_<slug>.csv`` (Tier 1 A5) disagree on which transitions make the top-``top_n``
+    cut whenever counts tie -- common on short scanpaths. ``[]`` for a sequence with fewer than 2
+    elements (no transitions)."""
+    counts = transition_matrix(seq)
+    items = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))
+    return [(frm, to, cnt) for (frm, to), cnt in items[:top_n]]
 
 
 def transition_entropy(seq):
@@ -833,6 +857,160 @@ def mouse_viewport_coupling_px(path):
     if not dists:
         return float("nan")
     return float(np.median(dists))
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+# A2 turn-angle directionality, A3 mouse kinematics (schema/5 only), A4 active fraction. Every
+# function here degrades to ``float("nan")`` (blank in ``metrics.csv`` via ``analyze._sanitize_nan``)
+# on its documented degenerate input -- never a raised exception -- matching the file's existing
+# blank-vs-0.0 convention for path-only metrics that are genuinely undefined (not "zero") absent
+# enough data.
+# ---------------------------------------------------------------------------
+
+def _headings_rad(path):
+    """``atan2(Δy, Δx)`` heading (radians) for each consecutive segment ``path[i] -> path[i+1]``,
+    length ``len(path)-1``. ``[]`` if ``path`` has fewer than 2 points."""
+    n = len(path)
+    if n < 2:
+        return []
+    heads = []
+    for i in range(n - 1):
+        dx = float(path[i + 1][1]) - float(path[i][1])
+        dy = float(path[i + 1][2]) - float(path[i][2])
+        heads.append(math.atan2(dy, dx))
+    return heads
+
+
+def _turn_angles_deg(path):
+    """Turn angle (degrees, wrapped to ``(-180, 180]``) at each interior point: ``φ_i =
+    wrapToPi(θ_{i+1} - θ_i)`` over the per-segment headings from :func:`_headings_rad`, where
+    ``wrapToPi`` is computed as ``atan2(sin(Δ), cos(Δ))`` (not a hand-rolled modulo -- Python's
+    ``%`` and R's ``%%`` disagree on the sign of a negative dividend, which would silently diverge
+    the two toolkits' wrap-around behavior right at the ``±180°`` boundary).
+
+    ``[]`` if ``path`` has fewer than 3 points -- a turn needs two consecutive segments, i.e. an
+    "interior" point with both a preceding and a following segment."""
+    if not path or len(path) < 3:
+        return []
+    heads = _headings_rad(path)
+    turns = []
+    for i in range(len(heads) - 1):
+        d = heads[i + 1] - heads[i]
+        wrapped = math.atan2(math.sin(d), math.cos(d))
+        turns.append(math.degrees(wrapped))
+    return turns
+
+
+def mean_abs_turn_angle_deg(path):
+    """A2: mean of ``|turn angle|`` (degrees) over every interior point of the ordered viewport
+    centers (see :func:`_turn_angles_deg`). ``float("nan")`` (blank) if the path has fewer than 3
+    points -- movement-ecology/visual-search directionality measure, not part of the pinned
+    Bylinskii saliency set."""
+    turns = _turn_angles_deg(path)
+    if not turns:
+        return float("nan")
+    return float(np.mean(np.abs(turns)))
+
+
+def turn_angle_entropy(path):
+    """A2: Shannon entropy (bits) of the turn-angle distribution (see :func:`_turn_angles_deg`),
+    binned into 8 equal bins over ``(-180°, 180°]`` (bin ``i`` = ``[-180+45i, -180+45(i+1))``,
+    with the ``+180°`` edge case folded into the last bin via ``min(7, ...)``), normalized by
+    ``log2(8)`` to ``[0, 1]`` (0 = all turns in one bin/perfectly directional, 1 = turns spread
+    evenly across all 8 bins). ``float("nan")`` (blank) if the path has fewer than 3 points."""
+    turns = _turn_angles_deg(path)
+    if not turns:
+        return float("nan")
+    bins = [0] * 8
+    for d in turns:
+        idx = int(min(7, math.floor((d + 180.0) / 45.0)))
+        idx = max(0, idx)
+        bins[idx] += 1
+    total = float(len(turns))
+    p = np.array([c / total for c in bins], dtype=float)
+    ent = float(-np.sum(p * np.log2(p + EPS)))
+    return ent / math.log2(8)
+
+
+def mouse_path_length_px(path):
+    """A3 (schema/5 only): sum of Euclidean distance (image px) between consecutive **on-slide**
+    cursor points (``mouseX``, ``mouseY``), sentinel-aware -- a segment is skipped entirely (not
+    bridged) if *either* endpoint is the off-viewer sentinel ``(-1, -1)`` (see
+    :func:`cursor_over_slide_pct`'s on-slide test), so a single off-slide sample does not inflate
+    the path length with a spurious long jump to/from the sentinel coordinate.
+
+    ``float("nan")`` (blank) if the path doesn't carry schema/5 mouse data at all (see
+    :func:`has_mouse_data`), or carries mouse data but has zero valid on-slide consecutive pairs
+    (e.g. every sample is off-slide) -- distinct from ``0.0``, which would misleadingly read as "a
+    measured, stationary cursor" rather than "nothing measurable"."""
+    if not has_mouse_data(path):
+        return float("nan")
+    total = 0.0
+    n_segments = 0
+    for i in range(len(path) - 1):
+        mx0, my0 = float(path[i][6]), float(path[i][7])
+        mx1, my1 = float(path[i + 1][6]), float(path[i + 1][7])
+        if not ((mx0 != -1 or my0 != -1) and (mx1 != -1 or my1 != -1)):
+            continue
+        total += math.hypot(mx1 - mx0, my1 - my0)
+        n_segments += 1
+    if n_segments == 0:
+        return float("nan")
+    return total
+
+
+def mouse_velocity_px_per_sec(path):
+    """A3 (schema/5 only): median of (distance / Δt_sec) over consecutive **on-slide** cursor
+    point pairs (same sentinel-aware segment rule as :func:`mouse_path_length_px` -- a segment
+    touching ``(-1, -1)`` at either endpoint is skipped, never bridged). A segment with
+    non-positive ``Δt`` is also skipped (not clamped to 0 velocity like
+    :func:`_step_velocities_px_per_sec` -- an undefined-duration on-slide segment has no rate to
+    report, so it is dropped from the median rather than counted as "no motion").
+
+    ``float("nan")`` (blank) if the path doesn't carry schema/5 mouse data at all, or carries
+    mouse data but has zero valid (on-slide, ``Δt > 0``) segments."""
+    if not has_mouse_data(path):
+        return float("nan")
+    vels = []
+    for i in range(len(path) - 1):
+        mx0, my0 = float(path[i][6]), float(path[i][7])
+        mx1, my1 = float(path[i + 1][6]), float(path[i + 1][7])
+        if not ((mx0 != -1 or my0 != -1) and (mx1 != -1 or my1 != -1)):
+            continue
+        dt = float(path[i + 1][0]) - float(path[i][0])
+        if dt <= 0:
+            continue
+        dist = math.hypot(mx1 - mx0, my1 - my0)
+        vels.append(dist / (dt / 1000.0))
+    if not vels:
+        return float("nan")
+    return float(np.median(vels))
+
+
+def active_fraction_pct(path, duration_ms):
+    """A4: ``activeFractionPct = 100 * durationMs / (tRel_last - tRel_first)`` -- the fragment's
+    recorded total dwell duration as a percentage of the scanpath's wall-clock span. **Not
+    clamped** at 100% -- a value above 100% is a real signal (the recorder's dwell-weight
+    accounting can exceed the raw tick-to-tick span for reasons upstream of this toolkit, e.g.
+    overlapping dwell attribution), not a data error to be hidden (Mello-Thoms engagement
+    confound).
+
+    ``float("nan")`` (blank) if the path has fewer than 2 points, ``duration_ms`` is missing/not a
+    real number, or the wall-clock span is zero or negative (degenerate/stationary-timestamp
+    path)."""
+    if not path or len(path) < 2:
+        return float("nan")
+    try:
+        d = float(duration_ms)
+    except (TypeError, ValueError):
+        return float("nan")
+    if d != d:  # NaN duration_ms
+        return float("nan")
+    span = float(path[-1][0]) - float(path[0][0])
+    if span <= 0:
+        return float("nan")
+    return 100.0 * d / span
 
 
 # ---------------------------------------------------------------------------

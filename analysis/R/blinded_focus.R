@@ -12,7 +12,9 @@
 # annotation metrics (schema/4+ `annotations` GeoJSON FeatureCollection: dwell-in-annotation %,
 # enrichment ratio, re-entry count, cross-user annotation IoU/coincidence) plus cursor metrics
 # (schema/5 8-element path points with `mouseX`/`mouseY`: % time on-slide, cursor/viewport
-# coupling distance).
+# coupling distance), and (Tier 1, docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md,
+# purely additive) turn-angle directionality, mouse kinematics (schema/5 only), active fraction,
+# hotspots_<slug>.csv / transitions_<slug>.csv exports, and a multi-reader scanpath overlay figure.
 #
 # This is the R sibling of `analysis/python/blinded_focus/` (io.py + metrics.py + figures.py +
 # analyze.py combined into one sourced file, per this project's R convention). Metric formulas are
@@ -431,13 +433,17 @@ center_of_mass <- function(grid, gw, gh) {
   c(cx / gw, cy / gh)
 }
 
-#' Top-`n` `(row, col, value)` cells by dwell value, descending. Not used by `run_analysis`'s
-#' output pipeline directly (mirrors `blinded_focus.metrics.top_hotspots` in Python for parity /
-#' potential ad-hoc use).
+#' Top-`n` `(row, col, value)` cells by dwell value, descending. Wired into `hotspots_<slug>.csv`
+#' (Tier 1 A5) -- mirrors `blinded_focus.metrics.top_hotspots` in Python exactly, including its
+#' tie-break: value descending, then flat row-major index ascending
+#' (`order(-g, seq_along(g))`, matching Python's `sorted(key=lambda idx: (-flat[idx], idx))`) --
+#' plain `order(g, decreasing=TRUE)` does not guarantee this ascending-index tie-break, so two
+#' cells sharing the same dwell value (common on sparse/all-zero grids) could otherwise come back
+#' in a different order than the Python port, breaking the CSV's exact-match parity.
 top_hotspots <- function(grid, gw, gh, n = 5) {
   gw <- as.integer(gw); gh <- as.integer(gh)
   g <- as.numeric(grid)
-  ord <- order(g, decreasing = TRUE)[seq_len(min(n, length(g)))]
+  ord <- order(-g, seq_along(g))[seq_len(min(n, length(g)))]
   lapply(ord, function(idx0) {
     idx <- idx0 - 1L
     list(row = idx %/% gw, col = idx %% gw, value = g[idx0])
@@ -658,6 +664,36 @@ transition_entropy <- function(seq) {
   total <- sum(counts)
   p <- as.numeric(counts) / total
   -sum(p * log2(p + EPS))
+}
+
+#' Top-`top_n` `(fromCell, toCell, count)` directed transitions -- consecutive-transition pairs
+#' `(seq[i], seq[i+1])` counted and ranked by count descending, ties broken by `(fromCell,
+#' toCell)` ascending -- **deterministic** across languages. Mirrors
+#' `blinded_focus.metrics.top_transitions` in the Python toolkit exactly: `table()`'s and
+#' `Counter.items()`'s iteration order over equal-count entries are not guaranteed to agree
+#' between R and Python, so an unordered tie-break would let the two toolkits'
+#' `transitions_<slug>.csv` (Tier 1 A5) disagree on which transitions make the top-`top_n` cut
+#' whenever counts tie -- common on short scanpaths. Inlines the count directly (via `table()`,
+#' the same idiom `transition_entropy` already uses above) rather than exposing a separate
+#' `transition_matrix` helper, since nothing else in this file needs the raw unordered counts.
+#' `list()` for a sequence with fewer than 2 elements (no transitions).
+top_transitions <- function(seq, top_n = 15) {
+  seq <- as.integer(seq)
+  n <- length(seq)
+  if (n < 2) {
+    return(list())
+  }
+  from_seq <- seq[1:(n - 1)]
+  to_seq <- seq[2:n]
+  key <- paste(from_seq, to_seq, sep = "->")
+  tab <- table(key)
+  counts <- as.integer(tab)
+  parts <- strsplit(names(tab), "->", fixed = TRUE)
+  from_i <- as.integer(vapply(parts, `[`, character(1), 1))
+  to_i <- as.integer(vapply(parts, `[`, character(1), 2))
+  ord <- order(-counts, from_i, to_i)
+  ord <- ord[seq_len(min(top_n, length(ord)))]
+  lapply(ord, function(i) list(fromCell = from_i[i], toCell = to_i[i], count = counts[i]))
 }
 
 #' Sum of consecutive-center Euclidean distances, in image px (`cx`, `cy` of each point).
@@ -1227,6 +1263,177 @@ mouse_viewport_coupling_px <- function(path) {
 }
 
 # ---------------------------------------------------------------------------
+# Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+# A2 turn-angle directionality, A3 mouse kinematics (schema/5 only), A4 active fraction. Mirrors
+# `blinded_focus.metrics`'s equivalent section in the Python toolkit function-for-function. Every
+# function here degrades to `NaN` (blank in `metrics.csv` via `write_csv_tidy`'s `na=""`) on its
+# documented degenerate input -- never a raised error -- matching the file's existing blank-vs-0.0
+# convention for path-only metrics that are genuinely undefined (not "zero") absent enough data.
+# ---------------------------------------------------------------------------
+
+#' `atan2(dy, dx)` heading (radians) for each consecutive segment `path[i] -> path[i+1]`, length
+#' `nrow(pm)-1`. `numeric(0)` if the path has fewer than 2 points.
+.headings_rad <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(numeric(0))
+  }
+  vapply(seq_len(n - 1), function(i) atan2(pm[i + 1, 3] - pm[i, 3], pm[i + 1, 2] - pm[i, 2]), numeric(1))
+}
+
+#' Turn angle (degrees, wrapped to `(-180, 180]`) at each interior point: `phi_i =
+#' wrapToPi(theta_{i+1} - theta_i)` over the per-segment headings from `.headings_rad`, where
+#' `wrapToPi` is computed as `atan2(sin(delta), cos(delta))` (not a hand-rolled modulo -- R's `%%`
+#' and Python's `%` disagree on the sign of a negative dividend, which would silently diverge the
+#' two toolkits' wrap-around behavior right at the `+/-180 deg` boundary).
+#'
+#' `numeric(0)` if the path has fewer than 3 points -- a turn needs two consecutive segments, i.e.
+#' an "interior" point with both a preceding and a following segment.
+.turn_angles_deg <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 3) {
+    return(numeric(0))
+  }
+  heads <- .headings_rad(path)
+  m <- length(heads)
+  if (m < 2) {
+    return(numeric(0))
+  }
+  d <- heads[2:m] - heads[1:(m - 1)]
+  wrapped <- atan2(sin(d), cos(d))
+  wrapped * 180.0 / pi
+}
+
+#' A2: mean of `|turn angle|` (degrees) over every interior point of the ordered viewport centers
+#' (see `.turn_angles_deg`). `NaN` (blank) if the path has fewer than 3 points -- movement-
+#' ecology/visual-search directionality measure, not part of the pinned Bylinskii saliency set.
+mean_abs_turn_angle_deg <- function(path) {
+  turns <- .turn_angles_deg(path)
+  if (length(turns) == 0) {
+    return(NaN)
+  }
+  mean(abs(turns))
+}
+
+#' A2: Shannon entropy (bits) of the turn-angle distribution (see `.turn_angles_deg`), binned into
+#' 8 equal bins over `(-180 deg, 180 deg]` (bin `i` = `[-180+45i, -180+45(i+1))`, with the `+180
+#' deg` edge case folded into the last bin via `min(7, ...)`), normalized by `log2(8)` to `[0, 1]`
+#' (0 = all turns in one bin/perfectly directional, 1 = turns spread evenly across all 8 bins).
+#' `NaN` (blank) if the path has fewer than 3 points.
+turn_angle_entropy <- function(path) {
+  turns <- .turn_angles_deg(path)
+  if (length(turns) == 0) {
+    return(NaN)
+  }
+  bins <- integer(8)
+  for (d in turns) {
+    idx <- min(7L, as.integer(floor((d + 180.0) / 45.0)))
+    idx <- max(0L, idx)
+    bins[idx + 1L] <- bins[idx + 1L] + 1L
+  }
+  total <- length(turns)
+  p <- bins / total
+  ent <- -sum(p * log2(p + EPS))
+  ent / log2(8)
+}
+
+#' A3 (schema/5 only): sum of Euclidean distance (image px) between consecutive **on-slide**
+#' cursor points (`mouseX`, `mouseY`), sentinel-aware -- a segment is skipped entirely (not
+#' bridged) if *either* endpoint is the off-viewer sentinel `(-1, -1)` (see
+#' `cursor_over_slide_pct`'s on-slide test), so a single off-slide sample does not inflate the
+#' path length with a spurious long jump to/from the sentinel coordinate.
+#'
+#' `NaN` (blank) if the path doesn't carry schema/5 mouse data at all (see `has_mouse_data`), or
+#' carries mouse data but has zero valid on-slide consecutive pairs (e.g. every sample is
+#' off-slide) -- distinct from `0.0`, which would misleadingly read as "a measured, stationary
+#' cursor" rather than "nothing measurable".
+mouse_path_length_px <- function(path) {
+  if (!has_mouse_data(path)) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  total <- 0.0
+  n_segments <- 0L
+  if (n >= 2) {
+    for (i in seq_len(n - 1)) {
+      mx0 <- pm[i, 7]; my0 <- pm[i, 8]
+      mx1 <- pm[i + 1, 7]; my1 <- pm[i + 1, 8]
+      if (!((mx0 != -1 || my0 != -1) && (mx1 != -1 || my1 != -1))) next
+      total <- total + sqrt((mx1 - mx0)^2 + (my1 - my0)^2)
+      n_segments <- n_segments + 1L
+    }
+  }
+  if (n_segments == 0L) {
+    return(NaN)
+  }
+  total
+}
+
+#' A3 (schema/5 only): median of (distance / dt_sec) over consecutive **on-slide** cursor point
+#' pairs (same sentinel-aware segment rule as `mouse_path_length_px` -- a segment touching `(-1,
+#' -1)` at either endpoint is skipped, never bridged). A segment with non-positive `dt` is also
+#' skipped (not clamped to 0 velocity like `.step_velocities_px_per_sec` -- an undefined-duration
+#' on-slide segment has no rate to report, so it is dropped from the median rather than counted as
+#' "no motion").
+#'
+#' `NaN` (blank) if the path doesn't carry schema/5 mouse data at all, or carries mouse data but
+#' has zero valid (on-slide, `dt > 0`) segments.
+mouse_velocity_px_per_sec <- function(path) {
+  if (!has_mouse_data(path)) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  vels <- numeric(0)
+  if (n >= 2) {
+    for (i in seq_len(n - 1)) {
+      mx0 <- pm[i, 7]; my0 <- pm[i, 8]
+      mx1 <- pm[i + 1, 7]; my1 <- pm[i + 1, 8]
+      if (!((mx0 != -1 || my0 != -1) && (mx1 != -1 || my1 != -1))) next
+      dt <- pm[i + 1, 1] - pm[i, 1]
+      if (dt <= 0) next
+      dist <- sqrt((mx1 - mx0)^2 + (my1 - my0)^2)
+      vels <- c(vels, dist / (dt / 1000.0))
+    }
+  }
+  if (length(vels) == 0) {
+    return(NaN)
+  }
+  stats::median(vels)
+}
+
+#' A4: `activeFractionPct = 100 * durationMs / (tRel_last - tRel_first)` -- the fragment's
+#' recorded total dwell duration as a percentage of the scanpath's wall-clock span. **Not
+#' clamped** at 100% -- a value above 100% is a real signal (the recorder's dwell-weight
+#' accounting can exceed the raw tick-to-tick span for reasons upstream of this toolkit, e.g.
+#' overlapping dwell attribution), not a data error to be hidden (Mello-Thoms engagement confound).
+#'
+#' `NaN` (blank) if the path has fewer than 2 points, `duration_ms` is missing/not a real number,
+#' or the wall-clock span is zero or negative (degenerate/stationary-timestamp path).
+active_fraction_pct <- function(path, duration_ms) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  if (is.null(duration_ms) || length(duration_ms) == 0) {
+    return(NaN)
+  }
+  d <- suppressWarnings(as.numeric(duration_ms))
+  if (length(d) == 0 || is.na(d)) {
+    return(NaN)
+  }
+  span <- pm[n, 1] - pm[1, 1]
+  if (span <= 0) {
+    return(NaN)
+  }
+  100.0 * d / span
+}
+
+# ---------------------------------------------------------------------------
 # Inter-observer agreement
 # ---------------------------------------------------------------------------
 
@@ -1609,6 +1816,45 @@ plot_difference <- function(grid, consensus_grid, gw, gh, title, out) {
   ggsave(out, plot = p, width = 6, height = 5, dpi = 110)
 }
 
+#' Tier 1 A6: every session's viewport-center path (image px) on one shared axis -- distinct color
+#' per session, alpha 0.5, start=o/end=x markers, legend. `labels_vec`/`paths` are parallel
+#' vectors/lists (one entry per session); a session with an empty/NULL path contributes no line.
+#' Matches `blinded_focus.figures.scanpath_multi_overlay` in the Python toolkit -- not part of the
+#' pinned numeric-parity contract (a PNG, not a CSV); only existence + valid PNG magic are
+#' asserted by the selftests, so this need not reproduce the Python figure pixel-for-pixel.
+plot_scanpath_multi_overlay <- function(labels_vec, paths, title, out) {
+  rows <- list(); start_rows <- list(); end_rows <- list()
+  for (i in seq_along(paths)) {
+    pm <- as_path_matrix(paths[[i]])
+    n <- nrow(pm)
+    if (is.null(n) || n == 0) next
+    lbl <- labels_vec[i]
+    rows[[length(rows) + 1]] <- data.frame(x = pm[, 2], y = pm[, 3], session = lbl, row.names = NULL)
+    start_rows[[length(start_rows) + 1]] <- data.frame(
+      x = pm[1, 2], y = pm[1, 3], session = lbl, row.names = NULL
+    )
+    end_rows[[length(end_rows) + 1]] <- data.frame(
+      x = pm[n, 2], y = pm[n, 3], session = lbl, row.names = NULL
+    )
+  }
+  if (length(rows) == 0) {
+    p <- ggplot() + labs(title = paste0(title, " (no path data)")) + theme_minimal()
+    ggsave(out, plot = p, width = 7, height = 6, dpi = 110)
+    return(invisible(NULL))
+  }
+  df <- do.call(rbind, rows)
+  start_df <- do.call(rbind, start_rows)
+  end_df <- do.call(rbind, end_rows)
+  p <- ggplot(df, aes(x = x, y = y, color = session)) +
+    geom_path(alpha = 0.5, linewidth = 0.8) +
+    geom_point(data = start_df, aes(x = x, y = y, color = session), shape = 16, size = 3) +
+    geom_point(data = end_df, aes(x = x, y = y, color = session), shape = 4, size = 3, stroke = 1.4) +
+    scale_y_reverse() +
+    labs(title = title, x = "image x (px)", y = "image y (px)", color = "session") +
+    theme_minimal()
+  ggsave(out, plot = p, width = 7, height = 6, dpi = 110)
+}
+
 #' Cumulative fraction of grid cells visited so far, plotted against relative time (ms), matching
 #' `blinded_focus.figures.coverage_over_time` in the Python toolkit.
 plot_coverage_over_time <- function(path, gw, gh, img_w, img_h, title, out) {
@@ -1716,6 +1962,11 @@ DEFAULT_RES <- 512
 #: Default number of within-path zoom bands (terciles) for the magnification-split analysis,
 #: overridable via `magbands=`.
 DEFAULT_MAGBANDS <- 3
+#: Tier 1 A5: number of top-dwell cells exported per session to `hotspots_<slug>.csv`.
+HOTSPOT_TOP_N <- 5L
+#: Tier 1 A5: number of top directed cell-transitions exported per session to
+#: `transitions_<slug>.csv`.
+TRANSITIONS_TOP_N <- 15L
 
 #' Aspect-preserving grid dims with the longest side capped at `res` (mirrors the QuPath
 #' extension's own `GRID_MAX`-style longest-side cap, and `blinded_focus.analyze._res_grid_dims`
@@ -1738,10 +1989,17 @@ DEFAULT_MAGBANDS <- 3
 #: Navigation-metric columns (from `metrics.csv`) correlated against graded diagnostic accuracy in
 #: `.nav_accuracy_rows`. All are grid/path-level per-session metrics already present as `row` keys
 #: in `analyze()`'s main loop.
+#:
+#: Tier 1 A1 extension: `durationMs`, `cursorOverSlidePct`, `mouseViewportCouplingPx` close the
+#: "recorded-but-uncorrelated" gap identified by the data-dimension audit -- they were already
+#: written to `metrics.csv` but never joined against graded accuracy. (`decisionLatencyMs`, the
+#: fourth recorded-but-uncorrelated dimension, is sourced directly from `decision_rows` rather than
+#: this metrics.csv-backed vector -- see `.nav_accuracy_rows`'s dedicated block below.)
 NAV_ACCURACY_COLS <- c(
   "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
   "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
-  "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy"
+  "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
+  "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx"
 )
 #: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or with
 #: zero variance on either side) `.pearson_guarded` returns `NaN` (blank), never a numerically
@@ -1762,9 +2020,41 @@ MIN_CORRELATION_N <- 5
   as.numeric(stats::cor(xs, ys, method = "pearson"))
 }
 
+#' Shared point-biserial-r + group mean/median/meanDiff computation for one navigation metric,
+#' given already-filtered/zipped `xs`/`ys` vectors (`xs` = the metric's value, `ys` = the matching
+#' 0/1 graded `correct`). Factored out of `.nav_accuracy_rows`'s per-column loop so the Tier 1 A1
+#' `decisionLatencyMs` row (sourced directly from `decision_rows`, not via the `metrics_rows`
+#' column loop) computes its stats identically, not via a parallel reimplementation that could
+#' silently drift from the original. Mirrors `blinded_focus.analyze._nav_stat_row` exactly.
+.nav_stat_row <- function(metric_name, xs, ys) {
+  r_val <- .pearson_guarded(ys, xs)
+  correct_vals <- xs[ys == 1]
+  incorrect_vals <- xs[ys == 0]
+  mean_correct <- if (length(correct_vals) > 0) mean(correct_vals) else NaN
+  mean_incorrect <- if (length(incorrect_vals) > 0) mean(incorrect_vals) else NaN
+  median_correct <- if (length(correct_vals) > 0) stats::median(correct_vals) else NaN
+  median_incorrect <- if (length(incorrect_vals) > 0) stats::median(incorrect_vals) else NaN
+  mean_diff <- if (length(correct_vals) >= 2 && length(incorrect_vals) >= 2) {
+    mean_correct - mean_incorrect
+  } else {
+    NaN
+  }
+  list(
+    metric = metric_name,
+    n = length(xs),
+    pointBiserialR = r_val,
+    meanCorrect = mean_correct,
+    meanIncorrect = mean_incorrect,
+    medianCorrect = median_correct,
+    medianIncorrect = median_incorrect,
+    meanDiff = mean_diff
+  )
+}
+
 #' Join decisions' hand-graded `correct` (0/1) onto `metrics_rows` by the stable `(slide,
 #' sessionId)` key (never the display label), then compute a guarded point-biserial r plus group
-#' means/medians per navigation column in `NAV_ACCURACY_COLS`.
+#' means/medians per navigation column in `NAV_ACCURACY_COLS` (via `.nav_stat_row`), plus (Tier 1
+#' A1) a `decisionLatencyMs` row sourced directly from `decision_rows`.
 #'
 #' Direct sessionId join: `metrics_rows` carries the stable `sessionId` (stamped in `analyze()`'s
 #' per-session loop, right next to the human display `label_for` label) -- so no label-based
@@ -1803,29 +2093,23 @@ MIN_CORRELATION_N <- 5
       xs <- c(xs, as.numeric(v))
       ys <- c(ys, cval)
     }
-    r_val <- .pearson_guarded(ys, xs)
-    correct_vals <- xs[ys == 1]
-    incorrect_vals <- xs[ys == 0]
-    mean_correct <- if (length(correct_vals) > 0) mean(correct_vals) else NaN
-    mean_incorrect <- if (length(incorrect_vals) > 0) mean(incorrect_vals) else NaN
-    median_correct <- if (length(correct_vals) > 0) stats::median(correct_vals) else NaN
-    median_incorrect <- if (length(incorrect_vals) > 0) stats::median(incorrect_vals) else NaN
-    mean_diff <- if (length(correct_vals) >= 2 && length(incorrect_vals) >= 2) {
-      mean_correct - mean_incorrect
-    } else {
-      NaN
-    }
-    rows[[length(rows) + 1]] <- list(
-      metric = col,
-      n = length(xs),
-      pointBiserialR = r_val,
-      meanCorrect = mean_correct,
-      meanIncorrect = mean_incorrect,
-      medianCorrect = median_correct,
-      medianIncorrect = median_incorrect,
-      meanDiff = mean_diff
-    )
+    rows[[length(rows) + 1]] <- .nav_stat_row(col, xs, ys)
   }
+
+  # Tier 1 A1: decisionLatencyMs is sourced directly from decision_rows -- it and `correct` already
+  # live on the SAME (slide, sessionId) decision entry, so there is no cross-table join to perform
+  # here at all (unlike the metrics_rows columns above); iterating decision_rows directly is
+  # itself the (slide, sessionId)-keyed join, with no label bridge in sight.
+  lat_xs <- numeric(0); lat_ys <- numeric(0)
+  for (r in decision_rows) {
+    if (is.na(r$correct)) next
+    lat <- r$decisionLatencyMs
+    if (is.null(lat) || is.na(lat)) next
+    lat_xs <- c(lat_xs, as.numeric(lat))
+    lat_ys <- c(lat_ys, r$correct)
+  }
+  rows[[length(rows) + 1]] <- .nav_stat_row("decisionLatencyMs", lat_xs, lat_ys)
+
   list(rows = rows, had_any_graded = had_any_graded)
 }
 
@@ -2027,7 +2311,17 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # Path-dependent Phase 2 metrics: blank without a path at all (schema/1, /2).
         annotationReentryCount = NA,
         cursorOverSlidePct = NA,
-        mouseViewportCouplingPx = NA
+        mouseViewportCouplingPx = NA,
+        # Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-...): A2 turn-angle
+        # directionality + A4 active fraction are path-only (blank without a path at all, like the
+        # block above); A3 mouse kinematics is additionally gated on schema/5 mouse data
+        # (populated in the `has_mouse_data` branch below, alongside the existing Phase 2 cursor
+        # metrics).
+        meanAbsTurnAngleDeg = NA,
+        turnAngleEntropy = NA,
+        mousePathLengthPx = NA,
+        mouseVelocityPxPerSec = NA,
+        activeFractionPct = NA
       )
 
       path <- f$path
@@ -2054,9 +2348,18 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # slide's common (tw, th)) -- a per-session metric, not a cross-session one, so it should
         # stay at the resolution the fragment actually recorded.
         row$annotationReentryCount <- annotation_reentry_count(path, native_ann_mask, gw, gh, img_w, img_h)
+        # Tier 1 A2 (turn-angle directionality) + A4 (active fraction): path-only, no mouse data
+        # or annotation needed -- populated whenever a path exists at all (NA internally on their
+        # own documented degenerate cases, e.g. <3 points).
+        row$meanAbsTurnAngleDeg <- mean_abs_turn_angle_deg(path)
+        row$turnAngleEntropy <- turn_angle_entropy(path)
+        row$activeFractionPct <- active_fraction_pct(path, if (!is.null(f$durationMs)) f$durationMs else NA)
         if (has_mouse_data(path)) {
           row$cursorOverSlidePct <- cursor_over_slide_pct(path)
           row$mouseViewportCouplingPx <- mouse_viewport_coupling_px(path)
+          # Tier 1 A3: mouse kinematics, schema/5 only (same gate as the two cursor metrics above).
+          row$mousePathLengthPx <- mouse_path_length_px(path)
+          row$mouseVelocityPxPerSec <- mouse_velocity_px_per_sec(path)
         }
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
@@ -2155,6 +2458,42 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     plot_heatmap(
       consensus_grid, tw, th, paste0("Consensus - ", slide_key),
       file.path(out_dir, paste0("consensus_", slide_slug, ".png"))
+    )
+
+    # ------------------------------------------------------------------
+    # Tier 1 A5: top-hotspots export -- surfaces the already-implemented top_hotspots at each
+    # session's own NATIVE (gw, gh) grid resolution (per-session metric, not cross-session -- same
+    # resolution convention as annotationReentryCount above). Written for every session
+    # unconditionally ("when any session has a grid, i.e. always" -- every fragment always carries
+    # a grid).
+    # ------------------------------------------------------------------
+    hotspot_rows <- list()
+    for (sid in session_ids) {
+      ng <- native_grid[[sid]]
+      f <- by_session[[sid]]
+      img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
+      img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
+      total <- sum(ng$grid)
+      label <- label_for(sid, labels)
+      hs <- top_hotspots(ng$grid, ng$gw, ng$gh, HOTSPOT_TOP_N)
+      for (i in seq_along(hs)) {
+        h <- hs[[i]]
+        hotspot_rows[[length(hotspot_rows) + 1]] <- list(
+          session = label,
+          rank = i,
+          cellRow = h$row,
+          cellCol = h$col,
+          centerImageX = (h$col + 0.5) / ng$gw * img_w,
+          centerImageY = (h$row + 0.5) / ng$gh * img_h,
+          dwellMs = h$value,
+          dwellFrac = if (total > 0) h$value / total else NA
+        )
+      }
+    }
+    write_csv_tidy(
+      hotspot_rows, file.path(out_dir, paste0("hotspots_", slide_slug, ".csv")),
+      c("session", "rank", "cellRow", "cellCol", "centerImageX", "centerImageY",
+        "dwellMs", "dwellFrac")
     )
 
     # ------------------------------------------------------------------
@@ -2305,6 +2644,31 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
+    # Tier 1 A5: top-15 per-session directed cell-transitions (path sessions only) -- surfaces
+    # the already-implemented top_transitions ranking on each session's own visited-cell sequence
+    # (path_seq, already computed above at the slide's common (tw, th) grid, same sequence
+    # n_revisits/transition_entropy use).
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      transition_rows <- list()
+      for (sid in scan_sids) {
+        label <- label_for(sid, labels)
+        tt <- top_transitions(path_seq[[sid]], TRANSITIONS_TOP_N)
+        for (t in tt) {
+          transition_rows[[length(transition_rows) + 1]] <- list(
+            session = label, fromCell = t$fromCell, toCell = t$toCell, count = t$count
+          )
+        }
+      }
+      if (length(transition_rows) > 0) {
+        write_csv_tidy(
+          transition_rows, file.path(out_dir, paste0("transitions_", slide_slug, ".csv")),
+          c("session", "fromCell", "toCell", "count")
+        )
+      }
+    }
+
+    # ------------------------------------------------------------------
     # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
     # ------------------------------------------------------------------
     if (length(scan_sids) > 0) {
@@ -2395,6 +2759,19 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           }
         }
       }
+
+      # Tier 1 A6: multi-reader scanpath overlay -- one PNG per slide, every path-carrying
+      # session's viewport-center path on a shared axis. Gated on scan_sids (same path-presence
+      # gate as scanpath_<slug>.csv/magbands_<slug>.csv) so a slide with no paths at all doesn't
+      # emit a trivially-empty overlay.
+      if (length(scan_sids) > 0) {
+        overlay_labels <- sapply(scan_sids, function(sid) label_for(sid, labels))
+        overlay_paths <- lapply(scan_sids, function(sid) by_session[[sid]]$path)
+        plot_scanpath_multi_overlay(
+          overlay_labels, overlay_paths, paste0(slide_key, " - all scanpaths"),
+          file.path(out_dir, paste0("overlay_", slide_slug, "_scanpaths.png"))
+        )
+      }
     }
   }
 
@@ -2408,7 +2785,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
       "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
       "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
-      "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"
+      "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
+      # Tier 1 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
+      # order above is unchanged.
+      "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx", "mouseVelocityPxPerSec",
+      "activeFractionPct"
     )
   )
 
