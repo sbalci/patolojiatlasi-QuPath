@@ -1355,6 +1355,25 @@ check_tier4_direct_unit_asserts <- function() {
   )
   stopifnot(abs(grid[2]) < 1e-9 && abs(grid[3]) < 1e-9)
 
+  # Idle-exclusion regression (Tier 2 B1, reused via idle_step_mask): a step whose dt exceeds
+  # IDLE_GAP_MS is skipped even though both its endpoints are on-slide -- the user stepped away,
+  # so that interval's cursor position should contribute no dwell weight at all.
+  path_idle <- list(
+    c(0, 0, 0, 400, 300, 1000, 10, 10),       # on-slide, cell(0,0)
+    c(70000, 0, 0, 400, 300, 1000, 60, 60),   # on-slide, cell(1,1) -- dt=70000 > IDLE_GAP_MS -> idle
+    c(70100, 0, 0, 400, 300, 1000, 20, 20)    # on-slide, cell(0,0) -- dt=100, active
+  )
+  grid_idle <- mouse_raster_from_path(path_idle, 100, 100, 2, 2)
+  stopifnot(!is.null(grid_idle))
+  stopifnot(
+    "expected cell(0,0)==0 -- the idle step0 must contribute no weight" =
+      abs(grid_idle[1] - 0.0) < 1e-9
+  )
+  stopifnot(
+    "expected cell(1,1)==100 -- the active step1's dt, owned by point1's on-slide cursor" =
+      abs(grid_idle[4] - 100.0) < 1e-9
+  )
+
   # ---- C3: dtw_distance ----
   stopifnot(
     "dtw_distance should be blank when path_a is empty" =
