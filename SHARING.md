@@ -164,8 +164,14 @@ Telling a reader, in the moment, that their viewing is being recorded can **chan
     per-user metrics, cross-user agreement/consensus, reference (expert/ROI) comparison, scanpath.
   - `tools/quicklook-blinded-focus.py` — zero-dependency heatmap PNGs for a fast look.
   - Use condition-coded `--labels sessionId,label` (never names).
-- The recording captures the three axes: **spatial** (dwell grid), **temporal** (dwell-ms + total
-  duration), and **directional** (the ordered scanpath, schema/3).
+- The recording captures five dimensions: **spatial** (dwell grid, hotspots, coincidence),
+  **temporal** (dwell-ms + total duration, idle time), **zoom** (magnification bands, scanning vs
+  drilling), **trajectory** (the ordered scanpath, schema/3: turn-angle, fixations, DTW), and
+  **mouse/cursor** (schema/5: cursor coupling, mouse-dwell agreement). The enriched metric set
+  (idle-exclusion caveats, fixation/DTW/mouse-agreement outputs, the canonical-vs-tercile
+  magnification-band switch, etc.) is documented under "Phase 3 enrichment" in
+  [`analysis/python/README.md`](analysis/python/README.md) /
+  [`analysis/R/README.md`](analysis/R/README.md) — read it before comparing older vs newer output.
 
 #### If your study records a per-slide diagnosis — the two-pass hand-grading workflow
 

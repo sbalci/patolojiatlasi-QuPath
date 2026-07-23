@@ -1,5 +1,26 @@
 # Navigation data-dimension audit (2026-07-23)
 
+## Status (2026-07-24)
+
+**Tier 1 + Tier 2 + Tier 3 gaps below are now IMPLEMENTED** on `feat/phase3-analysis-enrichment`
+(spec: `docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md`; tasks T1–T6, Python + R
++ parity; documented in `analysis/python/README.md` / `analysis/R/README.md`'s "Phase 3
+enrichment" sections). A handful of items were explicitly left out of scope:
+
+- **Mouse ICC** — cross-reader mouse-dwell agreement (`mouse_<slug>.csv`) got `cc`/`iou`/
+  `coincidenceLevel`, not an ICC(2,1) analog for the mouse-dwell grid.
+- **ROI-entry segment-linearity variant** — `meanSegmentLinearity` only implements the uniform
+  top-hotspot-based sub-path segmentation; the alternative of splitting at annotation-ROI-entry
+  boundaries (mentioned below under Tier 3) was not built.
+- **Per-band spatial agreement** — extending cc/IoU/coincidence to a per-magnification-band basis
+  (mentioned below under Tier 3) did not make it into the Tier 2/3 spec and is not implemented.
+
+Everything else listed under Tier 1/2/3 below was built. (Fréchet distance, also mentioned below,
+was a deliberate design choice **against** — DTW was implemented instead, not a deferred item.)
+Tier 3 C5 (`promptShownMs` recorder change) still needs its live QuPath smoke test per the spec's
+own flag; the analysis-side changes (all of Tier 1–3) are covered by the selftest + Python↔R
+parity harness with no GUI required.
+
 Adversarial 5-agent audit of the blinded navigation-research pipeline: are the five data dimensions
 captured **end-to-end** in DATA GENERATION (recorder → fragment fields) and ANALYSIS (Python + R
 metrics/outputs)? Verdict per dimension + ranked gaps. Source: workflow `waz99m104`.
