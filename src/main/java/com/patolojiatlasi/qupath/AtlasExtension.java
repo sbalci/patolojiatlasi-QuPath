@@ -272,7 +272,13 @@ public class AtlasExtension implements QuPathExtension {
         if (focusHeatmap.isBlinded())
             return;
 
+        // Same projectDir used for both startBlinded() call sites below -- the optional
+        // decisionPromptOnLeave sidecar flag (default true) controls whether Task 3's leave-prompt
+        // auto-fires for this project.
+        File projectDir = BlindedResearch.projectDir(newProj);
+
         if (BlindedResearch.hasConsented(newProj)) {
+            focusHeatmap.setDecisionPromptOnLeave(BlindedResearch.decisionPromptOnLeave(projectDir));
             focusHeatmap.startBlinded();
             return;
         }
@@ -289,6 +295,7 @@ public class AtlasExtension implements QuPathExtension {
         Optional<ButtonType> choice = alert.showAndWait();
         if (choice.isPresent() && choice.get() == ButtonType.OK) {
             BlindedResearch.markConsented(newProj);
+            focusHeatmap.setDecisionPromptOnLeave(BlindedResearch.decisionPromptOnLeave(projectDir));
             focusHeatmap.startBlinded();
         }
         // else: declined -- consented stays false, so the notice is shown again on next open and

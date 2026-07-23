@@ -268,6 +268,9 @@ public final class FocusHeatmap {
     private MenuItem clearItem;
     private MenuItem saveItem;
     private MenuItem contributeItem;
+    // Only meaningful while blinded recording is active — enabled in startBlinded(), disabled in
+    // stopBlinded(), mirroring the (inverse) clearItem/saveItem/contributeItem toggling above.
+    private MenuItem decisionItem;
     private Stage window;
     private ImageView windowView;
 
@@ -317,9 +320,15 @@ public final class FocusHeatmap {
                 stopBlinded();
         });
 
+        // Per-slide decision capture (menu path). Only meaningful while blinded recording is
+        // active, so it starts disabled and is toggled from startBlinded()/stopBlinded().
+        decisionItem = new MenuItem("Bu slayt için tanı/karar gir…");
+        decisionItem.setOnAction(e -> promptDecisionInteractive());
+        decisionItem.setDisable(!blindedRecording);
+
         Menu menu = new Menu("Odak ısı haritası");
         menu.getItems().addAll(overlayItem, windowItem, clearItem, saveItem, contributeItem,
-                new SeparatorMenuItem(), keepItem, blindedItem);
+                new SeparatorMenuItem(), keepItem, blindedItem, decisionItem);
         return menu;
     }
 
@@ -394,7 +403,65 @@ public final class FocusHeatmap {
     String getCurrentDecisionDiagnosis() { Decision d = currentDecision; return d == null ? null : d.diagnosis(); }
     Integer getCurrentDecisionConfidence() { Decision d = currentDecision; return d == null ? null : d.confidence(); }
     boolean isBlindedRecording() { return blindedRecording; }
-    void setDecisionPromptOnLeave(boolean v) { this.decisionPromptOnLeave = v; }
+    /** Public (not package-private) because it's called from {@code AtlasExtension}, a different
+     *  package ({@code com.patolojiatlasi.qupath} vs. {@code ...focus}) — mirrors {@link #startBlinded()}
+     *  being public for the same cross-package reason. */
+    public void setDecisionPromptOnLeave(boolean v) { this.decisionPromptOnLeave = v; }
+
+    /** Menu path: show the decision dialog (pre-filled for edit) for the CURRENT slide and record the
+     *  result. Runs on the FX thread from the menu item's action, between Timeline pulses — unlike the
+     *  leave path, {@code showAndWait} is legal here without deferring via {@code Platform.runLater}. */
+    void promptDecisionInteractive() {
+        if (!blindedRecording || currentMap == null) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Karar kaydı yalnızca gezinme kaydı açık ve bir slayt açıkken kullanılabilir.")
+                    .showAndWait();
+            return;
+        }
+        DecisionDialog.DecisionInput in = DecisionDialog.show(qupath,
+                getCurrentDecisionDiagnosis(), getCurrentDecisionConfidence());
+        if (in != null)
+            recordDecision(in.diagnosis(), in.confidence());
+    }
+
+    /** Leave path gate: prompt on leaving the current slide only if enabled, no decision yet, not
+     *  already declined this session, the reader actually dwelled (short-glance gate), and no prompt
+     *  already pending. */
+    private boolean shouldPromptDecisionOnLeave() {
+        return decisionPromptOnLeave
+                && currentDecision == null
+                && !pendingDecisionSave
+                && currentUri != null
+                && !decisionPromptedSlides.contains(currentUri)
+                && currentMap != null
+                && currentMap.getTotalWeight() >= MIN_DWELL_FOR_PROMPT_MS;
+    }
+
+    /** Deferred continuation of a leave-prompt: runs via {@code Platform.runLater} (between Timeline
+     *  pulses ⇒ {@code showAndWait} is legal), never called synchronously from {@code switchTo}/{@code
+     *  tick}. Prompts for the slide just left (state captured eagerly in {@code snap}, before the
+     *  instance fields moved on to the next slide — see {@link #currentSnapshot()}), saves its
+     *  fragment with whatever decision (or none) was entered, then releases the {@link
+     *  #pendingDecisionSave} gate that {@link #tick()} checks on every pulse. Best-effort: any failure
+     *  is logged and swallowed, never thrown into the FX event queue. */
+    private void deferredDecisionPromptAndSave(BlindedSnapshot snap, String leavingUri) {
+        try {
+            DecisionDialog.DecisionInput in = DecisionDialog.show(qupath, null, null);
+            Decision decision = null;
+            if (in != null) {
+                long ms = System.currentTimeMillis() - snap.slideStartMs();
+                decision = new Decision(in.diagnosis(), in.confidence(), ms);
+            } else if (leavingUri != null) {
+                decisionPromptedSlides.add(leavingUri);   // declined — don't nag on revisit
+            }
+            writeBlindedFragmentSync(snap, decision);
+            deleteCheckpoint();
+        } catch (Exception e) {
+            logger.debug("Deferred decision prompt/save failed: {}", e.getMessage());
+        } finally {
+            pendingDecisionSave = false;
+        }
+    }
 
     /** Begin blinded recording: hides/disables any visuals, resets the current slide's map, and
      *  starts the sampling timer if it isn't already running. Idempotent (no-op if already blinded). */
@@ -418,6 +485,9 @@ public final class FocusHeatmap {
             saveItem.setDisable(true);
         if (contributeItem != null)
             contributeItem.setDisable(true);
+        // Inverse of the three disables above: decision entry is only meaningful WHILE blinded.
+        if (decisionItem != null)
+            decisionItem.setDisable(false);
         if (currentMap != null)
             currentMap.clear();
         // Attribution capture: resolve the target dir once, here, from whichever project is open
@@ -497,12 +567,17 @@ public final class FocusHeatmap {
             saveItem.setDisable(false);
         if (contributeItem != null)
             contributeItem.setDisable(false);
+        // Inverse of startBlinded(): decision entry is only meaningful while blinded.
+        if (decisionItem != null)
+            decisionItem.setDisable(true);
         if (blindedItem != null && blindedItem.isSelected())
             blindedItem.setSelected(false);
         refreshTracking();
     }
 
     private void tick() {
+        if (pendingDecisionSave)
+            return;   // a deferred leave-prompt+save is in flight; don't sample/switch until it completes
         try {
             QuPathViewer v = qupath.getViewer();
             ImageData<BufferedImage> id = (v == null) ? null : v.getImageData();
@@ -709,13 +784,24 @@ public final class FocusHeatmap {
         // Independent of keepMaps: while blinded, always persist the finished slide's real dwell
         // time before it's discarded — otherwise switching slides mid-session would silently lose it.
         if (blindedRecording && currentMap != null && !currentMap.isEmpty()) {
-            // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
-            // disk first — an async write could still be in flight if a crash follows, losing this
-            // slide with no checkpoint fallback. A small JSON write is negligible vs. slide loading.
-            writeBlindedFragmentSync(currentSnapshot(), currentDecision);
-            // The fragment just written now carries whatever the checkpoint was tracking for the
-            // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
-            deleteCheckpoint();
+            if (shouldPromptDecisionOnLeave()) {
+                // tick() runs inside a Timeline KeyFrame -- showAndWait() here would throw
+                // IllegalStateException. Capture the slide BEING LEFT now (before any reset below),
+                // gate tick() via pendingDecisionSave, and defer the prompt+save to run between
+                // pulses via Platform.runLater. Never save synchronously in this branch.
+                BlindedSnapshot snap = currentSnapshot();
+                String leavingUri = currentUri;
+                pendingDecisionSave = true;   // tick() early-returns until the deferred save completes
+                javafx.application.Platform.runLater(() -> deferredDecisionPromptAndSave(snap, leavingUri));
+            } else {
+                // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
+                // disk first — an async write could still be in flight if a crash follows, losing this
+                // slide with no checkpoint fallback. A small JSON write is negligible vs. slide loading.
+                writeBlindedFragmentSync(currentSnapshot(), currentDecision);
+                // The fragment just written now carries whatever the checkpoint was tracking for the
+                // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
+                deleteCheckpoint();
+            }
         }
         removeOverlay();
         currentViewer = v;
