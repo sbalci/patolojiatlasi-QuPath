@@ -46,8 +46,8 @@ failure.
 
 ```bash
 Rscript run_analysis.R <input...> --out DIR \
-    [--reference SESSIONID] [--roi roi.geojson] [--labels labels.csv] [--figures] \
-    [--res 512] [--magbands 3]
+    [--reference SESSIONID] [--roi roi.geojson] [--labels labels.csv] [--key key.csv] \
+    [--graded graded.csv] [--figures] [--res 512] [--magbands 3]
 ```
 
 - `<input...>` — one or more fragment JSON files, directories (recursively globbed for
@@ -67,6 +67,15 @@ Rscript run_analysis.R <input...> --out DIR \
   the magnification-band heatmaps (aspect-preserving; see `.res_grid_dims`).
 - `--magbands N` (default 3) — number of within-path zoom bands (terciles) for the
   magnification-split analysis (see `zoom_band_labels`).
+- `--key key.csv` — a `slideKey,correctDx` CSV (optional header row). **Display-only**: populates
+  `decisions.csv`'s `correctDx` column beside the reader's own `diagnosis` for a human to compare;
+  never string-matched against `diagnosis` to derive `correct`.
+- `--graded graded.csv` — a `slideKey,sessionId,correct` CSV (optional header row; `correct`
+  parsed case-insensitively from `1`/`0`/`true`/`false`/`yes`/`no`/`correct`/`incorrect`). The
+  **only** source of `decisions.csv`'s `correct` column (hand-graded, never auto-derived from
+  comparing `diagnosis` to `correctDx`) and the switch that enables the navigation↔accuracy
+  correlation (`nav_accuracy.csv` + the `summary.md` section). Joined by the stable
+  `(slideKey, sessionId)` pair, never the display label.
 
 Also usable as a library: `source("blinded_focus.R")` gives you `load_fragments`, `resample_nn`,
 `cc`/`sim`/`kld`/`nss`/`auc_judd`/`iou`, `visited_sequence`/`levenshtein_sim`, `mean_pairwise_cc`/
@@ -74,7 +83,8 @@ Also usable as a library: `source("blinded_focus.R")` gives you `load_fragments`
 `coincidence_level`/`region_coverage_pct`, `get_annotations`/`rings_from_feature_collection`/
 `rasterize_roi`/`annotations_area_px`, `dwell_in_mask_pct`/`enrichment_ratio`/
 `annotation_reentry_count`, `has_mouse_data`/`cursor_over_slide_pct`/`mouse_viewport_coupling_px`,
-the `plot_*` ggplot2 builders, and the top-level `analyze()` pipeline function directly.
+`get_decision`/`load_answer_key`/`load_graded`, the `plot_*` ggplot2 builders, and the top-level
+`analyze()` pipeline function directly.
 
 ### Example
 
@@ -97,7 +107,9 @@ both toolkits can be placed side by side and diffed directly:
 | `scanpath_<slug>.csv` | Written when at least one session on the slide has a `path` (schema /3+). Pairwise `sessionA,sessionB,levenshteinSim,transitionEntropy` over visited-cell sequences (same tidy/diagonal-reuse convention as `compare_<slug>.csv`); sessions without a path are excluded entirely. |
 | `magbands_<slug>.csv` | Written alongside `scanpath_<slug>.csv` (same path-session gating). Tidy `session,band,bandTimeMs,bandTimePct` — per-session dwell time (and % of that session's total path duration) in each of `--magbands` within-path zoom bands (band 0 = lowest zoom, highest index = highest zoom; see `zoom_band_labels`). |
 | `annotations_<slug>.csv` | Written when at least one session on the slide has drawn at least one annotation (schema/4+ `annotations`). Pairwise `sessionA,sessionB,iou,coincidenceLevel` over each session's own rasterized annotated region (tidy long format, same diagonal-reuse convention as `compare_<slug>.csv`) — `iou` is 0.0 (not 1.0) on the self-diagonal for a session with no annotations at all (empty-mask self-comparison; same convention `iou()` uses elsewhere), and 1.0 for a session whose own (non-empty) annotated region is compared to itself. `coincidenceLevel` is written once per slide (the diagonal row of the first session), using the same fixed visited-footprint denominator as the dwell-grid `coincidenceLevel`. |
-| `summary.md` | Slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/duration spread + coincidence level + mean avgZoom/scanningRate/drillingRate/magnificationPercentage + mean dwellInAnnotationPct/annotation coincidence level + mean cursorOverSlidePct, and the reference ranking when applicable. |
+| `decisions.csv` | Written when at least one fragment anywhere carries a hand-entered `decision` (else skipped with a stderr warning and no file). One row per (slide, session): `slide,sessionId,session,diagnosis,confidence,confidenceScaled,decisionMs,decisionLatencyMs,correctDx,correct`. `sessionId` is the stable join key (`session` is only the human display label). `confidenceScaled = (confidence-1)/4`, blank if `confidence` isn't numeric. `decisionLatencyMs` currently always equals `decisionMs` (both relative to the slide's recording start, never a wall clock) — kept as its own column for a future recorder revision to diverge into; **for a decision captured via the leave-prompt it reflects the reader's whole time on the slide** (comparable to `metrics.csv`'s `durationMs`), not a short dialog-fill duration. `correctDx` comes from `--key` (display-only, blank without it); `correct` comes **only** from `--graded` (blank otherwise) — never derived by comparing `diagnosis` to `correctDx`. |
+| `nav_accuracy.csv` | Written only when `--graded` supplies at least one graded decision. One row per navigation metric — `avgZoom,zoomVariance,magnificationPercentage,scanningRatePxPerMin,drillingRatePerMin,coveragePct,dwellInAnnotationPct,enrichmentRatio,searchFocusRatio,linearity,pathVelocityPxPerSec,entropy,transitionEntropy` — joined to `correct` by the stable `(slide, sessionId)` pair: `metric,n,pointBiserialR,meanCorrect,meanIncorrect,medianCorrect,medianIncorrect,meanDiff`. `pointBiserialR` (plain Pearson `stats::cor(method="pearson")`, not a point-biserial-specific function) is blank unless `n >= 5` and both `correct` and the metric have non-zero variance. `meanCorrect`/`meanIncorrect`/`medianCorrect`/`medianIncorrect` are reported once that group alone has `>= 1` value; `meanDiff` additionally needs `>= 2` values in **both** groups. No p-values or confidence intervals at this pilot scale. |
+| `summary.md` | Slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/duration spread + coincidence level + mean avgZoom/scanningRate/drillingRate/magnificationPercentage + mean dwellInAnnotationPct/annotation coincidence level + mean cursorOverSlidePct, and the reference ranking when applicable — plus, only when `--graded` supplies at least one graded decision, a "Navigation ↔ diagnostic accuracy" section (overall accuracy, per-metric r/n/group means from `nav_accuracy.csv`, a confidence-calibration summary `calibrationGap`/`brierScore`/`confidenceAccuracyR`, and a pilot-scale honest-limits note). |
 | `<slug>/<session>_heatmap.png`, `_scanpath.png`, `_coverage.png`, `_scanpath_raster.png`, `_magband<N>.png` | With `--figures`: per-(slide, session) figures. `_heatmap` is at native recorded-grid resolution; `_scanpath`/`_coverage`/`_scanpath_raster`/`_magband<N>` are only written for sessions with a `path` (schema /3+). `_scanpath_raster` is the scanpath-rasterized fine heatmap at `--res` resolution (independent of the recorded grid); `_magband<N>` is one heatmap per within-path zoom band that has at least one step (bands with zero steps are skipped, so a session may have fewer than `--magbands` band PNGs). |
 
 `<slug>` is a filesystem-safe hash-suffixed slug of the `slideKey` (see `blinded_focus.R`'s
@@ -220,6 +232,66 @@ GeoJSON themselves, only an already-rasterized logical cell mask.
   not a matrix) — the fix (`.ring_to_matrix`, handling matrix/data.frame/list-of-points rings
   uniformly) also repairs the pre-existing `--roi` CLI path, not just the new annotation path.
 
+### Phase 3 — decision capture + navigation↔diagnostic-accuracy
+
+Motivated by the same literature review's "diagnostic impact" framing: does navigation behavior
+predict diagnostic accuracy? A reader's per-slide diagnosis is captured in QuPath as free text
+(menu action **"Bu slayt için tanı/karar gir…"**, plus an optional leave-a-slide auto-prompt) and
+rides inside the fragment as an additive `decision` object (`diagnosis`, `confidence` 1–5 or
+`null`, `decisionMs` relative to the slide's recording start). This **does not** introduce a new
+file type or schema number — decisions still ship inside the existing `atlas-focus-contribution/5`
+fragment, and `get_decision(fragment)` defaults to an empty list for any schema/1–5 fragment
+recorded without one.
+
+- **Grading is deliberately two-pass and hand-done, never automatic.** A free-text diagnosis is
+  never string-matched (not even case/synonym-normalized) against an answer key — auto-matching
+  free text would silently misgrade valid alternate phrasings, and for Turkish text specifically
+  would reintroduce the İ/ı case-folding hazard this design was chosen to avoid entirely.
+  `load_answer_key` (`--key`) supplies only a **display-only** reference (`correctDx`);
+  `load_graded` (`--graded`) is the **only** source of the hand-graded `correct` (0/1) column.
+- **`decisions.csv`** — one row per (slide, session), written once after the outer loop (like
+  `metrics.csv`, not per-slide): `slide, sessionId, session, diagnosis, confidence,
+  confidenceScaled, decisionMs, decisionLatencyMs, correctDx, correct`. `confidenceScaled =
+  (confidence-1)/4` (blank if `confidence` isn't numeric). `decisionLatencyMs` is currently
+  identical to `decisionMs` — kept as its own column so a future recorder revision measuring "time
+  actually spent on the dialog" has somewhere to diverge into. **Caveat:** for a decision captured
+  via the leave-prompt path, this value is on the same scale as the slide's whole `durationMs`
+  (the reader had the entire slide-viewing time available before the prompt fired), not a short
+  reaction-time measurement — don't treat it as one without checking which capture path produced a
+  given row. Written only when at least one fragment anywhere carries a decision; otherwise skipped
+  with a stderr warning and no file.
+- **`nav_accuracy.csv`** — written only when `--graded` supplies at least one graded decision. One
+  row per navigation metric in `NAV_ACCURACY_COLS` (`avgZoom, zoomVariance,
+  magnificationPercentage, scanningRatePxPerMin, drillingRatePerMin, coveragePct,
+  dwellInAnnotationPct, enrichmentRatio, searchFocusRatio, linearity, pathVelocityPxPerSec,
+  entropy, transitionEntropy` — all already present as `metrics.csv` columns), joined to `correct`
+  by the stable `(slide, sessionId)` pair (never the display `session` label, so relabeling
+  sessions with a different `--labels` between the two passes can't misalign grades): `metric, n,
+  pointBiserialR, meanCorrect, meanIncorrect, medianCorrect, medianIncorrect, meanDiff`.
+- **Guard policy** — no statistic here is ever reported as numerically unstable/undefined:
+  - `pointBiserialR` — plain Pearson r (`stats::cor(method = "pearson")`, deliberately **not** a
+    point-biserial-specific function — same numeric identity for a 0/1 vs continuous pair, and the
+    exact numeric match `.pearson_guarded`'s Python counterpart (`numpy.corrcoef`) is verified
+    against) between `correct` and the metric. Blank (`NaN`) unless `n >= 5` **and** both `correct`
+    and the metric have non-zero variance (`.pearson_guarded`).
+  - `meanCorrect`/`meanIncorrect`/`medianCorrect`/`medianIncorrect` — reported whenever that group
+    alone has `>= 1` value (soft guard; the recommended primary readout at tiny n — still eyeball
+    the `n` column).
+  - `meanDiff` — additionally needs `>= 2` values in **both** groups.
+  - The confidence-calibration trio printed in `summary.md` (`calibrationGap =
+    mean(confidenceScaled) - mean(correct)`, `brierScore = mean((confidenceScaled-correct)^2)`,
+    both soft-guarded over graded rows with a numeric `confidenceScaled`; `confidenceAccuracyR`
+    hard-guarded exactly like `pointBiserialR`).
+  - **No p-values or confidence intervals anywhere** — deliberate, both for Python↔R parity and
+    because pilot-scale `n` (typically 5–20 sessions per workshop) doesn't support them; only `r`
+    and `n` are reported.
+- **Honest-limits note** (also printed verbatim in `summary.md`'s accuracy section): viewport-only
+  navigation tracking has a **null-result precedent** in the literature this feature is modeled
+  on — a correlation found here should not be over-read as proof that zoom/scan behavior drives
+  accuracy. Coincidence/accuracy numbers are **cohort-composition-dependent** (a different mix of
+  easy/hard cases, or of expert/trainee readers, changes the numbers). Everything here is
+  **pilot-scale** — report `r` and `n`, nothing stronger.
+
 ## Parity with the Python toolkit
 
 Both toolkits are pinned to the same formulas and the same output-file contract (file names, CSV
@@ -265,7 +337,11 @@ parsed as typed values. Small, intentional, harmless divergences:
   `pathTruncated` (bool), and `annotations` (a GeoJSON `FeatureCollection` snapshot of the reader's
   own slide annotations — geometry in image px, plus each feature's `properties`, which may
   include `name`, `classification.name`, and `metadata.ANNOTATION_DESCRIPTION`; defaults to an
-  empty FeatureCollection via `get_annotations` when absent or malformed). Fragments without a
-  `path` (schema `/1`, `/2`) still get full spatial/dwell analysis; only the scanpath-, zoom/
-  navigation-, and path-dependent annotation/cursor outputs are skipped (left blank in
-  `metrics.csv`) for them.
+  empty FeatureCollection via `get_annotations` when absent or malformed), and (Phase 3) an
+  optional `decision` object (`diagnosis` string, `confidence` 1–5 or `NULL`, `decisionMs` relative
+  to the slide's recording start) — present only when the reader recorded one; `get_decision`
+  defaults to an empty list otherwise. `decision` is a purely additive field on the existing schema
+  (still `atlas-focus-contribution/5` — no new schema number, no new file type, no `SCHEMAS`
+  allowlist change). Fragments without a `path` (schema `/1`, `/2`) still get full spatial/dwell
+  analysis; only the scanpath-, zoom/navigation-, and path-dependent annotation/cursor outputs are
+  skipped (left blank in `metrics.csv`) for them.

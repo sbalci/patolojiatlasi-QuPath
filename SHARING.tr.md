@@ -60,6 +60,15 @@ görmek nasıl baktığınızı değiştirir). Doğal çalışın.
 > belirten bir bilgi yazmayın** (hasta adı, protokol/dosya numarası) — geometri anonimdir, ancak
 > yazdığınız serbest metin olduğu gibi saklanır.
 
+> ⚠️ **Çalışmanız bir tanı/karar girmenizi istiyorsa,** bir slaydı bitirdiğinizde otomatik
+> sorulabilir, ya da kendiniz **Extensions ▸ Araştırma ▸ Odak ısı haritası ▸ Bu slayt için
+> tanı/karar gir…** yolunu açabilirsiniz — serbest metin bir tanı ve isteğe bağlı 1–5 güven
+> derecesi girersiniz. Tanı alanına **kimlik belirten bir bilgi yazmayın** (hasta adı, protokol/
+> dosya numarası) — anotasyon notunda olduğu gibi, yazdığınız metin olduğu gibi saklanır.
+> Koordinatörünüz otomatik soruyu kapatabilir; her hâlükârda **QuPath'ten çıkmadan önceki son
+> slaytta otomatik soru çıkmaz** (kapanış sırasında bir pencere açmak güvenli değildir) — o slayt
+> için karar kaydetmek isterseniz kapatmadan önce yukarıdaki menü eylemini kullanın.
+
 ### 4. Verinizi geri gönderin
 
 Bitirdiğinizde (projeyi kapatın veya QuPath'ten çıkın), eklenti proje klasörüne **tek bir dosya**
@@ -157,6 +166,31 @@ Bir okuyucuya, tam işe başlarken izlendiğini söylemek **nasıl baktığını
   (`--labels sessionId,label`) kullanın.
 - Kayıt üç ekseni yakalar: **uzamsal** (odak ızgarası), **zamansal** (bekleme-ms + toplam süre) ve
   **yönsel** (sıralı gezinme yolu, şema/3).
+
+#### Çalışmanız slayt-başı tanı kaydediyorsa — iki geçişli elle-notlandırma iş akışı
+
+Kaydedilen tanı her zaman **serbest metindir**; hiçbir şey otomatik notlandırmaz (eşanlamlı
+eşleştirme yok, cevap anahtarıyla metin karşılaştırması yok). Notlandırma, bilinçli, elle yapılan
+ikinci bir geçiştir:
+
+1. **Birinci geçiş — tanıları toplayın.** Analizi, karşılaştırma için bir referans yanıt görmek
+   isterseniz isteğe bağlı `--key key.csv` (`slideKey,correctDx`, başlık satırı isteğe bağlı) ile
+   çalıştırın. Bu, `decisions.csv` dosyasını yazar — her (slayt, oturum) için bir satır: `diagnosis`,
+   `confidence` (1–5 veya boş) ve yanında `correctDx` — ama `correct` sütunu **boştur**. `--key`
+   yalnızca **görüntüleme amaçlıdır**: hiçbir satırı doğru/yanlış olarak işaretlemez.
+2. **Elle notlandırın.** `decisions.csv`'yi açın, her satırın `diagnosis`'ini referans yanıtla siz
+   karşılaştırın (klinik muhakeme — serbest metin bırakmanın amacı da bu, seçmeli liste değil) ve
+   yeni bir sayfa yazın: `slideKey,sessionId,correct` (`correct` = `1`/`0`). Birleştirme kararlı
+   `sessionId` üzerinden yapılır, görüntülenen `session` etiketi üzerinden **değil** — bu yüzden
+   oturumları sonradan yeniden etiketleseniz bile bu sayfa geçerli kalır.
+3. **İkinci geçiş — notlarla yeniden çalıştırın.** 2. adımdaki sayfanızla `--graded
+   decisions_graded.csv` vererek yeniden çalıştırın. Bu, `correct` sütunu dolu olarak
+   `decisions.csv`'yi yeniden yazar ve ayrıca `nav_accuracy.csv` ile `summary.md` içinde bir
+   "Navigation ↔ diagnostic accuracy" bölümü yazar — gezinme ölçütlerini (yakınlaştırma, tarama
+   hızı, kapsama, …) doğru/yanlış ile ilişkilendirir; kurallar
+   [`analysis/python/README.md`](analysis/python/README.md) /
+   [`analysis/R/README.md`](analysis/R/README.md) içinde belgelenmiştir. `--graded` olmadan hiçbir
+   doğruluk ilişkisi hesaplanmaz — en az bir elle notlandırılmış satır gerekir.
 
 ---
 
