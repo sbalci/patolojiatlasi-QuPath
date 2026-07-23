@@ -207,7 +207,7 @@ def load_labels(csv_path):
     with open(csv_path, newline="", encoding="utf-8") as fh:
         rows = list(csv.reader(fh))
     start = 0
-    if rows and rows[0][0].strip().lower() in ("sessionid", "session_id", "session"):
+    if rows and rows[0] and rows[0][0].strip().lower() in ("sessionid", "session_id", "session"):
         start = 1
     labels = {}
     for row in rows[start:]:
@@ -245,7 +245,7 @@ def load_answer_key(csv_path):
         return {}
     with open(csv_path, newline="", encoding="utf-8") as fh:
         rows = list(csv.reader(fh))
-    start = 1 if rows and rows[0][0].strip().lower() in ("slidekey", "slide_key", "slide") else 0
+    start = 1 if rows and rows[0] and rows[0][0].strip().lower() in ("slidekey", "slide_key", "slide") else 0
     key = {}
     for row in rows[start:]:
         if len(row) >= 2 and row[0].strip():
@@ -268,7 +268,7 @@ def load_graded(csv_path):
         return {}
     with open(csv_path, newline="", encoding="utf-8") as fh:
         rows = list(csv.reader(fh))
-    start = 1 if rows and rows[0][0].strip().lower() in ("slidekey", "slide_key", "slide") else 0
+    start = 1 if rows and rows[0] and rows[0][0].strip().lower() in ("slidekey", "slide_key", "slide") else 0
     graded = {}
     for row in rows[start:]:
         if len(row) >= 3 and row[0].strip() and row[1].strip():

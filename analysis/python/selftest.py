@@ -290,6 +290,49 @@ GRADED_SLIDE_KEY = "sha256:selftest-slide-graded-0001"
 #: The display-only answer key's correctDx for GRADED_SLIDE_KEY.
 GRADED_KEY_DX = "tumor"
 
+COLLISION_SLIDE_KEY = "sha256:selftest-slide-collision-0001"
+#: Shared display label a coordinator's --labels CSV (realistically) assigns to two DIFFERENT
+#: sessions on the same slide -- the exact scenario the Finding-1 regression guards against.
+COLLISION_LABEL = "Reader X"
+
+
+def _n_nonzero_grid(n_nonzero, value=100.0):
+    """A ``GW*GH``-length grid with the first ``n_nonzero`` cells set to ``value``, the rest 0.0
+    -- gives ``coveragePct`` (``count(g>0)/len(g)*100``) a known, hand-derivable value."""
+    g = [0.0] * (GW * GH)
+    for i in range(n_nonzero):
+        g[i] = value
+    return g
+
+
+def build_label_collision_fragments():
+    """Regression fixture for the Finding-1 fix: two sessions on ONE slide that a coordinator's
+    ``--labels`` CSV maps to the SAME display label -- a realistic mistake (e.g. two different
+    readers both entered as "Reader X"). ``collide-a`` is dense (high ``coveragePct``, hand-graded
+    ``correct=1``); ``collide-b`` is sparse (low ``coveragePct``, hand-graded ``correct=0``).
+
+    Pre-fix, :func:`blinded_focus.analyze._nav_accuracy_rows` recovered each metrics row's
+    sessionId via a ``(slide, display-label)`` lookup into ``decision_rows`` -- since both sessions
+    share the same label, that lookup collapses to whichever session's decision row was built
+    last (``collide-b``, in fragment/insertion order), so BOTH metrics rows would be
+    (mis)attributed to ``collide-b``'s grade (``correct=0``). The "correct" group vanishes
+    entirely (``meanCorrect`` renders blank) even though ``collide-a`` was genuinely graded
+    correct. Post-fix (direct ``sessionId`` join, no label bridge), each session's own
+    ``coveragePct`` lands in its own, correctly-graded group.
+
+    Returns ``(fragments, labels_rows, graded_rows)``.
+    """
+    dense = _n_nonzero_grid(60)   # 60/64 -> 93.75% coverage
+    sparse = _n_nonzero_grid(4)   # 4/64 -> 6.25% coverage
+    frag_a = _fragment("collide-a", 2, dense, 6000, 30, slide_key=COLLISION_SLIDE_KEY)
+    frag_b = _fragment("collide-b", 2, sparse, 6000, 30, slide_key=COLLISION_SLIDE_KEY)
+    labels_rows = [("collide-a", COLLISION_LABEL), ("collide-b", COLLISION_LABEL)]
+    graded_rows = [
+        (COLLISION_SLIDE_KEY, "collide-a", 1),
+        (COLLISION_SLIDE_KEY, "collide-b", 0),
+    ]
+    return [frag_a, frag_b], labels_rows, graded_rows
+
 
 def build_graded_fragments():
     """A second, independent slide (6 sessions, no paths/annotations) purpose-built to exercise
@@ -488,6 +531,51 @@ def check_hand_grade_only(graded_out_dir):
     )
     assert g4["correct"] == "0", (
         f"g4 was hand-graded incorrect despite a diagnosis/correctDx match -- got {g4['correct']}"
+    )
+
+
+def check_label_collision_regression(tmp):
+    """Finding-1 regression guard: two sessions on one slide sharing a display label via
+    ``--labels`` must still be joined to their OWN grade via the stable ``sessionId``, never the
+    label -- see :func:`build_label_collision_fragments`. Pre-fix, both sessions' ``coveragePct``
+    would collapse into whichever session's decision row was built last, emptying the "correct"
+    group entirely (``meanCorrect`` blank) instead of correctly separating the two groups."""
+    fragments, labels_rows, graded_rows = build_label_collision_fragments()
+    in_dir = os.path.join(tmp, "in_collision")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+
+    labels_csv_path = os.path.join(tmp, "labels_collision.csv")
+    _write_simple_csv(labels_csv_path, ["sessionId", "label"], labels_rows)
+    graded_csv_path = os.path.join(tmp, "graded_collision.csv")
+    _write_simple_csv(graded_csv_path, ["slideKey", "sessionId", "correct"], graded_rows)
+
+    out_dir = os.path.join(tmp, "out_collision")
+    analyze([in_dir], out_dir, labels_csv=labels_csv_path, graded_csv=graded_csv_path)
+
+    nav_path = os.path.join(out_dir, "nav_accuracy.csv")
+    assert os.path.isfile(nav_path), "nav_accuracy.csv missing for the label-collision fixture"
+    with open(nav_path, newline="", encoding="utf-8") as fh:
+        nav_rows = list(csv.DictReader(fh))
+    by_metric = {r["metric"]: r for r in nav_rows}
+    cov = by_metric["coveragePct"]
+
+    expected_dense = 60.0 / (GW * GH) * 100.0
+    expected_sparse = 4.0 / (GW * GH) * 100.0
+
+    assert cov["n"] == "2", f"expected both collision sessions joined (n=2), got {cov}"
+    assert cov["meanCorrect"] != "", (
+        "REGRESSION (Finding 1): meanCorrect is blank -- the pre-fix label-based join collapses "
+        "both same-labeled sessions into the 'incorrect' group, emptying 'correct' entirely"
+    )
+    assert cov["meanIncorrect"] != "", "REGRESSION (Finding 1): meanIncorrect should not be blank"
+    assert abs(float(cov["meanCorrect"]) - expected_dense) < 1e-6, (
+        f"expected meanCorrect == collide-a's (graded correct=1) coveragePct "
+        f"({expected_dense}), got {cov['meanCorrect']} -- sessionId join is misattributing groups"
+    )
+    assert abs(float(cov["meanIncorrect"]) - expected_sparse) < 1e-6, (
+        f"expected meanIncorrect == collide-b's (graded correct=0) coveragePct "
+        f"({expected_sparse}), got {cov['meanIncorrect']} -- sessionId join is misattributing groups"
     )
 
 
@@ -857,6 +945,9 @@ def run():
 
         check_nav_accuracy(out_dir, graded_out)
         check_hand_grade_only(graded_out)
+
+        # --- Finding-1 regression: two sessions sharing a --labels display label on one slide ---
+        check_label_collision_regression(tmp)
 
         print("OK: all selftest assertions passed")
     finally:

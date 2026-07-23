@@ -205,9 +205,9 @@ slug <- function(text, maxlen = 40) {
 }
 
 #' Composite lookup key for a `(slideKey, sessionId)` pair, used by `load_graded`'s named-list
-#' lookup and `.nav_accuracy_rows`'s `(slide, session) -> sessionId` / `(slide, sessionId) ->
-#' correct` maps. `` (ASCII unit separator, never expected in a slideKey/sessionId/session
-#' label) avoids the collision risk of plain string concatenation (e.g. `"ab"+"c"` vs `"a"+"bc"`).
+#' lookup and `.nav_accuracy_rows`'s `(slide, sessionId) -> correct` map.  (ASCII unit
+#' separator, never expected in a slideKey/sessionId/session label) avoids the collision risk of
+#' plain string concatenation (e.g. `"ab"+"c"` vs `"a"+"bc"`).
 .decision_key <- function(a, b) {
   paste0(as.character(a), "", as.character(b))
 }
@@ -1766,21 +1766,19 @@ MIN_CORRELATION_N <- 5
 #' sessionId)` key (never the display label), then compute a guarded point-biserial r plus group
 #' means/medians per navigation column in `NAV_ACCURACY_COLS`.
 #'
-#' `metrics_rows` carries the session's human DISPLAY LABEL (`session`, via `label_for`), while
-#' `decision_rows` carries both that same label and the stable `sessionId` -- so `label_to_sid`
-#' recovers the `sessionId` for each metrics row via the label it shares with `decision_rows` (same
-#' run, same label->sessionId assignment, so this is a safe 1:1 lookup) -- NOT a direct sessionId
-#' join, since `metrics_rows` itself never carries `sessionId`. Mirrors
-#' `blinded_focus.analyze._nav_accuracy_rows` exactly, including this label-bridged join.
+#' Direct sessionId join: `metrics_rows` carries the stable `sessionId` (stamped in `analyze()`'s
+#' per-session loop, right next to the human display `label_for` label) -- so no label-based
+#' bridge is needed here at all. (Prior versions recovered the sessionId via a `(slide,
+#' display-label)` lookup into `decision_rows`, which silently collapsed two sessions sharing a
+#' display label -- e.g. via `--labels` mapping distinct sessionIds to the same name -- onto
+#' whichever session's decision row was built last, misattributing/erasing the other's grade.
+#' Stamping sessionId directly on `metrics_rows` removes the label from this join entirely.)
+#' Mirrors `blinded_focus.analyze._nav_accuracy_rows` exactly.
 #'
 #' Returns `list(rows=..., had_any_graded=...)` -- `had_any_graded` gates whether
 #' `nav_accuracy.csv` and the summary section get written at all (only when at least one
 #' `--graded` row was supplied).
 .nav_accuracy_rows <- function(metrics_rows, decision_rows) {
-  label_to_sid <- list()
-  for (r in decision_rows) {
-    label_to_sid[[.decision_key(r$slide, r$session)]] <- r$sessionId
-  }
   correct_by <- list()
   for (r in decision_rows) {
     if (!is.na(r$correct)) {
@@ -1792,9 +1790,7 @@ MIN_CORRELATION_N <- 5
   for (col in NAV_ACCURACY_COLS) {
     xs <- numeric(0); ys <- numeric(0)
     for (mr in metrics_rows) {
-      sid <- label_to_sid[[.decision_key(mr$slide, mr$session)]]
-      if (is.null(sid)) next
-      key <- .decision_key(mr$slide, sid)
+      key <- .decision_key(mr$slide, mr$sessionId)
       cval <- correct_by[[key]]
       if (is.null(cval)) next
       # Some metrics (e.g. enrichmentRatio) store a literal NaN in the in-memory row for a
@@ -1990,6 +1986,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       row <- list(
         slide = slide_key,
         session = label_for(sid, labels),
+        # Stable join key for .nav_accuracy_rows -- NOT written to metrics.csv (its fieldnames
+        # vector below deliberately omits "sessionId"; write_csv_tidy's `r[fieldnames]` subset
+        # drops it silently at write time). Kept in-memory only so the nav-accuracy join below
+        # never has to bridge back through the (possibly colliding) human display label -- see
+        # .nav_accuracy_rows's docs.
+        sessionId = sid,
         durationMs = if (!is.null(f$durationMs)) as.numeric(f$durationMs) else NA,
         sampleCount = if (!is.null(f$sampleCount)) as.numeric(f$sampleCount) else NA,
         coveragePct = coverage(grid) * 100.0,
@@ -2073,6 +2075,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         NA_real_
       }
       decision_ms <- if (!is.null(dec$decisionMs)) as.numeric(dec$decisionMs) else NA_real_
+      # Blank iff absent/NULL or its string form is empty; otherwise the string form -- so a
+      # numeric 0 sessionId stably maps to "0" (this already matched that rule before the Python
+      # parity fix: `nzchar(as.character(0))` is TRUE since "0" has 1 char, so this line needs no
+      # change here -- see the Python sibling's `_sid = f.get("sessionId"); sid_stable = "" if
+      # _sid is None or str(_sid) == "" else str(_sid)`, added to align it with this rule).
       sid_stable <- if (!is.null(f$sessionId) && nzchar(as.character(f$sessionId))) as.character(f$sessionId) else ""
       correct_dx <- if (!is.null(answer_key[[slide_key]])) answer_key[[slide_key]] else NA_character_
       graded_val <- graded[[.decision_key(slide_key, sid_stable)]]
@@ -2082,7 +2089,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         sessionId = sid_stable,
         session = label_for(sid, labels),
         diagnosis = diagnosis,
-        confidence = if (!is.null(confidence)) as.numeric(confidence) else NA_real_,
+        # Blank unless confidence is a real number -- `is.numeric()` already excludes logical
+        # values (R's `is.numeric(TRUE)` is FALSE), so a malformed boolean confidence renders NA
+        # here (mirrors the Python sibling's isinstance(x, (int,float)) and not isinstance(x, bool)
+        # guard on this same raw column, added for parity: pre-fix, `as.numeric(TRUE)` coerced a
+        # boolean confidence to `1`, diverging from Python's `True` literal in the same cell).
+        confidence = if (!is.null(confidence) && is.numeric(confidence)) as.numeric(confidence) else NA_real_,
         confidenceScaled = conf_scaled,
         decisionMs = decision_ms,
         # == decisionMs (both are relative to the slide's recording start); kept as a separate
@@ -2400,7 +2412,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     )
   )
 
-  if (any(vapply(decision_rows, function(r) !is.na(r$diagnosis), logical(1)))) {
+  if (any(vapply(decision_rows, function(r) !is.na(r$diagnosis) && nzchar(r$diagnosis), logical(1)))) {
     write_csv_tidy(
       decision_rows, file.path(out_dir, "decisions.csv"),
       c("slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",

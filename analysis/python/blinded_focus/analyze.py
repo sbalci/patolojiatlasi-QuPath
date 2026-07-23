@@ -337,7 +337,14 @@ def _sanitize_nan(value):
 
 def _write_csv(path, rows, fieldnames):
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=fieldnames)
+        # extrasaction="ignore": a row dict may carry extra in-memory-only keys not in
+        # `fieldnames` (e.g. metrics_rows' "sessionId", used only by _nav_accuracy_rows's join --
+        # see the module docstring's "coincidenceLevel" section and the row-build comment in
+        # analyze()). Without this, DictWriter's default extrasaction="raise" would abort the
+        # write the moment such an extra key showed up; "ignore" drops it and writes exactly the
+        # same columns as before (byte-identical output for every existing call site, whose row
+        # dicts already match `fieldnames` 1:1).
+        w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow({k: _sanitize_nan(v) for k, v in r.items()})
@@ -386,11 +393,13 @@ def _nav_accuracy_rows(metrics_rows, decision_rows):
     Returns ``(rows, had_any_graded)`` -- ``had_any_graded`` gates whether ``nav_accuracy.csv`` and
     the summary section get written at all (only when at least one ``--graded`` row was supplied).
     """
-    # metrics_rows carries the session's human DISPLAY LABEL (`_session_label`), while
-    # decision_rows carries both that same label and the stable sessionId -- so this map recovers
-    # the sessionId for each metrics row via the label it shares with decision_rows (same run,
-    # same label->sessionId assignment, so this is a safe 1:1 lookup).
-    label_to_sid = {(r["slide"], r["session"]): r["sessionId"] for r in decision_rows}
+    # Direct sessionId join: metrics_rows carries the stable sessionId (stamped in analyze()'s
+    # per-session loop, right next to the human DISPLAY LABEL) -- so no label-based bridge is
+    # needed here at all. (Prior versions recovered the sessionId via a (slide, display-label)
+    # lookup into decision_rows, which silently collapsed two sessions sharing a display label
+    # -- e.g. via `--labels` mapping distinct sessionIds to the same name -- onto whichever
+    # session's decision row was built last, misattributing/erasing the other's grade. Stamping
+    # sessionId directly on metrics_rows removes the label from this join entirely.)
     correct_by = {
         (r["slide"], r["sessionId"]): r["correct"] for r in decision_rows if r["correct"] in (0, 1)
     }
@@ -399,10 +408,7 @@ def _nav_accuracy_rows(metrics_rows, decision_rows):
     for col in NAV_ACCURACY_COLS:
         xs, ys = [], []
         for mr in metrics_rows:
-            sid = label_to_sid.get((mr["slide"], mr["session"]))
-            if sid is None:
-                continue
-            key = (mr["slide"], sid)
+            key = (mr["slide"], mr["sessionId"])
             if key not in correct_by:
                 continue
             # Some metrics (e.g. enrichmentRatio) store a literal float NaN in the in-memory row
@@ -566,6 +572,12 @@ def analyze(
             row = {
                 "slide": slide_key,
                 "session": _session_label(f, labels),
+                # Stable join key for _nav_accuracy_rows -- NOT written to metrics.csv (its
+                # fieldnames list below deliberately omits "sessionId"; _write_csv's
+                # extrasaction="ignore" drops it silently at write time). Kept in-memory only so
+                # the nav-accuracy join below never has to bridge back through the (possibly
+                # colliding) human display label -- see _nav_accuracy_rows's docstring.
+                "sessionId": sid,
                 "durationMs": f.get("durationMs", ""),
                 "sampleCount": f.get("sampleCount", ""),
                 "coveragePct": m.coverage(grid) * 100.0,
@@ -650,7 +662,12 @@ def analyze(
                 else (float(confidence) - 1.0) / 4.0
             )
             decision_ms = dec.get("decisionMs", "")
-            sid_stable = f.get("sessionId") or ""
+            # Blank iff absent/None or its string form is empty; otherwise the string form -- so a
+            # numeric 0 sessionId stably maps to "0" (matches the R toolkit's
+            # nzchar(as.character(...)) rule exactly; the prior `f.get("sessionId") or ""` treated
+            # a falsy-but-present 0 the same as absent, diverging from R's "0").
+            _sid = f.get("sessionId")
+            sid_stable = "" if _sid is None or str(_sid) == "" else str(_sid)
             correct_dx = answer_key.get(slide_key, "")
             graded_val = graded.get((slide_key, sid_stable), "")
             decision_rows.append({
@@ -658,7 +675,17 @@ def analyze(
                 "sessionId": sid_stable,
                 "session": _session_label(f, labels),
                 "diagnosis": diagnosis,
-                "confidence": confidence if confidence is not None else "",
+                # Blank unless confidence is a real number (never a bool -- bool is an int
+                # subclass in Python, so `isinstance(x, (int, float))` alone would let True/False
+                # through as 1/0 -- matches confidenceScaled's existing guard below, extended to
+                # this raw column too; the R sibling's `is.numeric(confidence)` already excludes
+                # logical values, so this keeps both toolkits' raw `confidence` cell identical for
+                # a malformed boolean input).
+                "confidence": (
+                    confidence
+                    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                    else ""
+                ),
                 "confidenceScaled": conf_scaled,
                 "decisionMs": decision_ms,
                 # == decisionMs (both are relative to the slide's recording start); kept as a
