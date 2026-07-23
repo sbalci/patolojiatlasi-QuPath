@@ -69,6 +69,17 @@ NOT Frechet distance) between two sessions' z-normalized viewport-center sequenc
 the mean of ``linearity`` over sub-paths split at the session's own top-hotspot cells (uniform
 hotspot-based segmentation; the ROI-entry variant is intentionally not implemented), added to
 ``metrics.csv``. All additive; no existing metric's formula or value changes.
+
+**C4 dedup fix (2026-07-23, docs/superpowers/sdd/t4-report.md "C4 dedup fix" section):**
+``mean_segment_linearity``'s segmentation now collapses a maximal run of consecutive samples
+landing in the SAME top-hotspot cell down to a single boundary (its first index) -- a "boundary"
+marks a distinct hotspot VISIT, not every raw sample. Before this fix, every sample in a dwell run
+became its own boundary, producing trivial 2-point within-dwell segments (``linearity == 1.0``
+unconditionally) that skewed the mean toward 1.0 and defeated the metric's purpose (measuring
+transit segments between attended regions, not within-dwell noise). This CHANGES
+``meanSegmentLinearity``'s value for any session whose path dwells for >=2 consecutive samples in
+one hotspot cell (the normal shape of real viewing) -- see :func:`mean_segment_linearity`'s
+docstring for the exact rule.
 """
 import math
 from collections import Counter
@@ -1640,34 +1651,50 @@ def mean_segment_linearity(path, grid, gw, gh, img_w, img_h, top_n=5):
 
     1. Compute the top-``top_n`` hotspot cells of ``grid`` via :func:`top_hotspots` (deterministic
        tie-break already built in).
-    2. Walk every RAW path point (**no** run-length dedup, unlike :func:`visited_sequence` --
-       the 1:1 correspondence between a path INDEX and its point must be preserved here, since a
-       "boundary" marks an actual index to slice segments at) and map it to a grid cell via the
-       same floor/clamp convention used throughout this module. A point is a "boundary" iff its
-       cell is one of the top-``top_n`` hotspot cells.
-    3. Segments are the sub-paths **between consecutive boundary points** (boundary index ``b[k]``
-       to boundary index ``b[k+1]``, inclusive of both endpoints -- so a boundary point is shared
-       by its two adjacent segments, per the spec). Any portion of the path BEFORE the first
-       boundary or AFTER the last boundary is not part of any segment (excluded, not counted as a
-       leading/trailing segment) -- "sub-paths BETWEEN consecutive boundary points" is read
-       literally. If fewer than 2 boundary points are found at all, there are zero segments.
-    4. :func:`linearity` (unchanged, reused as-is) is computed on every segment with ``>= 2``
+    2. Walk every RAW path point (**no** run-length dedup of the WALK itself, unlike
+       :func:`visited_sequence` -- the 1:1 correspondence between a path INDEX and its point must
+       be preserved here, since a "boundary" marks an actual index to slice segments at) and map
+       it to a grid cell via the same floor/clamp convention used throughout this module. A point
+       is a candidate "boundary hit" iff its cell is one of the top-``top_n`` hotspot cells.
+    3. **Consecutive same-hotspot-cell hits are collapsed to a single boundary** (bug fix, see
+       below): a candidate hit at index ``i`` becomes an actual boundary iff it is the FIRST
+       candidate hit found at all, OR the immediately-preceding boundary's cell differs from this
+       hit's cell. Concretely: track the cell of the most-recently-added boundary; a hit whose
+       cell matches it is skipped (it is inside the same dwell run, not a new visit); a hit whose
+       cell differs (a different hotspot, or the same hotspot re-entered after visiting a
+       different one) becomes a new boundary, keeping its REAL path index (never re-indexed) so
+       segment endpoints stay actual path points. This marks a boundary per DISTINCT hotspot
+       *visit*, not per raw sample.
+    4. Segments are the sub-paths **between consecutive (deduped) boundary points** (boundary
+       index ``b[k]`` to boundary index ``b[k+1]``, inclusive of both endpoints -- so a boundary
+       point is shared by its two adjacent segments, per the spec). Any portion of the path BEFORE
+       the first boundary or AFTER the last boundary is not part of any segment (excluded, not
+       counted as a leading/trailing segment) -- "sub-paths BETWEEN consecutive boundary points"
+       is read literally. If fewer than 2 (deduped) boundary points are found at all, there are
+       zero segments.
+    5. :func:`linearity` (unchanged, reused as-is) is computed on every segment with ``>= 2``
        points; ``meanSegmentLinearity`` is the mean of those per-segment linearities.
 
-    Caveat (documented, not a bug): this is deliberately **not** deduped for consecutive samples
-    that land in the same hotspot cell -- if a reader dwells for several consecutive ticks inside
-    one hotspot, each adjacent pair of those ticks forms its own trivial 2-point segment, and ANY
-    2-point segment has ``linearity == 1.0`` unconditionally (a straight line is the only possible
-    shape between 2 points) -- a run of such dwell-ticks can pull ``meanSegmentLinearity`` toward
-    1.0. A caller wanting a "commute-only" reading would need to additionally collapse consecutive
-    same-cell boundary hits before segmenting; not implemented here (uniform, simpler rule per the
-    spec).
+    **Bug fix (2026-07, C4 dedup):** this used to mark EVERY raw sample landing in a top-``top_n``
+    hotspot cell as its own boundary, with no run-length dedup. During a dwell (a run of
+    consecutive samples in the same hotspot cell -- the normal shape of real viewing), each
+    sample became its own boundary, creating trivial within-dwell 2-point segments whose
+    ``linearity == 1.0`` unconditionally (a straight line is the only possible shape between 2
+    points) -- a long dwell run could contribute many such trivial segments, skewing
+    ``meanSegmentLinearity`` toward 1.0 and defeating its purpose (Roa-Peña: TRANSIT segments
+    between distinct attended regions should be measured, not within-dwell noise). Step 3 above
+    now collapses a maximal run of consecutive same-hotspot-cell hits down to its FIRST index, so
+    a "boundary" marks a distinct hotspot visit -- the dwell itself contributes no trivial
+    segments, and only genuine transits between (the same or different) hotspots are measured.
+    Two DIFFERENT hotspot cells adjacent in the path are still two separate boundaries (a
+    zero-or-short transit segment between them), which is correct and unaffected by this fix.
 
     ``float("nan")`` (blank) if: fewer than 2 hotspot cells are found at all (only possible for a
     degenerate grid with fewer than 2 cells total, e.g. ``gw*gh < 2``); ``path`` has fewer than 2
-    points; fewer than 2 boundary points are found in the path (zero segments); or every segment
-    found has fewer than 2 points (impossible by construction here, since consecutive boundary
-    indices are always distinct path positions -- kept as an explicit guard for defensiveness)."""
+    points; fewer than 2 DISTINCT-hotspot boundaries are found in the (deduped) path (zero
+    segments); or every segment found has fewer than 2 points (impossible by construction here,
+    since consecutive boundary indices are always distinct path positions -- kept as an explicit
+    guard for defensiveness)."""
     hotspots = top_hotspots(grid, gw, gh, top_n)
     if len(hotspots) < 2:
         return float("nan")
@@ -1678,12 +1705,17 @@ def mean_segment_linearity(path, grid, gw, gh, img_w, img_h, top_n=5):
     img_h_f = float(img_h) if img_h else 1.0
     hotspot_cells = set(row * gw_i + col for row, col, _ in hotspots)
     boundary_idx = []
+    last_boundary_cell = None
     for i, pt in enumerate(path):
         cx, cy = float(pt[1]), float(pt[2])
         col = min(max(int(math.floor(cx / img_w_f * gw_i)), 0), gw_i - 1)
         row = min(max(int(math.floor(cy / img_h_f * gh_i)), 0), gh_i - 1)
-        if (row * gw_i + col) in hotspot_cells:
+        cell = row * gw_i + col
+        if cell not in hotspot_cells:
+            continue
+        if last_boundary_cell is None or cell != last_boundary_cell:
             boundary_idx.append(i)
+        last_boundary_cell = cell
     if len(boundary_idx) < 2:
         return float("nan")
     linearities = []

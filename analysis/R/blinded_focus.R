@@ -1978,13 +1978,24 @@ dtw_distance <- function(path_a, path_b) {
 #' Tier 3 C4: mean `linearity` over the sub-paths a scanpath splits into at the session's own
 #' top-`top_n` dwell hotspot cells -- exact port of `blinded_focus.metrics.mean_segment_linearity`
 #' (Python); see its docstring for the full pinned segmentation algorithm (deterministic,
-#' hotspot-based; the ROI-entry variant is intentionally NOT implemented) and the documented
-#' no-dedup caveat (a run of consecutive same-hotspot-cell samples produces trivial
-#' `linearity == 1.0` 2-point segments).
+#' hotspot-based; the ROI-entry variant is intentionally NOT implemented).
+#'
+#' **C4 dedup fix (2026-07-23, docs/superpowers/sdd/t4-report.md "C4 dedup fix" section):**
+#' consecutive samples landing in the SAME hotspot cell are collapsed to a single boundary (its
+#' first path index) -- a "boundary" marks a distinct hotspot VISIT, not every raw sample. Before
+#' this fix every hotspot-cell hit was its own boundary, so a dwell run (several consecutive
+#' samples in one hotspot cell -- the normal shape of real viewing) produced a chain of trivial
+#' 2-point segments with `linearity == 1.0` unconditionally, skewing `meanSegmentLinearity` toward
+#' 1.0 and defeating its purpose (Roa-Pena: measure TRANSIT segments between attended regions, not
+#' within-dwell noise). A hit whose cell matches the immediately-preceding boundary's cell is
+#' skipped (still inside the same dwell run); a hit whose cell differs (a different hotspot, or
+#' the same hotspot re-entered after visiting a different one) becomes a new boundary, keeping its
+#' real path index. Two DIFFERENT hotspot cells adjacent in the path are still two separate
+#' boundaries (a short/zero-length transit segment between them) -- unaffected by this fix.
 #'
 #' `NaN` (blank) if: fewer than 2 hotspot cells are found at all (grid has fewer than 2 cells);
-#' `path` has fewer than 2 points; fewer than 2 boundary points are found in the path (zero
-#' segments); or every segment found has fewer than 2 points.
+#' `path` has fewer than 2 points; fewer than 2 DISTINCT-hotspot (deduped) boundary points are
+#' found in the path (zero segments); or every segment found has fewer than 2 points.
 mean_segment_linearity <- function(path, grid, gw, gh, img_w, img_h, top_n = 5) {
   hotspots <- top_hotspots(grid, gw, gh, top_n)
   if (length(hotspots) < 2) {
@@ -2000,13 +2011,19 @@ mean_segment_linearity <- function(path, grid, gw, gh, img_w, img_h, top_n = 5) 
   img_h_f <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
   hotspot_cells <- vapply(hotspots, function(h) h$row * gw_i + h$col, numeric(1))
   boundary_idx <- integer(0)
+  last_boundary_cell <- NA_real_
   for (i in seq_len(n)) {
     cx <- pm[i, 2]; cy <- pm[i, 3]
     col <- min(max(as.integer(floor(cx / img_w_f * gw_i)), 0L), gw_i - 1L)
     row <- min(max(as.integer(floor(cy / img_h_f * gh_i)), 0L), gh_i - 1L)
-    if ((row * gw_i + col) %in% hotspot_cells) {
+    cell <- row * gw_i + col
+    if (!(cell %in% hotspot_cells)) {
+      next
+    }
+    if (is.na(last_boundary_cell) || cell != last_boundary_cell) {
       boundary_idx <- c(boundary_idx, i)
     }
+    last_boundary_cell <- cell
   }
   if (length(boundary_idx) < 2) {
     return(NaN)

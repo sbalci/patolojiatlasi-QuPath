@@ -569,6 +569,65 @@ def build_seglin_fragment():
     )
 
 
+SEGLIN_DWELL_SLIDE_KEY = "sha256:selftest-slide-seglin-dwell-0001"
+#: C4 dedup-fix regression fixture: a single schema/3, 5-point path with a DWELL RUN of 3
+#: consecutive samples inside ONE hotspot cell, followed by a genuine transit to a SECOND hotspot
+#: cell -- built to demonstrate the pre-fix-vs-post-fix numeric difference the fix is FOR (see
+#: docs/superpowers/sdd/t4-report.md "C4 dedup fix" section for the full derivation).
+#:
+#: Reuses the same native grid as :func:`build_seglin_fragment` (GW=GH=8, IMG_W=2000, IMG_H=1500
+#: -> cell = 250x187.5 image px): cell(0,0)=1000, cell(3,3)=900, cell(7,4)=800, cell(7,5)=700,
+#: cell(7,6)=600 -- these 5 cells are (deterministically) ``top_hotspots(grid, 8, 8, 5)``.
+#:
+#: path (t, cx, cy, w, h):
+#:   p0=(0,   50, 50,  400,300) -- cell(0,0) == hotspot -> BOUNDARY 1 (dwell tick 1, kept: first hit)
+#:   p1=(100, 60, 55,  400,300) -- cell(0,0) == hotspot -- SAME cell as the last boundary -> collapsed
+#:                                  (dwell tick 2, NOT a new boundary post-fix)
+#:   p2=(200, 70, 60,  400,300) -- cell(0,0) == hotspot -- SAME cell again -> collapsed
+#:                                  (dwell tick 3, NOT a new boundary post-fix)
+#:   p3=(300, 400,100, 400,300) -- cell(0,1), NOT a hotspot (transit intermediate)
+#:   p4=(400, 800,700, 400,300) -- cell(3,3) == hotspot, DIFFERENT cell than the last boundary
+#:                                  (cell(0,0)) -> BOUNDARY 2
+#:
+#: PRE-FIX (every hotspot hit is its own boundary): boundary_idx=[0,1,2,4] -> 3 segments:
+#:   seg(p0,p1): 2-point, linearity==1.0 EXACTLY (trivial, unconditional for any 2-point segment)
+#:   seg(p1,p2): 2-point, linearity==1.0 EXACTLY (same)
+#:   seg(p2,p3,p4): net(p2->p4)/[dist(p2,p3)+dist(p3,p4)] == 0.921500472912134
+#:   -> meanSegmentLinearity_PREFIX = mean([1.0, 1.0, 0.921500472912134]) == 0.9738334909707113
+#:   (confirmed against the actual pre-fix implementation before this fixture was written).
+#:
+#: POST-FIX (consecutive same-cell hits collapsed to their first index): boundary_idx=[0,4] -> a
+#: SINGLE segment spanning all 5 points [p0,p1,p2,p3,p4]:
+#:   net(p0->p4) = sqrt((800-50)^2+(700-50)^2) = sqrt(985000)
+#:   total       = dist(p0,p1)+dist(p1,p2)+dist(p2,p3)+dist(p3,p4)
+#:               = sqrt(125)+sqrt(125)+sqrt(110500)+sqrt(520000)
+#:   -> meanSegmentLinearity_POSTFIX = net/total == 0.9224688773734908
+#:   (hand-derived directly from the raw coordinates via net-displacement/total-path-length --
+#:   independent of calling mean_segment_linearity itself -- then confirmed bit-identical against
+#:   the fixed implementation).
+#:
+#: 0.9738334909707113 != 0.9224688773734908: the pre-fix value is measurably INFLATED toward 1.0
+#: by the two trivial within-dwell 2-point segments, exactly the bug this fixture guards against.
+def build_seglin_dwell_fragment():
+    grid = [0.0] * 64
+    grid[0] = 1000.0    # row0, col0
+    grid[27] = 900.0    # row3, col3
+    grid[60] = 800.0    # row7, col4
+    grid[61] = 700.0    # row7, col5
+    grid[62] = 600.0    # row7, col6
+    path = [
+        [0, 50, 50, 400, 300],
+        [100, 60, 55, 400, 300],
+        [200, 70, 60, 400, 300],
+        [300, 400, 100, 400, 300],
+        [400, 800, 700, 400, 300],
+    ]
+    return _fragment(
+        "seglindwell1", 3, grid, 400, 5, path=path,
+        slide_key=SEGLIN_DWELL_SLIDE_KEY,
+    )
+
+
 def write_fragments_to_dir(fragments, d):
     for f in fragments:
         with open(os.path.join(d, f"{f['sessionId']}.json"), "w", encoding="utf-8") as fh:
@@ -1375,6 +1434,30 @@ def check_tier4_direct_unit_asserts():
         p_one_hit, grid8, 8, 8, IMG_W_T, IMG_H_T
     )), "mean_segment_linearity should be blank with only 1 boundary point (no segment pair)"
 
+    # ---- C4 dedup-fix regression: a dwell run (3 consecutive samples in ONE hotspot cell)
+    # followed by a genuine transit to a SECOND hotspot must NOT inflate meanSegmentLinearity
+    # toward 1.0 via trivial within-dwell 2-point segments -- see build_seglin_dwell_fragment's
+    # docstring for the full hand derivation (independently derived from raw coordinates, not by
+    # calling this function). PRE-FIX this fixture would have returned 0.9738334909707113 (mean of
+    # [1.0, 1.0, 0.921500472912134] over 3 undeduped segments); POST-FIX it must collapse the
+    # dwell run to a single boundary and return the ONE real transit segment's linearity instead.
+    p_dwell = [
+        [0, 50, 50, 400, 300],
+        [100, 60, 55, 400, 300],
+        [200, 70, 60, 400, 300],
+        [300, 400, 100, 400, 300],
+        [400, 800, 700, 400, 300],
+    ]
+    v_dwell = bf_metrics.mean_segment_linearity(p_dwell, grid8, 8, 8, IMG_W_T, IMG_H_T)
+    assert abs(v_dwell - 0.9224688773734908) < 1e-9, (
+        f"expected meanSegmentLinearity == 0.9224688773734908 (single collapsed transit segment "
+        f"p0..p4), got {v_dwell}"
+    )
+    assert abs(v_dwell - 0.9738334909707113) > 1e-6, (
+        "post-fix value must differ from the pre-fix-inflated 0.9738334909707113 -- if this "
+        "assert fails, the dedup collapse regressed back to per-sample boundaries"
+    )
+
 
 def check_tier4_mouse_fixture(tmp):
     """Tier 3 C2 pipeline-level check: runs :func:`build_mouse_fixture` (2 schema/5 sessions, hand-
@@ -1438,6 +1521,33 @@ def check_tier4_seglin_fixture(tmp):
     # the segment's, illustrating the Roa-Pena whole-vs-segment contrast the spec cites.
     assert row["linearity"] < row["meanSegmentLinearity"], (
         row["linearity"], row["meanSegmentLinearity"],
+    )
+
+
+def check_tier4_seglin_dwell_fixture(tmp):
+    """C4 dedup-fix pipeline-level check: runs :func:`build_seglin_dwell_fragment` (a dwell run of
+    3 consecutive samples in one hotspot cell, then a genuine transit to a second hotspot) through
+    the full ``analyze()`` pipeline and asserts ``meanSegmentLinearity`` equals the hand-derived
+    POST-fix value (single collapsed transit segment), NOT the pre-fix-inflated value (mean of two
+    trivial 1.0 within-dwell segments plus the real transit segment) -- see the fixture's docstring
+    for the full derivation of both numbers."""
+    frag = build_seglin_dwell_fragment()
+    in_dir = os.path.join(tmp, "in_seglin_dwell")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_seglin_dwell")
+    analyze([in_dir], out_dir)
+
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 1, len(metrics)
+    row = metrics.iloc[0]
+    assert abs(row["meanSegmentLinearity"] - 0.9224688773734908) < 1e-9, (
+        f"expected meanSegmentLinearity == 0.9224688773734908 (post-fix, dwell run collapsed to "
+        f"a single boundary), got {row['meanSegmentLinearity']}"
+    )
+    assert abs(row["meanSegmentLinearity"] - 0.9738334909707113) > 1e-6, (
+        "must differ from the pre-fix-inflated value 0.9738334909707113 (mean including two "
+        "trivial within-dwell 2-point segments) -- if this fails, the dedup regressed"
     )
 
 
@@ -1911,11 +2021,16 @@ def run():
 
         # --- Tier 3 C4 (segment-level linearity): populated for s1/s2 (whose synthetic path
         # dwells right at their own recorded grid's center, so the path visits its own top-hotspot
-        # cell many times -- >=2 boundary hits guaranteed); blank for s3 (no path at all) AND,
+        # cell many times -- and also drifts through a couple of neighboring hotspot cells, so
+        # even post-C4-dedup-fix (consecutive same-cell hits collapsed to one boundary each) there
+        # are still >=2 DISTINCT-hotspot boundaries); blank for s3 (no path at all) AND,
         # legitimately, for s4 (its recorded grid is centered elsewhere from its bouncing path by
         # deliberate fixture design -- see build_fragments' f4 comment -- so the path never visits
         # its own top-5 hotspot cells at all: 0 boundary points, a real documented degenerate case,
-        # not a bug). Any populated value must still be a valid linearity in [0, 1]. ---
+        # not a bug). Any populated value must still be a valid linearity in [0, 1] -- NOT asserted
+        # exactly here (the dedup fix moved s1/s2 off their pre-fix 1.0 to ~0.68/~0.80
+        # respectively; the dedicated build_seglin_dwell_fragment fixture below is what pins the
+        # exact pre/post-fix numbers). ---
         for row, label in ((row_s1, "s1"), (row_s2, "s2")):
             assert not pd.isna(row["meanSegmentLinearity"]), f"{label} missing meanSegmentLinearity"
             assert -1e-9 <= row["meanSegmentLinearity"] <= 1.0 + 1e-9, (label, row["meanSegmentLinearity"])
@@ -2224,6 +2339,7 @@ def run():
         check_tier4_direct_unit_asserts()
         check_tier4_mouse_fixture(tmp)
         check_tier4_seglin_fixture(tmp)
+        check_tier4_seglin_dwell_fixture(tmp)
 
         print("OK: all selftest assertions passed")
     finally:
