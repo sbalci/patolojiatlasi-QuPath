@@ -242,10 +242,8 @@ public class AtlasExtension implements QuPathExtension {
         if (choice.isPresent() && choice.get() == ButtonType.OK) {
             BlindedResearch.writeFlag(dir, true);
             BlindedResearch.markConsented(p);
-            // decisionPromptOnLeave isn't reset in stopBlinded(), so it can carry a stale value
-            // from whatever project was last blinded -- set it explicitly here too (not just in
-            // onProjectChanged) so every startBlinded() call site reflects THIS project's sidecar.
-            focusHeatmap.setDecisionPromptOnLeave(BlindedResearch.decisionPromptOnLeave(dir));
+            // startBlinded() self-configures decisionPromptOnLeave from the current project's
+            // sidecar (Task 3 review Fix 1) -- no external wiring needed here.
             focusHeatmap.startBlinded();
             Alert done = new Alert(Alert.AlertType.INFORMATION,
                     "Proje işaretlendi; gezinme kaydı başladı ve her açılışta sürecek.");
@@ -276,13 +274,9 @@ public class AtlasExtension implements QuPathExtension {
         if (focusHeatmap.isBlinded())
             return;
 
-        // Same projectDir used for both startBlinded() call sites below -- the optional
-        // decisionPromptOnLeave sidecar flag (default true) controls whether Task 3's leave-prompt
-        // auto-fires for this project.
-        File projectDir = BlindedResearch.projectDir(newProj);
-
+        // startBlinded() self-configures decisionPromptOnLeave from the current project's sidecar
+        // (Task 3 review Fix 1) -- no external wiring needed at either call site below.
         if (BlindedResearch.hasConsented(newProj)) {
-            focusHeatmap.setDecisionPromptOnLeave(BlindedResearch.decisionPromptOnLeave(projectDir));
             focusHeatmap.startBlinded();
             return;
         }
@@ -299,7 +293,6 @@ public class AtlasExtension implements QuPathExtension {
         Optional<ButtonType> choice = alert.showAndWait();
         if (choice.isPresent() && choice.get() == ButtonType.OK) {
             BlindedResearch.markConsented(newProj);
-            focusHeatmap.setDecisionPromptOnLeave(BlindedResearch.decisionPromptOnLeave(projectDir));
             focusHeatmap.startBlinded();
         }
         // else: declined -- consented stays false, so the notice is shown again on next open and

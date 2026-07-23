@@ -30,7 +30,17 @@ public final class DecisionDialog {
 
     private DecisionDialog() { }
 
-    public static DecisionInput show(QuPathGUI qupath, String preDiagnosis, Integer preConfidence) {
+    /**
+     * @param slideHeader optional (nullable/blank-ok) label identifying which slide this decision is
+     *                    for, shown as a bold header above the diagnosis field. The deferred
+     *                    leave-prompt fires after the viewer has already moved to the next slide, so
+     *                    without this a reader could mistakenly answer about the wrong slide; the
+     *                    menu path names the current slide for the same reason (consistency, not
+     *                    strictly necessary there since it's already on screen). Omitted (no header
+     *                    row at all) when null or blank, keeping the plain generic title.
+     */
+    public static DecisionInput show(QuPathGUI qupath, String preDiagnosis, Integer preConfidence,
+            String slideHeader) {
         Stage owner = qupath == null ? null : qupath.getStage();
         Stage stage = new Stage();
         stage.initModality(Modality.WINDOW_MODAL);
@@ -81,7 +91,14 @@ public final class DecisionDialog {
         HBox actions = new HBox(6, errorLabel, spacer, cancelBtn, okBtn);
         actions.setAlignment(Pos.CENTER_LEFT);
 
-        VBox root = new VBox(8,
+        VBox root = new VBox(8);
+        if (slideHeader != null && !slideHeader.isBlank()) {
+            Label headerLabel = new Label(slideHeader);
+            headerLabel.setStyle("-fx-font-weight: bold;");
+            headerLabel.setWrapText(true);
+            root.getChildren().add(headerLabel);
+        }
+        root.getChildren().addAll(
                 new Label("Tanı / karar:"), diagnosisArea,
                 new Label("Güven (1–5, isteğe bağlı):"), confBox,
                 actions);

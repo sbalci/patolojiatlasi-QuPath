@@ -403,23 +403,25 @@ public final class FocusHeatmap {
     String getCurrentDecisionDiagnosis() { Decision d = currentDecision; return d == null ? null : d.diagnosis(); }
     Integer getCurrentDecisionConfidence() { Decision d = currentDecision; return d == null ? null : d.confidence(); }
     boolean isBlindedRecording() { return blindedRecording; }
-    /** Public (not package-private) because it's called from {@code AtlasExtension}, a different
-     *  package ({@code com.patolojiatlasi.qupath} vs. {@code ...focus}) — mirrors {@link #startBlinded()}
-     *  being public for the same cross-package reason. */
-    public void setDecisionPromptOnLeave(boolean v) { this.decisionPromptOnLeave = v; }
 
     /** Menu path: show the decision dialog (pre-filled for edit) for the CURRENT slide and record the
      *  result. Runs on the FX thread from the menu item's action, between Timeline pulses — unlike the
      *  leave path, {@code showAndWait} is legal here without deferring via {@code Platform.runLater}. */
     void promptDecisionInteractive() {
+        // A deferred leave-prompt is already queued for the slide just left (Platform.runLater is
+        // pending) -- don't stack a second dialog on top of it if the menu is clicked during that
+        // sub-pulse window.
+        if (pendingDecisionSave)
+            return;
         if (!blindedRecording || currentMap == null) {
             new Alert(Alert.AlertType.INFORMATION,
                     "Karar kaydı yalnızca gezinme kaydı açık ve bir slayt açıkken kullanılabilir.")
                     .showAndWait();
             return;
         }
+        String header = currentSlide == null ? "Bu slayt" : "Bu slayt: " + currentSlide;
         DecisionDialog.DecisionInput in = DecisionDialog.show(qupath,
-                getCurrentDecisionDiagnosis(), getCurrentDecisionConfidence());
+                getCurrentDecisionDiagnosis(), getCurrentDecisionConfidence(), header);
         if (in != null)
             recordDecision(in.diagnosis(), in.confidence());
     }
@@ -443,10 +445,16 @@ public final class FocusHeatmap {
      *  instance fields moved on to the next slide — see {@link #currentSnapshot()}), saves its
      *  fragment with whatever decision (or none) was entered, then releases the {@link
      *  #pendingDecisionSave} gate that {@link #tick()} checks on every pulse. Best-effort: any failure
-     *  is logged and swallowed, never thrown into the FX event queue. */
-    private void deferredDecisionPromptAndSave(BlindedSnapshot snap, String leavingUri) {
+     *  is logged and swallowed, never thrown into the FX event queue.
+     *  <p>
+     *  {@code leavingSlide} (the display name of the slide being left, captured in {@code switchTo}
+     *  before any reset) is threaded into the dialog's header so the reader isn't misled into
+     *  thinking the decision is about whichever slide is already on screen by the time this fires. */
+    private void deferredDecisionPromptAndSave(BlindedSnapshot snap, String leavingUri, String leavingSlide) {
         try {
-            DecisionDialog.DecisionInput in = DecisionDialog.show(qupath, null, null);
+            String header = leavingSlide == null ? "Az önce görüntülediğiniz slayt"
+                    : "Az önce görüntülediğiniz slayt: " + leavingSlide;
+            DecisionDialog.DecisionInput in = DecisionDialog.show(qupath, null, null, header);
             Decision decision = null;
             if (in != null) {
                 long ms = System.currentTimeMillis() - snap.slideStartMs();
@@ -493,12 +501,20 @@ public final class FocusHeatmap {
         // Attribution capture: resolve the target dir once, here, from whichever project is open
         // right now -- see the blindedDir field javadoc for why this must never be re-resolved later.
         File projectDir = qupath.getProject() == null ? null : BlindedResearch.projectDir(qupath.getProject());
+        // Self-configure from the current project's sidecar -- every start path (menu checkbox,
+        // AtlasExtension's project-open hook, flagCurrentProjectAsResearch) funnels through here, so
+        // this is the one place the flag needs setting; it's never left to a stale value from a
+        // previous project because every call to startBlinded() re-reads it fresh. decisionPromptOnLeave
+        // is null-safe for projectDir == null (the ad-hoc/no-project blinded session case) -- see
+        // BlindedResearch.decisionPromptOnLeave's javadoc.
+        decisionPromptOnLeave = BlindedResearch.decisionPromptOnLeave(projectDir);
         blindedDir = BlindedStore.blindedDir(projectDir, new File(defaultDir(), "contributions"));
         blindedTicks = 0;
         blindedPath.clear();
         blindedPathCapped = false;
         blindedSlideStartMs = System.currentTimeMillis();
         currentDecision = null;
+        decisionPromptedSlides.clear();   // a declined slide in a prior session/project must not suppress its prompt here
         // Viewer-scoped cursor tracking (image coords only, never global mouse) -- starts following
         // whichever viewer is active now, and re-follows on every later active-viewer change.
         qupath.viewerProperty().addListener(viewerMouseListener);
@@ -791,8 +807,10 @@ public final class FocusHeatmap {
                 // pulses via Platform.runLater. Never save synchronously in this branch.
                 BlindedSnapshot snap = currentSnapshot();
                 String leavingUri = currentUri;
+                String leavingSlide = currentSlide;   // named in the deferred dialog's header (Task 3 review Fix 2)
                 pendingDecisionSave = true;   // tick() early-returns until the deferred save completes
-                javafx.application.Platform.runLater(() -> deferredDecisionPromptAndSave(snap, leavingUri));
+                javafx.application.Platform.runLater(
+                        () -> deferredDecisionPromptAndSave(snap, leavingUri, leavingSlide));
             } else {
                 // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
                 // disk first — an async write could still be in flight if a crash follows, losing this
