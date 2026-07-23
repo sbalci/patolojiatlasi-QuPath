@@ -205,10 +205,11 @@ IMG_W <- 2000; IMG_H <- 1500
 }
 
 .fragment <- function(session_id, schema, grid, duration_ms, sample_count, path = NULL,
-                       base_magnification = NULL, path_truncated = NULL, annotations = NULL) {
+                       base_magnification = NULL, path_truncated = NULL, annotations = NULL,
+                       decision = NULL, slide_key = NULL) {
   d <- list(
     schema = paste0("atlas-focus-contribution/", schema),
-    slideKey = "sha256:selftest-slide-0001",
+    slideKey = if (!is.null(slide_key)) slide_key else "sha256:selftest-slide-0001",
     sessionId = session_id,
     imageWidth = IMG_W, imageHeight = IMG_H,
     gridWidth = GW, gridHeight = GH,
@@ -232,7 +233,20 @@ IMG_W <- 2000; IMG_H <- 1500
   if (!is.null(annotations)) {
     d$annotations <- annotations
   }
+  # Phase 3: a hand-entered decision object (list(diagnosis=, confidence=, decisionMs=)).
+  # Deliberately independent of `annotations`/`path` -- a reader can submit a decision on any
+  # schema fragment.
+  if (!is.null(decision)) {
+    d$decision <- decision
+  }
   d
+}
+
+#' A synthetic hand-entered decision object -- `list(diagnosis=, confidence=, decisionMs=)` --
+#' matching what the QuPath extension's blinded-focus recorder writes into a fragment's `decision`
+#' field.
+.decision <- function(diagnosis, confidence, decision_ms) {
+  list(diagnosis = diagnosis, confidence = confidence, decisionMs = decision_ms)
 }
 
 build_fragments <- function() {
@@ -244,20 +258,28 @@ build_fragments <- function() {
   shared_annotation <- .make_annotations_fc(1, 3, 1, 3) # rows 1-3, cols 1-3 -> overlaps s1's dwell/path center
 
   # s1: schema/5, 8-element path (varying dsMilli + mouse, some off-slide) + a known
-  # baseMagnification + an annotation overlapping its own dwell center.
+  # baseMagnification + an annotation overlapping its own dwell center. Also carries a Phase 3
+  # decision (diagnosis="tumor", confidence=4 -> confidenceScaled=(4-1)/4=0.75).
   f1 <- .fragment(
     "s1", 5, grid_s1, 40 * 250, 40,
     path = .make_path_v5(2, 2, n = 40, seed = 101),
     base_magnification = 40.0, path_truncated = FALSE,
-    annotations = shared_annotation
+    annotations = shared_annotation,
+    decision = .decision("tumor", 4, 5000)
   )
   # s2: schema/3, 5-element path (w-proxy zoom fallback; no dsMilli/baseMagnification/annotations).
-  f2 <- .fragment("s2", 3, grid_s2, 35 * 250, 35, path = .make_path(2, 2, n = 35, seed = 102))
-  # s3: schema/2, no path, no annotations at all.
+  # Also carries a Phase 3 decision (diagnosis="benign", confidence=2).
+  f2 <- .fragment(
+    "s2", 3, grid_s2, 35 * 250, 35, path = .make_path(2, 2, n = 35, seed = 102),
+    decision = .decision("benign", 2, 5000)
+  )
+  # s3: schema/2, no path, no annotations, and (deliberately) no decision either -- exercises the
+  # blank-diagnosis/confidence/correct degrade path in decisions.csv.
   f3 <- .fragment("s3", 2, grid_s3, 8000, 32, path = NULL)
   # s4: schema/4, 6-element path (varying dsMilli, no mouse, unknown baseMagnification -> exercises
   # point_zoom's ds-only fallback branch) that deliberately bounces in/out of the SAME annotation
-  # rectangle as s1 (for cross-user IoU/coincidence + a known reentry count).
+  # rectangle as s1 (for cross-user IoU/coincidence + a known reentry count). Deliberately left
+  # undecided (no `decision`), same as s3.
   f4 <- .fragment(
     "s4", 4, grid_s4, 40 * 250, 40,
     path = .make_path_bouncing(c(2, 2), c(6, 6), n = 40, seed = 301),
@@ -265,6 +287,66 @@ build_fragments <- function() {
     annotations = shared_annotation
   )
   list(f1, f2, f3, f4)
+}
+
+GRADED_SLIDE_KEY <- "sha256:selftest-slide-graded-0001"
+#: The display-only answer key's correctDx for GRADED_SLIDE_KEY.
+GRADED_KEY_DX <- "tumor"
+
+#' A second, independent slide (6 sessions, no paths/annotations) purpose-built to exercise the
+#' navigation<->accuracy correlation (`.nav_accuracy_rows`):
+#'
+#' - `coveragePct` (grid-only, always populated) is deliberately separable by outcome: g1-g3
+#'   (graded correct=1) get a dense grid (56/64 nonzero cells -> ~87.5% coverage), g4-g6 (graded
+#'   correct=0) get a sparse grid (6/64 nonzero cells -> ~9.4% coverage) -- so meanCorrect >
+#'   meanIncorrect (a positive meanDiff) is the expected, hand-derivable result.
+#' - `avgZoom` (path-only) is blank for every session here (none carry a path) -> n=0, exercising
+#'   the "n < 5" blank-pointBiserialR guard.
+#' - `dwellInAnnotationPct` (grid-only, always populated) is exactly 0.0 for every session (none
+#'   carry `annotations`) -> zero variance, exercising the "zero variance" blank guard distinctly
+#'   from the n=0 case above.
+#'
+#' Diagnoses are chosen so `correct` can NOT be reconstructed by string-matching `diagnosis`
+#' against the answer key ("tumor"): g1 (correct=1) is diagnosed "benign" (a MISMATCH that is
+#' still graded correct), and g4 (correct=0) is diagnosed "tumor" (an exact MATCH that is still
+#' graded incorrect) -- a hand-grade-only pipeline must report exactly the graded value in both
+#' cases; a string-matching one would get both backwards.
+#'
+#' Returns `list(fragments=, graded_rows=, key_rows=)` where `graded_rows` is a list of
+#' `c(slideKey, sessionId, correct)` character vectors (for a synthetic --graded CSV) and
+#' `key_rows` is a list of `c(slideKey, correctDx)` character vectors (for a synthetic --key CSV).
+build_graded_fragments <- function() {
+  .sparse_grid <- function(n_nonzero, value = 100.0) {
+    g <- rep(0.0, GW * GH)
+    if (n_nonzero > 0) {
+      g[seq_len(n_nonzero)] <- value
+    }
+    g
+  }
+
+  # (sessionId, diagnosis, confidence, nNonzeroCells, correct)
+  spec <- list(
+    list(sid = "g1", dx = "benign", conf = 4, n_nonzero = 56, correct = 1), # dense/high-coverage, MISMATCHED diagnosis, graded correct
+    list(sid = "g2", dx = "tumor", conf = 5, n_nonzero = 55, correct = 1),  # dense/high-coverage, matched diagnosis, graded correct
+    list(sid = "g3", dx = "tumor", conf = 3, n_nonzero = 54, correct = 1),  # dense/high-coverage, matched diagnosis, graded correct
+    list(sid = "g4", dx = "tumor", conf = 5, n_nonzero = 6, correct = 0),   # sparse/low-coverage, MATCHED diagnosis, graded INcorrect
+    list(sid = "g5", dx = "benign", conf = 2, n_nonzero = 7, correct = 0),  # sparse/low-coverage, matched diagnosis, graded incorrect
+    list(sid = "g6", dx = "unknown", conf = 1, n_nonzero = 8, correct = 0)  # sparse/low-coverage, matched diagnosis, graded incorrect
+  )
+  fragments <- list()
+  graded_rows <- list()
+  for (i in seq_along(spec)) {
+    s <- spec[[i]]
+    f <- .fragment(
+      s$sid, 2, .sparse_grid(s$n_nonzero), 6000, 30,
+      slide_key = GRADED_SLIDE_KEY,
+      decision = .decision(s$dx, s$conf, 4000 + (i - 1) * 50)
+    )
+    fragments[[length(fragments) + 1]] <- f
+    graded_rows[[length(graded_rows) + 1]] <- c(GRADED_SLIDE_KEY, s$sid, as.character(s$correct))
+  }
+  key_rows <- list(c(GRADED_SLIDE_KEY, GRADED_KEY_DX))
+  list(fragments = fragments, graded_rows = graded_rows, key_rows = key_rows)
 }
 
 write_fragments_to_dir <- function(fragments, d) {
@@ -298,6 +380,139 @@ write_fragments_to_zip <- function(fragments, zip_path) {
   if (!identical(magic, expected)) stop(sprintf("not a valid PNG (bad magic): %s", path))
 }
 
+#' Write a trivial CSV (no quoting needed -- every fixture field here is plain alnum text) with a
+#' header row followed by one row per element of `rows` (each a character vector). Mirrors the
+#' Python selftest's `_write_simple_csv`.
+.write_simple_csv <- function(path, header, rows) {
+  lines <- paste(header, collapse = ",")
+  for (r in rows) {
+    lines <- c(lines, paste(r, collapse = ","))
+  }
+  writeLines(lines, path)
+}
+
+#' Phase 3: `decisions.csv` exists with one row per (slide, session), hand-grade-only columns
+#' populated for the sessions that carry a `decision` (s1, s2) and blank for the ones that don't
+#' (s3, s4) -- and, absent `--graded`, every row's `correct` is blank (nothing is ever
+#' auto-derived from `diagnosis`). Reads the CSV back with `colClasses = "character"` so blank
+#' cells come back as `""` uniformly (mirrors Python's `csv.DictReader`, sidestepping R's
+#' blank-becomes-NA `read.csv` auto-typing for numeric/logical columns).
+check_decisions <- function(out_dir) {
+  path <- file.path(out_dir, "decisions.csv")
+  stopifnot("decisions.csv missing" = file.exists(path))
+  rows <- utils::read.csv(path, stringsAsFactors = FALSE, colClasses = "character")
+  stopifnot("expected 4 decisions rows (one per slide,session)" = nrow(rows) == 4)
+  expected_cols <- c(
+    "slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
+    "decisionMs", "decisionLatencyMs", "correctDx", "correct"
+  )
+  stopifnot("decisions.csv columns mismatch" = identical(colnames(rows), expected_cols))
+
+  s1 <- rows[rows$session == "s1", ][1, ]
+  stopifnot("s1 diagnosis mismatch" = s1$diagnosis == "tumor")
+  stopifnot("s1 confidence mismatch" = s1$confidence == "4")
+  stopifnot("s1 confidenceScaled mismatch" = s1$confidenceScaled == "0.75")
+  stopifnot("s1 decisionMs should be non-empty" = nzchar(s1$decisionMs))
+  stopifnot("s1 decisionLatencyMs should be non-empty" = nzchar(s1$decisionLatencyMs))
+
+  s3 <- rows[rows$session == "s3", ][1, ]
+  stopifnot("undecided session should have blank diagnosis" = s3$diagnosis == "")
+  stopifnot("undecided session should have blank confidence" = s3$confidence == "")
+  stopifnot("undecided session should have blank correct" = s3$correct == "")
+
+  # Without --graded, every row's `correct` is blank -- HAND-GRADE ONLY, never auto-derived.
+  stopifnot("correct should be blank without --graded" = all(rows$correct == ""))
+  rows
+}
+
+#' Phase 3: without `--graded`, `nav_accuracy.csv` is not written and the summary has no
+#' "Navigation" section; with `--graded` (the `build_graded_fragments` fixture), the file exists
+#' with the documented columns, a metric with n<5 (`avgZoom`, no session here has a path) and a
+#' metric with zero variance (`dwellInAnnotationPct`, constant 0.0 -- no session here has an
+#' annotation) both have a blank `pointBiserialR`, and the deliberately-separable `coveragePct`
+#' metric has a non-blank, positive `meanDiff` (dense/correct sessions have higher coverage than
+#' sparse/incorrect ones).
+check_nav_accuracy <- function(nongraded_out_dir, graded_out_dir) {
+  # --- without --graded: no nav_accuracy.csv, no summary section ---
+  stopifnot(
+    "nav_accuracy.csv should not be written without --graded" =
+      !file.exists(file.path(nongraded_out_dir, "nav_accuracy.csv"))
+  )
+  nongraded_summary <- paste(readLines(file.path(nongraded_out_dir, "summary.md"), warn = FALSE), collapse = "\n")
+  stopifnot(
+    "nav-accuracy summary section should be absent without --graded" =
+      !grepl("Navigation", nongraded_summary, fixed = TRUE)
+  )
+
+  # --- with --graded: nav_accuracy.csv + summary section present ---
+  nav_path <- file.path(graded_out_dir, "nav_accuracy.csv")
+  stopifnot("nav_accuracy.csv missing when graded decisions exist" = file.exists(nav_path))
+  nav_rows <- utils::read.csv(nav_path, stringsAsFactors = FALSE, colClasses = "character")
+  expected_cols <- c(
+    "metric", "n", "pointBiserialR", "meanCorrect", "meanIncorrect",
+    "medianCorrect", "medianIncorrect", "meanDiff"
+  )
+  stopifnot("nav_accuracy.csv columns mismatch" = identical(colnames(nav_rows), expected_cols))
+
+  .by_metric <- function(name) nav_rows[nav_rows$metric == name, ][1, ]
+
+  # n<5 guard (avgZoom: path-only, no session here has a path -> n=0)
+  avg_zoom <- .by_metric("avgZoom")
+  stopifnot("avgZoom n mismatch" = avg_zoom$n == "0")
+  stopifnot("n=0 should yield a blank pointBiserialR" = avg_zoom$pointBiserialR == "")
+
+  # zero-variance guard (dwellInAnnotationPct: constant 0.0 across all 6 graded sessions)
+  dwell <- .by_metric("dwellInAnnotationPct")
+  stopifnot("dwellInAnnotationPct n mismatch" = dwell$n == "6")
+  stopifnot(
+    "zero-variance navMetric should yield a blank pointBiserialR" = dwell$pointBiserialR == ""
+  )
+
+  # deliberately-separable metric: non-blank meanDiff, positive sign (correct > incorrect)
+  cov <- .by_metric("coveragePct")
+  stopifnot("coveragePct n mismatch" = cov$n == "6")
+  stopifnot("coveragePct meanDiff should be populated (n=3 in each group)" = nzchar(cov$meanDiff))
+  stopifnot(
+    "expected a positive meanDiff (dense/correct sessions have higher coveragePct than sparse/incorrect ones)" =
+      as.numeric(cov$meanDiff) > 0
+  )
+
+  graded_summary <- paste(readLines(file.path(graded_out_dir, "summary.md"), warn = FALSE), collapse = "\n")
+  stopifnot(
+    "nav-accuracy summary section missing from summary.md" =
+      grepl("## Navigation ↔ diagnostic accuracy", graded_summary, fixed = TRUE)
+  )
+  nav_rows
+}
+
+#' Phase 3 invariant: `correct` in `decisions.csv` is never derivable by string-matching
+#' `diagnosis` against `--key`'s `correctDx` -- it comes only from `--graded`. g1 (graded
+#' correct=1) is diagnosed "benign", a MISMATCH against the key's "tumor"; g4 (graded correct=0)
+#' is diagnosed "tumor", an exact MATCH. A string-matching implementation would report both
+#' backwards; a hand-grade-only one reports exactly what `--graded` said.
+check_hand_grade_only <- function(graded_out_dir) {
+  path <- file.path(graded_out_dir, "decisions.csv")
+  rows <- utils::read.csv(path, stringsAsFactors = FALSE, colClasses = "character")
+  g1 <- rows[rows$sessionId == "g1", ][1, ]
+  g4 <- rows[rows$sessionId == "g4", ][1, ]
+  stopifnot("g1 correctDx mismatch" = g1$correctDx == GRADED_KEY_DX)
+  stopifnot(
+    "g1 should have a diagnosis that MISMATCHES correctDx (regression guard fixture)" =
+      g1$diagnosis == "benign" && g1$diagnosis != g1$correctDx
+  )
+  stopifnot(
+    "g1 was hand-graded correct despite a diagnosis/correctDx mismatch" = g1$correct == "1"
+  )
+  stopifnot("g4 correctDx mismatch" = g4$correctDx == GRADED_KEY_DX)
+  stopifnot(
+    "g4 should have a diagnosis that MATCHES correctDx (regression guard fixture)" =
+      g4$diagnosis == "tumor" && g4$diagnosis == g4$correctDx
+  )
+  stopifnot(
+    "g4 was hand-graded incorrect despite a diagnosis/correctDx match" = g4$correct == "0"
+  )
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -315,6 +530,10 @@ run <- function() {
   out_dir <- file.path(tmp, "out")
 
   metrics <- analyze(list(in_dir), out_dir, reference = "s1", make_figures = TRUE, res = 256)
+
+  # --- decisions.csv (Phase 3): hand-grade-only, populated for s1/s2, blank for s3/s4, `correct`
+  # blank throughout since no --graded was passed to this run ---
+  check_decisions(out_dir)
 
   # --- metrics.csv: 4 rows + expected columns (Phase 1 + Phase 2) ---
   stopifnot("expected 4 metrics rows" = nrow(metrics) == 4)
@@ -695,6 +914,23 @@ run <- function() {
   zip_out <- file.path(tmp, "out_zip")
   zip_metrics <- analyze(list(zip_path), zip_out, reference = "s1")
   stopifnot("zip input: expected 4 metrics rows" = nrow(zip_metrics) == 4)
+
+  # --- Phase 3: navigation<->accuracy correlation, on a dedicated graded fixture ---
+  graded_fixture <- build_graded_fragments()
+  graded_in <- file.path(tmp, "in_graded")
+  dir.create(graded_in)
+  write_fragments_to_dir(graded_fixture$fragments, graded_in)
+
+  graded_csv_path <- file.path(tmp, "graded.csv")
+  .write_simple_csv(graded_csv_path, c("slideKey", "sessionId", "correct"), graded_fixture$graded_rows)
+  key_csv_path <- file.path(tmp, "key.csv")
+  .write_simple_csv(key_csv_path, c("slideKey", "correctDx"), graded_fixture$key_rows)
+
+  graded_out <- file.path(tmp, "out_graded")
+  analyze(list(graded_in), graded_out, key_csv = key_csv_path, graded_csv = graded_csv_path)
+
+  check_nav_accuracy(out_dir, graded_out)
+  check_hand_grade_only(graded_out)
 
   cat("OK: all selftest assertions passed\n")
 }

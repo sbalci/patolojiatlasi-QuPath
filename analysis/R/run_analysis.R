@@ -3,14 +3,16 @@
 #
 # Usage:
 #   Rscript run_analysis.R <input...> --out DIR [--reference SESSIONID] [--roi geojson]
-#       [--labels csv] [--figures] [--res 512] [--magbands 3]
+#       [--labels csv] [--key csv] [--graded csv] [--figures] [--res 512] [--magbands 3]
 #
 # <input...> may be fragment JSON files, directories (recursed for *.json), and/or .zip archives,
 # in any mix. Writes the SAME output files as the Python toolkit's `python -m
 # blinded_focus.analyze` (see ../python/README.md and ./README.md for the full contract):
 # metrics.csv, compare_<slug>.csv, consensus_<slug>.png, reference_<slug>.csv, scanpath_<slug>.csv,
-# magbands_<slug>.csv, summary.md, and (with --figures) per-(slide,session) PNGs under
-# <out>/<slug>/ (incl. the Phase-1 scanpath-raster and magnification-band heatmaps).
+# magbands_<slug>.csv, (Phase 3, when at least one fragment carries a decision) decisions.csv,
+# (Phase 3, when --graded supplies at least one graded decision) nav_accuracy.csv, summary.md, and
+# (with --figures) per-(slide,session) PNGs under <out>/<slug>/ (incl. the Phase-1 scanpath-raster
+# and magnification-band heatmaps).
 
 # Resolve this script's own directory so `source()` works regardless of the caller's working
 # directory (Rscript does not chdir to the script's location).
@@ -30,6 +32,8 @@ source(file.path(.script_dir, "blinded_focus.R"))
   reference <- NULL
   roi <- NULL
   labels_csv <- NULL
+  key_csv <- NULL
+  graded_csv <- NULL
   make_figures <- FALSE
   res <- DEFAULT_RES
   magbands <- DEFAULT_MAGBANDS
@@ -45,6 +49,10 @@ source(file.path(.script_dir, "blinded_focus.R"))
       roi <- argv[i + 1]; i <- i + 2
     } else if (a == "--labels") {
       labels_csv <- argv[i + 1]; i <- i + 2
+    } else if (a == "--key") {
+      key_csv <- argv[i + 1]; i <- i + 2
+    } else if (a == "--graded") {
+      graded_csv <- argv[i + 1]; i <- i + 2
     } else if (a == "--figures") {
       make_figures <- TRUE; i <- i + 1
     } else if (a == "--res") {
@@ -58,13 +66,14 @@ source(file.path(.script_dir, "blinded_focus.R"))
   if (length(inputs) == 0 || is.null(out_dir)) {
     stop(
       "usage: Rscript run_analysis.R <input...> --out DIR [--reference ID] [--roi geojson] ",
-      "[--labels csv] [--figures] [--res 512] [--magbands 3]",
+      "[--labels csv] [--key csv] [--graded csv] [--figures] [--res 512] [--magbands 3]",
       call. = FALSE
     )
   }
   list(
     inputs = inputs, out_dir = out_dir, reference = reference, roi = roi,
-    labels_csv = labels_csv, make_figures = make_figures, res = res, magbands = magbands
+    labels_csv = labels_csv, key_csv = key_csv, graded_csv = graded_csv,
+    make_figures = make_figures, res = res, magbands = magbands
   )
 }
 
@@ -74,7 +83,8 @@ source(file.path(.script_dir, "blinded_focus.R"))
   analyze(
     opts$inputs, opts$out_dir,
     reference = opts$reference, roi = opts$roi, labels_csv = opts$labels_csv,
-    make_figures = opts$make_figures, res = opts$res, magbands = opts$magbands
+    make_figures = opts$make_figures, res = opts$res, magbands = opts$magbands,
+    key_csv = opts$key_csv, graded_csv = opts$graded_csv
   )
   invisible(NULL)
 }
