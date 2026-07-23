@@ -58,6 +58,17 @@ DBSCAN), whose cluster assignment is not guaranteed identical across languages/l
 see :func:`fixations_idt`'s docstring for the full, index-based, parity-pinned algorithm.
 Directional metrics (turn-angle, transitions, etc.) stay tick-based and are untouched; fixations
 are an added lens, not a rebase.
+
+Tier 3 C2/C3/C4 (same spec doc, additive): ``mouse_raster_from_path`` -- a point-based dwell-ms
+grid over schema/5 cursor positions, analogous to ``raster_from_path`` but depositing a step's dt
+into the single cell containing the cursor rather than spreading it across a viewport rectangle
+(``mouseCoveragePct``/``mouseEntropy`` in ``metrics.csv``, plus a ``mouse_<slug>.csv`` cross-reader
+cc/iou/coincidence table in ``analyze.py``); ``dtw_distance`` -- Dynamic Time Warping (standard DP,
+NOT Frechet distance) between two sessions' z-normalized viewport-center sequences, added to
+``scanpath_<slug>.csv`` alongside the existing ``levenshteinSim``; ``mean_segment_linearity`` --
+the mean of ``linearity`` over sub-paths split at the session's own top-hotspot cells (uniform
+hotspot-based segmentation; the ROI-entry variant is intentionally not implemented), added to
+``metrics.csv``. All additive; no existing metric's formula or value changes.
 """
 import math
 from collections import Counter
@@ -1459,6 +1470,230 @@ def fixations_per_min(fixations, path):
     if active_min <= 0:
         return float("nan")
     return float(len(fixations)) / active_min
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 C2/C3/C4 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+# C2 mouse-dwell map (analogous to raster_from_path, but point-based -- deposits a step's dt into
+# the single cell containing the cursor, not the viewport rectangle), C3 DTW trajectory similarity
+# (deterministic DP over z-normalized viewport centers -- NOT Frechet), C4 segment-level linearity
+# (mean linearity() over sub-paths split at the session's own top-hotspot cells). All additive; no
+# existing metric's formula or value changes.
+# ---------------------------------------------------------------------------
+
+def mouse_cursor_over_slide(point):
+    """``True`` iff an 8-element schema/5 point's cursor was on-slide -- the shared sentinel test
+    (``mouseX != -1 or mouseY != -1``) used by :func:`cursor_over_slide_pct`,
+    :func:`mouse_path_length_px`, and :func:`mouse_raster_from_path`, factored out here so all
+    three apply the identical rule (a point with fewer than 8 elements has no mouse data at all
+    and is treated as off-slide)."""
+    return len(point) >= 8 and (float(point[6]) != -1 or float(point[7]) != -1)
+
+
+def mouse_raster_from_path(path, img_w, img_h, gw, gh):
+    """Tier 3 C2: rebuild a ``gh x gw`` dwell-ms grid (flat, row-major) from the scanpath's
+    schema/5 cursor positions (``mouseX``, ``mouseY``), analogous to :func:`raster_from_path` but
+    **point-based rather than rectangle-based** -- there is no cursor "extent" to spread a step's
+    weight across, so the whole step's ``dt`` (see :func:`step_durations_ms`) is deposited into
+    the single grid cell containing the cursor position of **point i** (the step's start point;
+    same step-i-owns-the-interval convention :func:`raster_from_path` uses for the viewport
+    rectangle), using the SAME floor/clamp cell-mapping :func:`raster_from_path` itself falls back
+    to when a viewport rectangle collapses entirely off-image (and that :func:`visited_sequence`
+    uses throughout): ``col = floor(mouseX/img_w*gw)``, ``row = floor(mouseY/img_h*gh)``, each
+    clamped to ``[0, gw-1]``/``[0, gh-1]``.
+
+    A step is skipped entirely (contributes no weight, not bridged/interpolated) if:
+
+    - it is flagged idle by :func:`idle_step_mask` (``dt > IDLE_GAP_MS`` -- Tier 2 B1, the same
+      exclusion :func:`raster_from_path` applies), or its ``dt <= 0``;
+    - *either* endpoint's cursor is off-slide (the ``(-1, -1)`` sentinel -- same sentinel-aware
+      rule :func:`mouse_path_length_px`/:func:`mouse_velocity_px_per_sec` use: a segment touching
+      the sentinel at either point is dropped whole, never bridged across).
+
+    Returns **``None``** (blank ``mouseCoveragePct``/``mouseEntropy`` in ``metrics.csv``) in two
+    cases, matching the spec's "blank when no mouse data / no on-slide points":
+
+    - ``path`` doesn't carry schema/5 mouse data at all (see :func:`has_mouse_data`);
+    - ``path`` carries mouse data but has **zero on-slide points** anywhere in it (every sample is
+      the off-viewer sentinel) -- there is nothing measurable, not a real "nothing was ever
+      touched" grid.
+
+    Otherwise returns a flat ``(gw*gh,)`` float array -- **all-zero is a legitimate result**, not
+    blank, whenever there is at least one on-slide point but zero valid on-slide *consecutive
+    pairs* to deposit a step's dt into (e.g. a single on-slide sample surrounded by off-slide
+    ones, or a 1-point path) -- this mirrors the file's existing "0.0 for a well-defined but empty
+    computation" convention (e.g. :func:`coverage`/:func:`entropy` on an all-zero grid), distinct
+    from the two `None` cases above where nothing is measurable at all."""
+    if not has_mouse_data(path):
+        return None
+    if not any(mouse_cursor_over_slide(p) for p in path):
+        return None
+    gw, gh = int(gw), int(gh)
+    img_w = float(img_w) if img_w else 1.0
+    img_h = float(img_h) if img_h else 1.0
+    grid = np.zeros((gh, gw), dtype=float)
+    if len(path) < 2:
+        return grid.flatten()
+    dts = step_durations_ms(path)
+    idle = idle_step_mask(path)
+    for i, dt in enumerate(dts):
+        if dt <= 0:
+            continue
+        if idle[i]:
+            continue
+        if not (mouse_cursor_over_slide(path[i]) and mouse_cursor_over_slide(path[i + 1])):
+            continue
+        mx, my = float(path[i][6]), float(path[i][7])
+        ccx = min(max(mx, 0.0), img_w - EPS)
+        ccy = min(max(my, 0.0), img_h - EPS)
+        col = min(max(int(math.floor(ccx / img_w * gw)), 0), gw - 1)
+        row = min(max(int(math.floor(ccy / img_h * gh)), 0), gh - 1)
+        grid[row, col] += dt
+    return grid.flatten()
+
+
+def _zscore(values):
+    """Tier 3 C3: sample-sd (``ddof=1``) z-normalization of a 1-D sequence: ``z = (v - mean(v)) /
+    sd(v)``. ``sd`` is treated as ``0.0`` (rather than raising/NaN) whenever the sequence has
+    fewer than 2 elements OR is genuinely constant -- in either case every z-value is ``0.0``
+    (a "no information on this axis" value that still participates safely in
+    :func:`dtw_distance`'s local-cost Euclidean formula, rather than a division-by-zero NaN
+    poisoning the whole DP)."""
+    arr = np.asarray(values, dtype=float)
+    n = arr.size
+    if n == 0:
+        return arr
+    mean = float(arr.mean())
+    sd = float(np.std(arr, ddof=1)) if n >= 2 else 0.0
+    if sd == 0.0:
+        return np.zeros(n, dtype=float)
+    return (arr - mean) / sd
+
+
+def dtw_distance(path_a, path_b):
+    """Tier 3 C3: Dynamic Time Warping distance between two scanpaths' viewport-center ``(cx,
+    cy)`` sequences -- a resolution-independent complement to the grid-cell
+    :func:`levenshtein_sim`. Deliberately the standard DP formulation (deterministic, exactly
+    reproducible across languages), NOT Frechet distance or any library shortcut.
+
+    Pinned algorithm (must match an R port to 1e-6):
+
+    1. Each sequence's ``cx`` and ``cy`` are z-normalized **independently per axis, per sequence**
+       via :func:`_zscore` (sample sd, ``ddof=1``; ``0.0`` for a constant/degenerate axis).
+    2. Local cost between point ``i`` of sequence A and point ``j`` of sequence B:
+       ``sqrt((zAx_i - zBx_j)**2 + (zAy_i - zBy_j)**2)`` -- deliberately
+       ``math.sqrt(dx**2 + dy**2)``, **not** ``math.hypot``, to bit-match an R port's
+       ``sqrt(dx^2+dy^2)`` (same rationale as :func:`mouse_path_length_px`'s identical
+       sqrt-not-hypot convention documented elsewhere in this file).
+    3. Standard DTW dynamic program over the full ``nA x nB`` cost matrix: ``D[0][0] =
+       cost(0,0)``; first row/column are cumulative sums along that row/column; every other cell
+       ``D[i][j] = cost(i,j) + min(D[i-1][j], D[i][j-1], D[i-1][j-1])``.
+    4. ``dtwDistance = D[nA-1][nB-1]`` -- the **raw accumulated cost**, deliberately **NOT**
+       normalized by path/warping-path length (unlike some DTW variants), to keep the definition
+       simple and exactly reproducible. This makes it a resolution/scale-independent (thanks to
+       z-normalization) but still LENGTH-dependent quantity -- a longer pair of paths accumulates
+       more total cost even at equal per-step similarity. Documented, not a bug.
+
+    A **self-comparison** (``path_a is path_b``, e.g. the ``scanpath_<slug>.csv`` diagonal row) is
+    always exactly ``0.0`` without any special-cased branch: with identical z-normalized
+    sequences, the straight ``i == j`` alignment has cost ``0.0`` at every step (a valid warping
+    path), and every local cost is ``>= 0`` (a Euclidean distance), so ``0.0`` is also the DP's
+    global minimum -- this falls out of the DP itself.
+
+    ``float("nan")`` (blank in ``scanpath_<slug>.csv``) if either path is empty/``None`` --
+    matches the file's existing "blank when either session lacks a path" convention."""
+    if not path_a or not path_b:
+        return float("nan")
+    ax = _zscore([float(p[1]) for p in path_a])
+    ay = _zscore([float(p[2]) for p in path_a])
+    bx = _zscore([float(p[1]) for p in path_b])
+    by = _zscore([float(p[2]) for p in path_b])
+    n_a, n_b = len(ax), len(bx)
+
+    def cost(i, j):
+        dx = ax[i] - bx[j]
+        dy = ay[i] - by[j]
+        return math.sqrt(dx * dx + dy * dy)
+
+    d = [[0.0] * n_b for _ in range(n_a)]
+    d[0][0] = cost(0, 0)
+    for j in range(1, n_b):
+        d[0][j] = d[0][j - 1] + cost(0, j)
+    for i in range(1, n_a):
+        d[i][0] = d[i - 1][0] + cost(i, 0)
+    for i in range(1, n_a):
+        for j in range(1, n_b):
+            d[i][j] = cost(i, j) + min(d[i - 1][j], d[i][j - 1], d[i - 1][j - 1])
+    return float(d[n_a - 1][n_b - 1])
+
+
+def mean_segment_linearity(path, grid, gw, gh, img_w, img_h, top_n=5):
+    """Tier 3 C4: mean :func:`linearity` over the sub-paths a scanpath splits into at the
+    session's own top-``top_n`` dwell hotspot cells (reusing :func:`top_hotspots` on the
+    session's own NATIVE recorded dwell ``grid``/``gw``/``gh`` -- the same triple
+    ``hotspots_<slug>.csv`` uses) -- a complement to the whole-path :func:`linearity` (Roa-Peña
+    reports whole-path ~0.41 vs a between-hotspot segment ~0.8: segments transiting between two
+    attended regions tend to be far straighter than the whole meandering scanpath).
+
+    **Pinned, deterministic segmentation** (uniform hotspot-based; the ROI-entry variant the spec
+    also mentions is intentionally NOT implemented -- noted as a future option):
+
+    1. Compute the top-``top_n`` hotspot cells of ``grid`` via :func:`top_hotspots` (deterministic
+       tie-break already built in).
+    2. Walk every RAW path point (**no** run-length dedup, unlike :func:`visited_sequence` --
+       the 1:1 correspondence between a path INDEX and its point must be preserved here, since a
+       "boundary" marks an actual index to slice segments at) and map it to a grid cell via the
+       same floor/clamp convention used throughout this module. A point is a "boundary" iff its
+       cell is one of the top-``top_n`` hotspot cells.
+    3. Segments are the sub-paths **between consecutive boundary points** (boundary index ``b[k]``
+       to boundary index ``b[k+1]``, inclusive of both endpoints -- so a boundary point is shared
+       by its two adjacent segments, per the spec). Any portion of the path BEFORE the first
+       boundary or AFTER the last boundary is not part of any segment (excluded, not counted as a
+       leading/trailing segment) -- "sub-paths BETWEEN consecutive boundary points" is read
+       literally. If fewer than 2 boundary points are found at all, there are zero segments.
+    4. :func:`linearity` (unchanged, reused as-is) is computed on every segment with ``>= 2``
+       points; ``meanSegmentLinearity`` is the mean of those per-segment linearities.
+
+    Caveat (documented, not a bug): this is deliberately **not** deduped for consecutive samples
+    that land in the same hotspot cell -- if a reader dwells for several consecutive ticks inside
+    one hotspot, each adjacent pair of those ticks forms its own trivial 2-point segment, and ANY
+    2-point segment has ``linearity == 1.0`` unconditionally (a straight line is the only possible
+    shape between 2 points) -- a run of such dwell-ticks can pull ``meanSegmentLinearity`` toward
+    1.0. A caller wanting a "commute-only" reading would need to additionally collapse consecutive
+    same-cell boundary hits before segmenting; not implemented here (uniform, simpler rule per the
+    spec).
+
+    ``float("nan")`` (blank) if: fewer than 2 hotspot cells are found at all (only possible for a
+    degenerate grid with fewer than 2 cells total, e.g. ``gw*gh < 2``); ``path`` has fewer than 2
+    points; fewer than 2 boundary points are found in the path (zero segments); or every segment
+    found has fewer than 2 points (impossible by construction here, since consecutive boundary
+    indices are always distinct path positions -- kept as an explicit guard for defensiveness)."""
+    hotspots = top_hotspots(grid, gw, gh, top_n)
+    if len(hotspots) < 2:
+        return float("nan")
+    if not path or len(path) < 2:
+        return float("nan")
+    gw_i, gh_i = int(gw), int(gh)
+    img_w_f = float(img_w) if img_w else 1.0
+    img_h_f = float(img_h) if img_h else 1.0
+    hotspot_cells = set(row * gw_i + col for row, col, _ in hotspots)
+    boundary_idx = []
+    for i, pt in enumerate(path):
+        cx, cy = float(pt[1]), float(pt[2])
+        col = min(max(int(math.floor(cx / img_w_f * gw_i)), 0), gw_i - 1)
+        row = min(max(int(math.floor(cy / img_h_f * gh_i)), 0), gh_i - 1)
+        if (row * gw_i + col) in hotspot_cells:
+            boundary_idx.append(i)
+    if len(boundary_idx) < 2:
+        return float("nan")
+    linearities = []
+    for j in range(len(boundary_idx) - 1):
+        seg = path[boundary_idx[j]: boundary_idx[j + 1] + 1]
+        if len(seg) >= 2:
+            linearities.append(linearity(seg))
+    if not linearities:
+        return float("nan")
+    return float(np.mean(linearities))
 
 
 # ---------------------------------------------------------------------------

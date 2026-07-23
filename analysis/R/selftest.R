@@ -498,6 +498,82 @@ build_fixation_fragment <- function() {
   )
 }
 
+MOUSE_SLIDE_KEY <- "sha256:selftest-slide-mouse-0001"
+#' Tier 3 C2 fixture: 2 schema/5 sessions on one slide, hand-constructed mouse-cursor paths whose
+#' resulting dwell grids are exactly hand-derivable. Mirrors the Python toolkit's
+#' `build_mouse_fixture` exactly; see docs/superpowers/sdd/t4-report.md for the full derivation.
+#' Native grid is GW=GH=8 (module constants), so a cell spans (IMG_W/8=250) x (IMG_H/8=187.5)
+#' image px.
+#'
+#' mouse1: 3 points, mouse cursor dwells in cell(0,0) for both steps -> grid: cell(0,0)=2000, rest
+#'   0. mouseCoveragePct = 1/64*100 = 1.5625; mouseEntropy ~= 0.0 (single nonzero cell).
+#' mouse2: 3 points, step0 mouse at (50,50) [cell(0,0)], step1 mouse at (300,250) [cell(1,1)] ->
+#'   grid: cell(0,0)=1000, cell(1,1)=1000, rest 0. mouseCoveragePct = 2/64*100 = 3.125;
+#'   mouseEntropy ~= 1.0 (2 equal-mass cells).
+#'
+#' Cross-reader (mouse_<slug>.csv): iou(mouse1,mouse2,thresh=0.1) = 0.5 EXACTLY (union={cell(0,0),
+#' cell(1,1)}, intersection={cell(0,0)}); coincidenceLevel = 0.5 EXACTLY (visited footprint=2
+#' cells, coincident=1 cell) -- matches iou here by construction, not a formula coincidence.
+build_mouse_fixture <- function() {
+  grid <- .n_nonzero_grid(10)
+  path1 <- matrix(
+    c(
+      0, 1000, 750, 400, 300, 1000, 50, 50,
+      1000, 1000, 750, 400, 300, 1000, 60, 60,
+      2000, 1000, 750, 400, 300, 1000, 70, 70
+    ),
+    nrow = 3, ncol = 8, byrow = TRUE
+  )
+  path2 <- matrix(
+    c(
+      0, 1000, 750, 400, 300, 1000, 50, 50,
+      1000, 1000, 750, 400, 300, 1000, 300, 250,
+      2000, 1000, 750, 400, 300, 1000, 310, 260
+    ),
+    nrow = 3, ncol = 8, byrow = TRUE
+  )
+  f1 <- .fragment("mouse1", 5, grid, 2000, 3, path = path1, slide_key = MOUSE_SLIDE_KEY)
+  f2 <- .fragment("mouse2", 5, grid, 2000, 3, path = path2, slide_key = MOUSE_SLIDE_KEY)
+  list(f1, f2)
+}
+
+SEGLIN_SLIDE_KEY <- "sha256:selftest-slide-seglin-0001"
+#' Tier 3 C4 fixture: a single schema/3, 5-point path with a KNOWN hotspot split -- one clean
+#' segment of exactly linearity==1.0 between two of the grid's top-5 hotspot cells, bracketed by
+#' non-hotspot wandering points (excluded from the segment). Mirrors the Python toolkit's
+#' `build_seglin_fragment` exactly; see docs/superpowers/sdd/t4-report.md for the full derivation.
+#'
+#' Native grid (GW=GH=8): cell(0,0)=1000, cell(3,3)=900, cell(7,4)=800, cell(7,5)=700,
+#' cell(7,6)=600, everything else 0 -- these 5 cells are top_hotspots(grid,8,8,5) (no ties).
+#'
+#' path: p0=cell(5,4) non-hotspot, p1=cell(0,0)==hotspot [BOUNDARY 1], p2=cell(1,1) non-hotspot
+#' (EXACT midpoint of p1/p3, colinear), p3=cell(3,3)==hotspot [BOUNDARY 2], p4=cell(6,4)
+#' non-hotspot. boundary_idx=[2,4] (1-based) -> exactly 1 segment=path[2:4]=[p1,p2,p3]; p2 being
+#' the exact midpoint of p1/p3 makes the segment perfectly colinear -> linearity==1.0 EXACTLY ->
+#' meanSegmentLinearity == 1.0 EXACTLY.
+build_seglin_fragment <- function() {
+  grid <- rep(0.0, 64)
+  grid[1] <- 1000.0   # row0, col0 (flat idx0 -> 1-based 1)
+  grid[28] <- 900.0   # row3, col3 (flat idx27 -> 1-based 28)
+  grid[61] <- 800.0   # row7, col4 (flat idx60 -> 1-based 61)
+  grid[62] <- 700.0   # row7, col5
+  grid[63] <- 600.0   # row7, col6
+  path <- matrix(
+    c(
+      0, 1000, 1000, 400, 300,
+      250, 50, 50, 400, 300,
+      500, 425, 325, 400, 300,
+      750, 800, 600, 400, 300,
+      1000, 1200, 1200, 400, 300
+    ),
+    nrow = 5, ncol = 5, byrow = TRUE
+  )
+  .fragment(
+    "seglin1", 3, grid, 1000, 5, path = path,
+    slide_key = SEGLIN_SLIDE_KEY
+  )
+}
+
 write_fragments_to_dir <- function(fragments, d) {
   for (f in fragments) {
     writeLines(jsonlite::toJSON(f, auto_unbox = TRUE), file.path(d, paste0(f$sessionId, ".json")))
@@ -1239,6 +1315,178 @@ check_tier3_fixation_fixture <- function(tmp) {
   stopifnot(f2$nPoints == 3)
 }
 
+#' Direct, pipeline-independent unit checks for the new Tier 3 C2 (`mouse_raster_from_path`), C3
+#' (`dtw_distance`), and C4 (`mean_segment_linearity`) functions -- TDD-style asserts on hand-built
+#' inputs, bypassing the full `analyze()` pipeline entirely. Mirrors
+#' `check_tier4_direct_unit_asserts` in the Python toolkit exactly (same hand-built inputs, same
+#' expected values).
+check_tier4_direct_unit_asserts <- function() {
+  # ---- C2: mouse_raster_from_path degenerate + sentinel-skip cases ----
+  path_no_mouse <- list(c(0, 0, 0, 400, 300), c(100, 10, 0, 400, 300)) # 5-element, no mouse data
+  stopifnot(
+    "mouse_raster_from_path should be NULL for a path with no schema/5 mouse data" =
+      is.null(mouse_raster_from_path(path_no_mouse, 100, 100, 2, 2))
+  )
+  path_all_off <- list(
+    c(0, 0, 0, 400, 300, 1000, -1, -1),
+    c(100, 10, 0, 400, 300, 1000, -1, -1)
+  )
+  stopifnot(
+    "mouse_raster_from_path should be NULL when every sample is off-slide" =
+      is.null(mouse_raster_from_path(path_all_off, 100, 100, 2, 2))
+  )
+  # Sentinel-skip regression: point1's own dt-owning step is skipped because the step touches
+  # the sentinel at point2 -- even though point1 ITSELF is on-slide.
+  path_mixed <- list(
+    c(0, 0, 0, 400, 300, 1000, 10, 10),    # on-slide, cell(0,0) [100x100 img, gw=gh=2 -> 50x50 cells]
+    c(100, 0, 0, 400, 300, 1000, 60, 60),  # on-slide, cell(1,1)
+    c(200, 0, 0, 400, 300, 1000, -1, -1),  # OFF-SLIDE sentinel
+    c(300, 0, 0, 400, 300, 1000, 20, 20)   # on-slide, cell(0,0)
+  )
+  grid <- mouse_raster_from_path(path_mixed, 100, 100, 2, 2)
+  stopifnot(!is.null(grid))
+  stopifnot(
+    "expected cell(0,0)==100 (step0's dt, owned by point0's on-slide cursor)" =
+      abs(grid[1] - 100.0) < 1e-9
+  )
+  stopifnot(
+    "expected cell(1,1)==0 -- step1's dt must be dropped (touches the sentinel at point2)" =
+      abs(grid[4] - 0.0) < 1e-9
+  )
+  stopifnot(abs(grid[2]) < 1e-9 && abs(grid[3]) < 1e-9)
+
+  # ---- C3: dtw_distance ----
+  stopifnot(
+    "dtw_distance should be blank when path_a is empty" =
+      is.nan(dtw_distance(list(), list(c(0, 0, 0, 400))))
+  )
+  stopifnot(
+    "dtw_distance should be blank when path_b is NULL" =
+      is.nan(dtw_distance(list(c(0, 0, 0, 400)), NULL))
+  )
+  # Invariance: pathB is pathA's (cx, cy) affine-transformed per axis with a POSITIVE scale
+  # -> z-normalization removes both mean and scale, so pathB z-normalizes IDENTICALLY to pathA ->
+  # the diagonal alignment (cost 0.0 everywhere) is also the DP's global minimum -> EXACTLY 0.0.
+  path_a <- list(c(0, 0, 0, 400), c(100, 10, 5, 400), c(200, 20, 10, 400), c(300, 30, 15, 400))
+  path_b <- lapply(path_a, function(p) c(p[1], 100 + 2 * p[2], -50 + 3 * p[3], p[4]))
+  dtw_inv <- dtw_distance(path_a, path_b)
+  stopifnot(
+    "expected dtwDistance == 0.0 (affine invariance)" = abs(dtw_inv - 0.0) < 1e-9
+  )
+  # Differing-shape known value: a horizontal 3-point line vs a vertical 3-point line --
+  # independently verified against the implementation before this fixture was written:
+  # dtwDistance == 2*sqrt(2) == 2.8284271247461903.
+  path_horiz <- list(c(0, 0, 0, 400), c(100, 1, 0, 400), c(200, 2, 0, 400))
+  path_vert <- list(c(0, 0, 0, 400), c(100, 0, 1, 400), c(200, 0, 2, 400))
+  dtw_cross <- dtw_distance(path_horiz, path_vert)
+  stopifnot(
+    "expected dtwDistance == 2*sqrt(2) == 2.8284271247461903" =
+      abs(dtw_cross - 2.8284271247461903) < 1e-9
+  )
+  # Constant-axis z-norm guard: a path with cy all identical (sd==0 on that axis) must not
+  # raise/NaN -- z-normalizes to all-0.0 on that axis.
+  path_const_y <- list(c(0, 0, 5, 400), c(100, 10, 5, 400), c(200, 20, 5, 400))
+  dtw_const <- dtw_distance(path_const_y, path_const_y)
+  stopifnot(
+    "self-comparison of a constant-y path should still be exactly 0.0" = abs(dtw_const - 0.0) < 1e-9
+  )
+
+  # ---- C4: mean_segment_linearity degenerate cases ----
+  grid8 <- rep(0.0, 64)
+  grid8[1] <- 1000.0; grid8[28] <- 900.0; grid8[61] <- 800.0; grid8[62] <- 700.0; grid8[63] <- 600.0
+  IMG_W_T <- 2000; IMG_H_T <- 1500
+  # <2 hotspots: a grid with only 1 cell total.
+  stopifnot(
+    "mean_segment_linearity should be blank for a grid with <2 cells" =
+      is.nan(mean_segment_linearity(
+        list(c(0, 0, 0, 400), c(100, 1, 1, 400)), c(5.0), 1, 1, 100, 100
+      ))
+  )
+  # <2 path points.
+  stopifnot(
+    "mean_segment_linearity should be blank for a <2-point path" =
+      is.nan(mean_segment_linearity(list(c(0, 0, 0, 400)), grid8, 8, 8, IMG_W_T, IMG_H_T))
+  )
+  # 0 boundary points: path never visits a hotspot cell.
+  p_no_hit <- list(c(0, 1400, 1000, 400), c(100, 1410, 1010, 400))
+  stopifnot(
+    "mean_segment_linearity should be blank when the path never touches a hotspot cell" =
+      is.nan(mean_segment_linearity(p_no_hit, grid8, 8, 8, IMG_W_T, IMG_H_T))
+  )
+  # exactly 1 boundary point: only 1 hotspot hit -> no "between consecutive boundaries" pair.
+  p_one_hit <- list(c(0, 1400, 1000, 400), c(100, 50, 50, 400), c(200, 1410, 1010, 400))
+  stopifnot(
+    "mean_segment_linearity should be blank with only 1 boundary point" =
+      is.nan(mean_segment_linearity(p_one_hit, grid8, 8, 8, IMG_W_T, IMG_H_T))
+  )
+}
+
+#' Tier 3 C2 pipeline-level check: runs `build_mouse_fixture` (2 schema/5 sessions, hand-derivable
+#' mouse dwell grids) through the full `analyze()` pipeline and asserts every documented number --
+#' `metrics.csv`'s `mouseCoveragePct`/`mouseEntropy` AND `mouse_<slug>.csv`'s pairwise
+#' `iou`/`coincidenceLevel` -- against their hand-derived expected values.
+check_tier4_mouse_fixture <- function(tmp) {
+  fragments <- build_mouse_fixture()
+  in_dir <- file.path(tmp, "in_mouse")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_mouse")
+  analyze(list(in_dir), out_dir)
+
+  metrics <- utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
+  stopifnot(nrow(metrics) == 2)
+  row1 <- metrics[metrics$session == "mouse1", ]
+  row2 <- metrics[metrics$session == "mouse2", ]
+
+  stopifnot(abs(row1$mouseCoveragePct - (1.0 / 64.0 * 100.0)) < 1e-6)
+  stopifnot(abs(row1$mouseEntropy - 0.0) < 1e-6)
+  stopifnot(abs(row2$mouseCoveragePct - (2.0 / 64.0 * 100.0)) < 1e-6)
+  stopifnot(abs(row2$mouseEntropy - 1.0) < 1e-6)
+
+  out_files <- list.files(out_dir)
+  mouse_files <- out_files[startsWith(out_files, "mouse_")]
+  stopifnot("expected exactly one mouse_ file" = length(mouse_files) == 1)
+  mouse_df <- utils::read.csv(file.path(out_dir, mouse_files[1]), stringsAsFactors = FALSE)
+  stopifnot("expected 2x2=4 pairwise rows" = nrow(mouse_df) == 4)
+
+  cross <- mouse_df[mouse_df$sessionA == "mouse1" & mouse_df$sessionB == "mouse2", ]
+  stopifnot("expected iou(mouse1,mouse2) == 0.5" = abs(cross$iou - 0.5) < 1e-9)
+
+  diag1 <- mouse_df[mouse_df$sessionA == "mouse1" & mouse_df$sessionB == "mouse1", ]
+  stopifnot(
+    "expected coincidenceLevel == 0.5 (diagonal-reuse row, first session)" =
+      abs(diag1$coincidenceLevel - 0.5) < 1e-9
+  )
+  diag2 <- mouse_df[mouse_df$sessionA == "mouse2" & mouse_df$sessionB == "mouse2", ]
+  stopifnot(
+    "coincidenceLevel should be blank on every diagonal row except the first session's" =
+      is.na(diag2$coincidenceLevel)
+  )
+}
+
+#' Tier 3 C4 pipeline-level check: runs `build_seglin_fragment` (a single path with a known
+#' 2-boundary hotspot split, colinear segment) through the full `analyze()` pipeline and asserts
+#' `meanSegmentLinearity == 1.0` exactly.
+check_tier4_seglin_fixture <- function(tmp) {
+  frag <- build_seglin_fragment()
+  in_dir <- file.path(tmp, "in_seglin")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_seglin")
+  analyze(list(in_dir), out_dir)
+
+  metrics <- utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
+  stopifnot(nrow(metrics) == 1)
+  row <- metrics[1, ]
+  stopifnot(
+    "expected meanSegmentLinearity == 1.0 (single colinear segment)" =
+      abs(row$meanSegmentLinearity - 1.0) < 1e-9
+  )
+  # Bonus sanity (not exact-value asserted): the whole-path linearity is materially lower than the
+  # segment's, illustrating the Roa-Pena whole-vs-segment contrast the spec cites.
+  stopifnot(row$linearity < row$meanSegmentLinearity)
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -1276,7 +1524,8 @@ run <- function() {
     "mouseVelocityPxPerSec", "activeFractionPct",
     "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
     "magnificationSource",
-    "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin"
+    "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
+    "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity"
   )
   stopifnot("metrics.csv columns mismatch" = identical(colnames(metrics), expected_cols))
   stopifnot(
@@ -1760,6 +2009,82 @@ run <- function() {
     stopifnot("expected blank mouseVelocityPxPerSec (no mouse data)" = is.na(r$mouseVelocityPxPerSec))
   }
 
+  # --- Tier 3 C2 (mouse-dwell grid): populated only for s1 (schema/5, has mouse data with at
+  # least one on-slide point), blank elsewhere ---
+  stopifnot("s1 missing mouseCoveragePct" = !is.na(row_s1$mouseCoveragePct))
+  stopifnot("mouseCoveragePct out of [0,100]" = row_s1$mouseCoveragePct >= 0.0 && row_s1$mouseCoveragePct <= 100.0)
+  stopifnot("s1 missing mouseEntropy" = !is.na(row_s1$mouseEntropy))
+  stopifnot("mouseEntropy should be >= 0" = row_s1$mouseEntropy >= 0.0)
+  for (r in list(row_s2, row_s3, row_s4)) {
+    stopifnot("expected blank mouseCoveragePct (no mouse data)" = is.na(r$mouseCoveragePct))
+    stopifnot("expected blank mouseEntropy (no mouse data)" = is.na(r$mouseEntropy))
+  }
+
+  # --- Tier 3 C2: mouse_<slug>.csv written (s1 has mouse data), self-diagonal cc == 1.0 for the
+  # one session with real (non-constant) mouse-dwell data, == 0.0 for the all-zero placeholder
+  # grids of the mouse-data-less sessions (cc()'s documented "constant grid -> 0.0" convention) ---
+  out_files <- list.files(out_dir)
+  mouse_files <- out_files[startsWith(out_files, "mouse_")]
+  stopifnot("expected exactly one mouse_ file" = length(mouse_files) == 1)
+  mouse_df <- utils::read.csv(file.path(out_dir, mouse_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "mouse_<slug>.csv columns mismatch" =
+      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel"))
+  )
+  stopifnot("expected 4x4=16 pairwise rows" = nrow(mouse_df) == 16)
+  diag_s1 <- mouse_df[mouse_df$sessionA == "s1" & mouse_df$sessionB == "s1", ]
+  stopifnot(
+    "s1 (real mouse-dwell data) self-diagonal cc should be 1.0" = abs(diag_s1$cc - 1.0) < 1e-9
+  )
+  for (sid in c("s2", "s3", "s4")) {
+    diag <- mouse_df[mouse_df$sessionA == sid & mouse_df$sessionB == sid, ]
+    stopifnot(
+      "all-zero placeholder mouse grid should self-cc == 0.0 (constant)" = abs(diag$cc - 0.0) < 1e-9
+    )
+  }
+
+  # --- Tier 3 C4 (segment-level linearity): populated for s1/s2 (whose synthetic path dwells
+  # right at their own recorded grid's center); blank for s3 (no path) AND, legitimately, for s4
+  # (its recorded grid is centered elsewhere from its bouncing path by deliberate fixture design --
+  # see build_fragments' f4 comment -- so 0 boundary hotspot hits, a real documented degenerate
+  # case, not a bug). Any populated value must still be a valid linearity in [0, 1]. ---
+  for (r in list(row_s1, row_s2)) {
+    stopifnot("missing meanSegmentLinearity" = !is.na(r$meanSegmentLinearity))
+    stopifnot(
+      "meanSegmentLinearity out of [0,1]" =
+        r$meanSegmentLinearity >= -1e-9 && r$meanSegmentLinearity <= 1.0 + 1e-9
+    )
+  }
+  if (!is.na(row_s4$meanSegmentLinearity)) {
+    stopifnot(
+      "meanSegmentLinearity out of [0,1]" =
+        row_s4$meanSegmentLinearity >= -1e-9 && row_s4$meanSegmentLinearity <= 1.0 + 1e-9
+    )
+  }
+  stopifnot(
+    "schema/2 (no path) should have blank meanSegmentLinearity" = is.na(row_s3$meanSegmentLinearity)
+  )
+
+  # --- Tier 3 C3 (DTW): scanpath_<slug>.csv gains dtwDistance, diagonal exactly 0.0
+  # (self-comparison, by construction of the DP), off-diagonal non-negative and non-blank ---
+  scan_files <- out_files[startsWith(out_files, "scanpath_")]
+  stopifnot("expected exactly one scanpath_ file" = length(scan_files) == 1)
+  scan_df <- utils::read.csv(file.path(out_dir, scan_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "scanpath_<slug>.csv columns mismatch" = identical(
+      colnames(scan_df),
+      c("sessionA", "sessionB", "levenshteinSim", "transitionEntropy", "dtwDistance")
+    )
+  )
+  stopifnot("dtwDistance should never be blank here" = !any(is.na(scan_df$dtwDistance)))
+  for (sid in c("s1", "s2", "s4")) {
+    diag <- scan_df[scan_df$sessionA == sid & scan_df$sessionB == sid, ]
+    stopifnot(
+      "self-diagonal dtwDistance should be exactly 0.0" = abs(diag$dtwDistance - 0.0) < 1e-9
+    )
+  }
+  stopifnot("dtwDistance should never be negative" = all(scan_df$dtwDistance >= 0.0))
+
   # --- direct metrics-function unit checks (raster_from_path, w-proxy zoom, magPct/scanRate) ---
   s1_path <- fragments[[1]]$path # schema/5, 8-element points, varying dsMilli + mouse
   s2_path <- fragments[[2]]$path # schema/3, 5-element points, constant w
@@ -2057,6 +2382,12 @@ run <- function() {
   # --- Tier 3 C1: I-DT fixation extraction ---
   check_tier3_direct_unit_asserts()
   check_tier3_fixation_fixture(tmp)
+
+  # --- Tier 3 C2/C3/C4: mouse-dwell map + cross-reader mouse agreement, DTW trajectory
+  # similarity, segment-level linearity ---
+  check_tier4_direct_unit_asserts()
+  check_tier4_mouse_fixture(tmp)
+  check_tier4_seglin_fixture(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }

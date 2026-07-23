@@ -36,13 +36,23 @@ Output files (written to ``--out DIR``):
   (Tier 3 C1, additive) ``nFixations``, ``meanFixationMs``, ``medianFixationMs``, ``sdFixationMs``,
   ``fixationsPerMin`` -- a deterministic I-DT (dispersion-threshold, Salvucci & Goldberg 2000)
   fixation-extraction summary over the scanpath, path-only (blank without a path); see
-  :func:`blinded_focus.metrics.fixations_idt` for the pinned algorithm.
+  :func:`blinded_focus.metrics.fixations_idt` for the pinned algorithm. (Tier 3 C2, additive)
+  ``mouseCoveragePct``/``mouseEntropy`` -- coverage/entropy of a point-based mouse-dwell grid (see
+  :func:`blinded_focus.metrics.mouse_raster_from_path`), schema/5 only, blank when there's no mouse
+  data or zero on-slide points. (Tier 3 C4, additive) ``meanSegmentLinearity`` -- mean
+  :func:`blinded_focus.metrics.linearity` over sub-paths split at the session's own top-hotspot
+  cells, path-only (blank if fewer than 2 hotspots or fewer than 2 boundary points are found).
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus).
 - per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``.
-- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv``, and (Phase 1;
-  Tier 2 B1/B3) ``magbands_<slug>.csv`` — per-session dwell time (Tier 2 B1: idle-excluded) in
+- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv`` (``sessionA``,
+  ``sessionB``, ``levenshteinSim``, ``transitionEntropy`` (diagonal-only), plus (Tier 3 C3,
+  additive) ``dtwDistance`` -- Dynamic Time Warping between the two sessions' z-normalized
+  viewport-center sequences, standard DP (NOT Frechet distance), raw accumulated cost (not
+  path-length-normalized); see :func:`blinded_focus.metrics.dtw_distance` for the pinned
+  algorithm -- always exactly ``0.0`` on the diagonal), and (Phase 1; Tier 2 B1/B3)
+  ``magbands_<slug>.csv`` — per-session dwell time (Tier 2 B1: idle-excluded) in
   each zoom band, plus a ``bandScheme`` column (``"canonical"``/``"tercile"``, Tier 2 B3): by
   default (``--magband-scheme canonical``) sessions with a computable true magnification
   (``baseMagnification`` + per-point ``dsMilli``) get 7 fixed bands via
@@ -55,6 +65,12 @@ Output files (written to ``--out DIR``):
   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
   diagonal-reuse convention as ``compare_<slug>.csv``) plus a slide-level ``coincidenceLevel``
   over those same regions.
+- per slide, when at least one session carries schema/5 mouse data (Tier 3 C2):
+  ``mouse_<slug>.csv`` — pairwise ``sessionA``, ``sessionB``, ``cc``, ``iou`` of each session's
+  own point-based mouse-dwell grid (resampled to the slide's common grid; a session without mouse
+  data contributes an all-zero grid, same convention ``annotations_<slug>.csv`` uses for a
+  session with no annotations), plus a slide-level ``coincidenceLevel`` (same diagonal-reuse
+  convention as ``compare_<slug>.csv``/``annotations_<slug>.csv``).
 - (Phase 3) ``decisions.csv`` — one row per (slide, session) with a hand-entered ``decision``
   object (``diagnosis``, ``confidence``, ``decisionMs``): ``slide``, ``sessionId`` (stable join
   key), ``session`` (display label), ``diagnosis``, ``confidence``, ``confidenceScaled``
@@ -95,12 +111,15 @@ Output files (written to ``--out DIR``):
   ``<out>/<slug>/``, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
   ``--res`` resolution (``..._scanpath_raster.png`` — the trustworthy high-magnification map,
   independent of the recorded grid) and one heatmap per magnification band
-  (``..._magband<N>.png``); plus, per slide when any session has a path (Tier 1 A6):
-  ``overlay_<slug>_scanpaths.png`` — every path-carrying session's viewport-center path on one
-  shared axis (not part of the numeric-parity contract — a PNG, existence/valid-magic only).
+  (``..._magband<N>.png``); (Tier 3 C2, when the session carries schema/5 mouse data)
+  ``..._mousemap.png`` — a heatmap of the point-based mouse-dwell grid at ``--res`` resolution
+  (reuses the same heatmap plotting helper; not part of the numeric-parity contract); plus, per
+  slide when any session has a path (Tier 1 A6): ``overlay_<slug>_scanpaths.png`` — every
+  path-carrying session's viewport-center path on one shared axis (not part of the numeric-parity
+  contract — a PNG, existence/valid-magic only).
 
 Design note on "matrices" (``compare_<slug>.csv`` / ``scanpath_<slug>.csv`` / ``magbands_<slug>.csv``
-/ ``annotations_<slug>.csv``): these are written as *tidy long-format* tables (one row per pair or
+/ ``annotations_<slug>.csv`` / ``mouse_<slug>.csv``): these are written as *tidy long-format* tables (one row per pair or
 per (session, band)) rather than 2D matrix-shaped CSVs, so a single file can carry multiple metrics
 and stays trivial to `pivot()`/parse in either Python or R. As a compact way to attach per-session
 (not per-pair) values, the *diagonal* row of each pair table also carries extra columns
@@ -108,9 +127,9 @@ and stays trivial to `pivot()`/parse in either Python or R. As a compact way to 
 ``scanpath_<slug>.csv``) — off-diagonal rows leave them blank. ``coincidenceLevel`` is a
 slide-level (not per-session) statistic; by convention it is written on exactly one row per
 slide — the diagonal row of the *first* session in insertion order (``session_ids[0]``) — all
-other rows leave it blank. ``annotations_<slug>.csv`` reuses this exact same diagonal-reuse
-convention for its own (annotation-region) ``coincidenceLevel``. An R port must place it
-identically for the two toolkits' CSVs to diff-match.
+other rows leave it blank. ``annotations_<slug>.csv`` and ``mouse_<slug>.csv`` reuse this exact
+same diagonal-reuse convention for their own (annotation-region / mouse-dwell) ``coincidenceLevel``.
+An R port must place it identically for the two toolkits' CSVs to diff-match.
 """
 import argparse
 import csv
@@ -639,12 +658,19 @@ def analyze(
         path_seq = {}        # sessionId -> visited-cell sequence (schema/3 only)
         common_ann_masks = {}  # sessionId -> this session's own annotated region, resampled to
                                 # (tw, th) boolean -- used only by the cross-user annotations_<slug>.csv
+        mouse_native = {}    # sessionId -> this session's own NATIVE (gw, gh) point-based mouse-
+                             # dwell grid (Tier 3 C2) -- all-zero (never None) for a session with
+                             # no schema/5 mouse data or zero on-slide points, mirroring
+                             # common_ann_masks' all-False convention for annotation-less sessions,
+                             # so mouse_<slug>.csv's cross-session resample/compare never needs a
+                             # None-check.
 
         for sid, f in sessions:
             gw, gh = int(f["gridWidth"]), int(f["gridHeight"])
             grid = [float(v) for v in f["grid"]]
             native_grid[sid] = (grid, gw, gh)
             resampled[sid] = m.resample_nn(grid, gw, gh, tw, th)
+            mouse_native[sid] = np.zeros(gw * gh, dtype=float)
 
             comx, comy = m.center_of_mass(grid, gw, gh)
             base_mag = f.get("baseMagnification")
@@ -744,6 +770,12 @@ def analyze(
                 "medianFixationMs": "",
                 "sdFixationMs": "",
                 "fixationsPerMin": "",
+                # Tier 3 C2/C4 (docs/superpowers/specs/2026-07-23-...): mouse-dwell coverage/
+                # entropy (schema/5 only, populated in the `has_mouse_data` branch below) and
+                # segment-level linearity (path-only, populated in the `if path:` block below).
+                "mouseCoveragePct": "",
+                "mouseEntropy": "",
+                "meanSegmentLinearity": "",
             }
 
             path = f.get("path")
@@ -784,6 +816,19 @@ def analyze(
                     # metrics above).
                     row["mousePathLengthPx"] = m.mouse_path_length_px(path)
                     row["mouseVelocityPxPerSec"] = m.mouse_velocity_px_per_sec(path)
+                    # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): point-based mouse-dwell
+                    # grid at this session's own NATIVE (gw, gh) resolution (same resolution
+                    # convention coveragePct/entropy use for the recorded grid above). `None` (blank
+                    # mouseCoveragePct/mouseEntropy) iff there are zero on-slide points anywhere in
+                    # the path -- see mouse_raster_from_path's docstring; `mouse_native[sid]` stays
+                    # the all-zero default in that case, which is exactly right for the cross-
+                    # session mouse_<slug>.csv comparison below (an all-zero grid, not a missing
+                    # one).
+                    mouse_grid = m.mouse_raster_from_path(path, img_w, img_h, gw, gh)
+                    if mouse_grid is not None:
+                        row["mouseCoveragePct"] = m.coverage(mouse_grid) * 100.0
+                        row["mouseEntropy"] = m.entropy(mouse_grid)
+                        mouse_native[sid] = mouse_grid
                 # Tier 2 B1 transparency columns + B2 Drew-fidelity zoom + B4 magnification-source
                 # flag: path-only (like the Tier 1 block above), populated regardless of mouse data.
                 row["idleMs"] = m.idle_ms(path)
@@ -804,6 +849,13 @@ def analyze(
                 row["medianFixationMs"] = m.median_fixation_ms(fx)
                 row["sdFixationMs"] = m.sd_fixation_ms(fx)
                 row["fixationsPerMin"] = m.fixations_per_min(fx, path)
+                # Tier 3 C4 (docs/superpowers/specs/2026-07-23-...): segment-level linearity, split
+                # at this session's own top-hotspot cells -- reuses the session's own NATIVE
+                # (grid, gw, gh) recorded dwell grid (same resolution hotspots_<slug>.csv's
+                # top_hotspots call uses), not the slide's common (tw, th) or a scanpath raster.
+                row["meanSegmentLinearity"] = m.mean_segment_linearity(
+                    path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N
+                )
 
             metrics_rows.append(row)
 
@@ -971,6 +1023,45 @@ def analyze(
                 ["sessionA", "sessionB", "iou", "coincidenceLevel"],
             )
 
+        # ------------------------------------------------------------------
+        # Tier 3 C2 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+        # cross-reader mouse agreement -- pairwise cc/iou of each session's own point-based
+        # mouse-dwell grid (mouse_native, resampled to the slide's common (tw, th) grid) + a
+        # coincidence level, mirroring annotations_<slug>.csv's tidy-long + diagonal-reuse
+        # convention exactly. Gated on at least one session carrying schema/5 mouse data at all
+        # (NOT on whether that session's mouse grid ended up non-empty -- a session whose mouse
+        # data has zero on-slide points still "has mouse data" in the schema sense and should still
+        # trigger the file, same as the annotations gate is on nAnnotations > 0, not on the mask
+        # being non-empty). A session without mouse data contributes its all-zero mouse_native
+        # placeholder (never None), so every session_ids entry participates in the pairwise matrix.
+        # ------------------------------------------------------------------
+        if any(m.has_mouse_data(f.get("path")) for _, f in sessions):
+            mouse_resampled = {
+                sid: m.resample_nn(mouse_native[sid], native_grid[sid][1], native_grid[sid][2], tw, th)
+                for sid in session_ids
+            }
+            mouse_coincidence_val = m.coincidence_level(
+                [mouse_resampled[sid] for sid in session_ids], IOU_THRESH
+            )
+            mouse_rows = []
+            for idx_a, a in enumerate(session_ids):
+                for b in session_ids:
+                    mouse_row = {
+                        "sessionA": labels.get(a, a),
+                        "sessionB": labels.get(b, b),
+                        "cc": m.cc(mouse_resampled[a], mouse_resampled[b]),
+                        "iou": m.iou(mouse_resampled[a], mouse_resampled[b], IOU_THRESH),
+                        "coincidenceLevel": "",
+                    }
+                    if a == b and idx_a == 0:
+                        mouse_row["coincidenceLevel"] = mouse_coincidence_val
+                    mouse_rows.append(mouse_row)
+            _write_csv(
+                os.path.join(out_dir, f"mouse_{slide_slug}.csv"),
+                mouse_rows,
+                ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel"],
+            )
+
         mean_cc = m.mean_pairwise_cc([resampled[sid] for sid in session_ids])
         icc_val = m.icc([resampled[sid] for sid in session_ids])
         coverages = [m.coverage(native_grid[sid][0]) * 100.0 for sid in session_ids]
@@ -1072,6 +1163,13 @@ def analyze(
                         "sessionB": labels.get(b, b),
                         "levenshteinSim": m.levenshtein_sim(path_seq[a], path_seq[b]),
                         "transitionEntropy": "",
+                        # Tier 3 C3 (docs/superpowers/specs/2026-07-23-...): DTW distance between
+                        # the two sessions' raw viewport-center paths (NOT the grid-cell
+                        # path_seq/levenshtein sequence) -- a resolution-independent complement.
+                        # Every scan_sids session has a non-empty path by construction (that's the
+                        # gate for being in scan_sids at all), so this is never blank here; always
+                        # exactly 0.0 on the diagonal (a == b), by construction of the DP itself.
+                        "dtwDistance": m.dtw_distance(frag_by_sid[a]["path"], frag_by_sid[b]["path"]),
                     }
                     if a == b:
                         row["transitionEntropy"] = m.transition_entropy(path_seq[a])
@@ -1079,7 +1177,7 @@ def analyze(
             _write_csv(
                 os.path.join(out_dir, f"scanpath_{slide_slug}.csv"),
                 scan_rows,
-                ["sessionA", "sessionB", "levenshteinSim", "transitionEntropy"],
+                ["sessionA", "sessionB", "levenshteinSim", "transitionEntropy", "dtwDistance"],
             )
 
         # ------------------------------------------------------------------
@@ -1240,6 +1338,18 @@ def analyze(
                                     os.path.join(slide_out, f"{sess_slug}_magband{band}.png"),
                                 )
 
+                    # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): mouse-dwell map figure,
+                    # schema/5 only -- reuses the same heatmap plotting helper + --res resolution
+                    # as the scanpath-raster figure above. Not part of the numeric-parity contract
+                    # (a PNG, existence/valid-magic only).
+                    if m.has_mouse_data(path):
+                        mouse_raster_fig = m.mouse_raster_from_path(path, img_w, img_h, res_gw, res_gh)
+                        if mouse_raster_fig is not None:
+                            fig.heatmap(
+                                mouse_raster_fig, res_gw, res_gh, f"{label} mouse dwell",
+                                os.path.join(slide_out, f"{sess_slug}_mousemap.png"),
+                            )
+
             # Tier 1 A6: multi-reader scanpath overlay -- one PNG per slide, every path-carrying
             # session's viewport-center path on a shared axis. Gated on scan_sids (same
             # path-presence gate as scanpath_<slug>.csv/magbands_<slug>.csv) so a slide with no
@@ -1273,7 +1383,11 @@ def analyze(
          "magnificationSource",
          # Tier 3 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
          # column order above (incl. Tier 1/2) is unchanged. C1: I-DT fixation extraction.
-         "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin"],
+         "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
+         # Tier 3 C2/C4 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1/2/C1) is unchanged. C2: mouse-dwell coverage/entropy.
+         # C4: segment-level linearity.
+         "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):

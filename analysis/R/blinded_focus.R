@@ -1845,6 +1845,186 @@ fixations_per_min <- function(fixations, path) {
 }
 
 # ---------------------------------------------------------------------------
+# Tier 3 C2/C3/C4 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+# C2 mouse-dwell map (analogous to raster_from_path, but point-based -- deposits a step's dt into
+# the single cell containing the cursor, not the viewport rectangle), C3 DTW trajectory similarity
+# (deterministic DP over z-normalized viewport centers -- NOT Frechet), C4 segment-level linearity
+# (mean linearity() over sub-paths split at the session's own top-hotspot cells). Mirrors
+# `blinded_focus.metrics`'s equivalent section in the Python toolkit function-for-function (R's
+# vectorized on-slide test below is equivalent to, not a literal port of, Python's per-point
+# `mouse_cursor_over_slide` helper -- same rule, idiomatic R shape). All additive; no existing
+# metric's formula or value changes.
+# ---------------------------------------------------------------------------
+
+#' Rebuild a `gh x gw` dwell-ms grid (flat, row-major) from the scanpath's schema/5 cursor
+#' positions (`mouseX`, `mouseY`), analogous to `raster_from_path` but **point-based rather than
+#' rectangle-based** -- the whole step's `dt` (see `step_durations_ms`) is deposited into the
+#' single grid cell containing the cursor position of **point i** (the step's start point; same
+#' step-i-owns-the-interval convention `raster_from_path` uses for the viewport rectangle), via
+#' the SAME floor/clamp cell-mapping `raster_from_path` itself falls back to when a viewport
+#' rectangle collapses entirely off-image.
+#'
+#' A step is skipped entirely (contributes no weight) if: it is flagged idle by
+#' `idle_step_mask` (Tier 2 B1) or its `dt <= 0`; OR *either* endpoint's cursor is off-slide (the
+#' `(-1, -1)` sentinel -- same sentinel-aware rule `mouse_path_length_px`/
+#' `mouse_velocity_px_per_sec` use: a segment touching the sentinel at either point is dropped
+#' whole, never bridged across).
+#'
+#' Returns `NULL` (blank `mouseCoveragePct`/`mouseEntropy` in `metrics.csv`) in two cases: `path`
+#' doesn't carry schema/5 mouse data at all (`has_mouse_data`); or `path` carries mouse data but
+#' has **zero on-slide points** anywhere (every sample is the off-viewer sentinel). Otherwise
+#' returns a flat `(gw*gh,)` numeric vector -- all-zero is a legitimate result (not blank) whenever
+#' there is at least one on-slide point but zero valid on-slide *consecutive pairs* to deposit a
+#' step's dt into.
+mouse_raster_from_path <- function(path, img_w, img_h, gw, gh) {
+  if (!has_mouse_data(path)) {
+    return(NULL)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n == 0) {
+    return(NULL)
+  }
+  on_slide <- (pm[, 7] != -1) | (pm[, 8] != -1)
+  if (!any(on_slide)) {
+    return(NULL)
+  }
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  grid <- matrix(0.0, nrow = gh, ncol = gw)
+  if (n < 2) {
+    return(as.numeric(t(grid)))
+  }
+  dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
+  for (i in seq_len(n - 1)) {
+    dt <- dts[i]
+    if (dt <= 0) next
+    if (idle[i]) next
+    if (!(on_slide[i] && on_slide[i + 1])) next
+    mx <- pm[i, 7]; my <- pm[i, 8]
+    ccx <- min(max(mx, 0.0), img_w - EPS)
+    ccy <- min(max(my, 0.0), img_h - EPS)
+    col <- min(max(as.integer(floor(ccx / img_w * gw)), 0L), gw - 1L)
+    row <- min(max(as.integer(floor(ccy / img_h * gh)), 0L), gh - 1L)
+    grid[row + 1L, col + 1L] <- grid[row + 1L, col + 1L] + dt
+  }
+  as.numeric(t(grid))
+}
+
+#' Tier 3 C3: sample-sd (`ddof=1`, i.e. R's default `sd()`) z-normalization of a 1-D sequence:
+#' `z = (v - mean(v)) / sd(v)`. `sd` is treated as `0.0` (rather than `NA`/erroring) whenever the
+#' sequence has fewer than 2 elements OR is genuinely constant -- mirrors
+#' `blinded_focus.metrics._zscore` exactly (R's `sd()` returns `NA` for a length-1 input, which
+#' this explicitly guards against, and `0/0` for a constant sequence, also guarded).
+.zscore <- function(values) {
+  arr <- as.numeric(values)
+  n <- length(arr)
+  if (n == 0) {
+    return(arr)
+  }
+  mu <- mean(arr)
+  sdv <- if (n >= 2) stats::sd(arr) else 0.0
+  if (is.na(sdv) || sdv == 0.0) {
+    return(rep(0.0, n))
+  }
+  (arr - mu) / sdv
+}
+
+#' Tier 3 C3: Dynamic Time Warping distance between two scanpaths' viewport-center `(cx, cy)`
+#' sequences -- exact port of `blinded_focus.metrics.dtw_distance` (Python); see its docstring for
+#' the full pinned algorithm (z-normalize each axis/sequence independently via `.zscore`; local
+#' cost `sqrt(dx^2+dy^2)`; standard DTW DP; `dtwDistance = D[nA,nB]`, the RAW accumulated cost, NOT
+#' path-length-normalized). A self-comparison is always exactly `0.0` without a special-cased
+#' branch (see the Python docstring for why). `NaN` (blank in `scanpath_<slug>.csv`) if either path
+#' is empty/`NULL`.
+dtw_distance <- function(path_a, path_b) {
+  if (is.null(path_a) || length(path_a) == 0 || is.null(path_b) || length(path_b) == 0) {
+    return(NaN)
+  }
+  pma <- as_path_matrix(path_a)
+  pmb <- as_path_matrix(path_b)
+  ax <- .zscore(pma[, 2]); ay <- .zscore(pma[, 3])
+  bx <- .zscore(pmb[, 2]); by <- .zscore(pmb[, 3])
+  n_a <- length(ax); n_b <- length(bx)
+  cost <- function(i, j) {
+    dx <- ax[i] - bx[j]
+    dy <- ay[i] - by[j]
+    sqrt(dx * dx + dy * dy)
+  }
+  d <- matrix(0.0, nrow = n_a, ncol = n_b)
+  d[1, 1] <- cost(1, 1)
+  if (n_b > 1) {
+    for (j in 2:n_b) {
+      d[1, j] <- d[1, j - 1] + cost(1, j)
+    }
+  }
+  if (n_a > 1) {
+    for (i in 2:n_a) {
+      d[i, 1] <- d[i - 1, 1] + cost(i, 1)
+    }
+  }
+  if (n_a > 1 && n_b > 1) {
+    for (i in 2:n_a) {
+      for (j in 2:n_b) {
+        d[i, j] <- cost(i, j) + min(d[i - 1, j], d[i, j - 1], d[i - 1, j - 1])
+      }
+    }
+  }
+  d[n_a, n_b]
+}
+
+#' Tier 3 C4: mean `linearity` over the sub-paths a scanpath splits into at the session's own
+#' top-`top_n` dwell hotspot cells -- exact port of `blinded_focus.metrics.mean_segment_linearity`
+#' (Python); see its docstring for the full pinned segmentation algorithm (deterministic,
+#' hotspot-based; the ROI-entry variant is intentionally NOT implemented) and the documented
+#' no-dedup caveat (a run of consecutive same-hotspot-cell samples produces trivial
+#' `linearity == 1.0` 2-point segments).
+#'
+#' `NaN` (blank) if: fewer than 2 hotspot cells are found at all (grid has fewer than 2 cells);
+#' `path` has fewer than 2 points; fewer than 2 boundary points are found in the path (zero
+#' segments); or every segment found has fewer than 2 points.
+mean_segment_linearity <- function(path, grid, gw, gh, img_w, img_h, top_n = 5) {
+  hotspots <- top_hotspots(grid, gw, gh, top_n)
+  if (length(hotspots) < 2) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  gw_i <- as.integer(gw); gh_i <- as.integer(gh)
+  img_w_f <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h_f <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  hotspot_cells <- vapply(hotspots, function(h) h$row * gw_i + h$col, numeric(1))
+  boundary_idx <- integer(0)
+  for (i in seq_len(n)) {
+    cx <- pm[i, 2]; cy <- pm[i, 3]
+    col <- min(max(as.integer(floor(cx / img_w_f * gw_i)), 0L), gw_i - 1L)
+    row <- min(max(as.integer(floor(cy / img_h_f * gh_i)), 0L), gh_i - 1L)
+    if ((row * gw_i + col) %in% hotspot_cells) {
+      boundary_idx <- c(boundary_idx, i)
+    }
+  }
+  if (length(boundary_idx) < 2) {
+    return(NaN)
+  }
+  linearities <- c()
+  for (j in seq_len(length(boundary_idx) - 1)) {
+    seg <- pm[boundary_idx[j]:boundary_idx[j + 1], , drop = FALSE]
+    if (nrow(seg) >= 2) {
+      linearities <- c(linearities, linearity(seg))
+    }
+  }
+  if (length(linearities) == 0) {
+    return(NaN)
+  }
+  mean(linearities)
+}
+
+# ---------------------------------------------------------------------------
 # Inter-observer agreement
 # ---------------------------------------------------------------------------
 
@@ -2668,6 +2848,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     path_seq <- list() # sessionId -> visited-cell sequence (schema/3+ only)
     common_ann_masks <- list() # sessionId -> this session's own annotated region, resampled to
                                 # (tw, th) logical -- used only by the cross-user annotations_<slug>.csv
+    mouse_native <- list() # sessionId -> this session's own NATIVE (gw, gh) point-based
+                            # mouse-dwell grid (Tier 3 C2) -- all-zero (never NULL) for a session
+                            # with no schema/5 mouse data or zero on-slide points, mirroring
+                            # common_ann_masks' all-FALSE convention for annotation-less sessions.
 
     for (sid in session_ids) {
       f <- by_session[[sid]]
@@ -2675,6 +2859,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       grid <- as.numeric(f$grid)
       native_grid[[sid]] <- list(grid = grid, gw = gw, gh = gh)
       resampled[[sid]] <- resample_nn(grid, gw, gh, tw, th)
+      mouse_native[[sid]] <- rep(0.0, gw * gh)
 
       com <- center_of_mass(grid, gw, gh)
       base_mag <- f$baseMagnification
@@ -2770,7 +2955,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         meanFixationMs = NA,
         medianFixationMs = NA,
         sdFixationMs = NA,
-        fixationsPerMin = NA
+        fixationsPerMin = NA,
+        # Tier 3 C2/C4 (docs/superpowers/specs/2026-07-23-...): mouse-dwell coverage/entropy
+        # (schema/5 only, populated in the `has_mouse_data` branch below) and segment-level
+        # linearity (path-only, populated in the path block below).
+        mouseCoveragePct = NA,
+        mouseEntropy = NA,
+        meanSegmentLinearity = NA
       )
 
       path <- f$path
@@ -2809,6 +3000,18 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           # Tier 1 A3: mouse kinematics, schema/5 only (same gate as the two cursor metrics above).
           row$mousePathLengthPx <- mouse_path_length_px(path)
           row$mouseVelocityPxPerSec <- mouse_velocity_px_per_sec(path)
+          # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): point-based mouse-dwell grid at
+          # this session's own NATIVE (gw, gh) resolution (same resolution convention
+          # coveragePct/entropy use for the recorded grid above). NULL (blank
+          # mouseCoveragePct/mouseEntropy) iff zero on-slide points anywhere in the path;
+          # `mouse_native[[sid]]` stays the all-zero default in that case, which is exactly right
+          # for the cross-session mouse_<slug>.csv comparison below.
+          mouse_grid <- mouse_raster_from_path(path, img_w, img_h, gw, gh)
+          if (!is.null(mouse_grid)) {
+            row$mouseCoveragePct <- coverage(mouse_grid) * 100.0
+            row$mouseEntropy <- entropy(mouse_grid)
+            mouse_native[[sid]] <- mouse_grid
+          }
         }
         # Tier 2 B1 transparency columns + B2 Drew-fidelity zoom + B4 magnification-source flag:
         # path-only (like the Tier 1 block above), populated regardless of mouse data.
@@ -2829,6 +3032,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$medianFixationMs <- median_fixation_ms(fx)
         row$sdFixationMs <- sd_fixation_ms(fx)
         row$fixationsPerMin <- fixations_per_min(fx, path)
+        # Tier 3 C4 (docs/superpowers/specs/2026-07-23-...): segment-level linearity, split at
+        # this session's own top-hotspot cells -- reuses the session's own NATIVE (grid, gw, gh)
+        # recorded dwell grid (same resolution hotspots_<slug>.csv's top_hotspots call uses), not
+        # the slide's common (tw, th) or a scanpath raster.
+        row$meanSegmentLinearity <- mean_segment_linearity(path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N)
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
 
@@ -2999,6 +3207,52 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       )
     }
 
+    # ------------------------------------------------------------------
+    # Tier 3 C2 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): cross-reader
+    # mouse agreement -- pairwise cc/iou of each session's own point-based mouse-dwell grid
+    # (mouse_native, resampled to the slide's common (tw, th) grid) + a coincidence level,
+    # mirroring annotations_<slug>.csv's tidy-long + diagonal-reuse convention exactly. Gated on at
+    # least one session carrying schema/5 mouse data at all (NOT on whether that session's mouse
+    # grid ended up non-empty -- a session whose mouse data has zero on-slide points still "has
+    # mouse data" in the schema sense and should still trigger the file, same rationale as the
+    # annotations gate above being on nAnnotations > 0, not on the mask being non-empty). A session
+    # without mouse data contributes its all-zero mouse_native placeholder (never NULL), so every
+    # session_ids entry participates in the pairwise matrix.
+    # ------------------------------------------------------------------
+    any_mouse <- any(sapply(session_ids, function(sid) has_mouse_data(by_session[[sid]]$path)))
+    if (any_mouse) {
+      mouse_resampled <- list()
+      for (sid in session_ids) {
+        mouse_resampled[[sid]] <- resample_nn(
+          mouse_native[[sid]], native_grid[[sid]]$gw, native_grid[[sid]]$gh, tw, th
+        )
+      }
+      mouse_coincidence_val <- coincidence_level(
+        lapply(session_ids, function(sid) mouse_resampled[[sid]]), IOU_THRESH
+      )
+      mouse_rows <- list()
+      for (idx_a in seq_along(session_ids)) {
+        a <- session_ids[idx_a]
+        for (b in session_ids) {
+          mouse_row <- list(
+            sessionA = label_for(a, labels),
+            sessionB = label_for(b, labels),
+            cc = cc(mouse_resampled[[a]], mouse_resampled[[b]]),
+            iou = iou(mouse_resampled[[a]], mouse_resampled[[b]], IOU_THRESH),
+            coincidenceLevel = NA
+          )
+          if (identical(a, b) && idx_a == 1) {
+            mouse_row$coincidenceLevel <- mouse_coincidence_val
+          }
+          mouse_rows[[length(mouse_rows) + 1]] <- mouse_row
+        }
+      }
+      write_csv_tidy(
+        mouse_rows, file.path(out_dir, paste0("mouse_", slide_slug, ".csv")),
+        c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel")
+      )
+    }
+
     mean_cc <- mean_pairwise_cc(lapply(session_ids, function(sid) resampled[[sid]]))
     icc_val <- icc(lapply(session_ids, function(sid) resampled[[sid]]))
     coverages <- sapply(session_ids, function(sid) coverage(native_grid[[sid]]$grid) * 100.0)
@@ -3097,7 +3351,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             sessionA = label_for(a, labels),
             sessionB = label_for(b, labels),
             levenshteinSim = levenshtein_sim(path_seq[[a]], path_seq[[b]]),
-            transitionEntropy = NA
+            transitionEntropy = NA,
+            # Tier 3 C3 (docs/superpowers/specs/2026-07-23-...): DTW distance between the two
+            # sessions' raw viewport-center paths (NOT the grid-cell path_seq/levenshtein
+            # sequence) -- a resolution-independent complement. Every scan_sids session has a
+            # non-empty path by construction, so this is never blank here; always exactly 0.0 on
+            # the diagonal (a == b), by construction of the DP itself.
+            dtwDistance = dtw_distance(by_session[[a]]$path, by_session[[b]]$path)
           )
           if (identical(a, b)) {
             r$transitionEntropy <- transition_entropy(path_seq[[a]])
@@ -3107,7 +3367,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       }
       write_csv_tidy(
         scan_rows, file.path(out_dir, paste0("scanpath_", slide_slug, ".csv")),
-        c("sessionA", "sessionB", "levenshteinSim", "transitionEntropy")
+        c("sessionA", "sessionB", "levenshteinSim", "transitionEntropy", "dtwDistance")
       )
     }
 
@@ -3271,6 +3531,19 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
               }
             }
           }
+
+          # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): mouse-dwell map figure, schema/5
+          # only -- reuses the same heatmap plotting helper + `res` resolution as the
+          # scanpath-raster figure above. Not part of the numeric-parity contract.
+          if (has_mouse_data(path)) {
+            mouse_raster_fig <- mouse_raster_from_path(path, img_w, img_h, res_gw, res_gh)
+            if (!is.null(mouse_raster_fig)) {
+              plot_heatmap(
+                mouse_raster_fig, res_gw, res_gh, paste0(label, " mouse dwell"),
+                file.path(slide_out, paste0(sess_slug, "_mousemap.png"))
+              )
+            }
+          }
         }
       }
 
@@ -3311,7 +3584,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "magnificationSource",
       # Tier 3 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
       # order above (incl. Tier 1/2) is unchanged. C1: I-DT fixation extraction.
-      "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin"
+      "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
+      # Tier 3 C2/C4 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+      # column order above (incl. Tier 1/2/C1) is unchanged. C2: mouse-dwell coverage/entropy.
+      # C4: segment-level linearity.
+      "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity"
     )
   )
 

@@ -9,13 +9,17 @@
 # <input...> may be fragment JSON files, directories (recursed for *.json), and/or .zip archives,
 # in any mix. Writes the SAME output files as the Python toolkit's `python -m
 # blinded_focus.analyze` (see ../python/README.md and ./README.md for the full contract):
-# metrics.csv, compare_<slug>.csv, consensus_<slug>.png, reference_<slug>.csv, scanpath_<slug>.csv,
-# magbands_<slug>.csv (Tier 2 B1/B3: idle-excluded bandTimeMs + a bandScheme column), (Tier 1,
-# always) hotspots_<slug>.csv, (Tier 1, path sessions only) transitions_<slug>.csv, (Tier 3 C1,
-# path sessions with >=1 fixation found) fixations_<slug>.csv, (Phase 3, when at least one fragment
-# carries a decision) decisions.csv, (Phase 3, when --graded supplies at least one graded decision)
-# nav_accuracy.csv, summary.md, and (with --figures) per-(slide,session) PNGs under <out>/<slug>/
-# (incl. the Phase-1 scanpath-raster and magnification-band heatmaps), plus (Tier 1, path sessions
+# metrics.csv, compare_<slug>.csv, consensus_<slug>.png, reference_<slug>.csv, scanpath_<slug>.csv
+# (Tier 3 C3: gains a dtwDistance column -- Dynamic Time Warping, standard DP, NOT Frechet
+# distance), magbands_<slug>.csv (Tier 2 B1/B3: idle-excluded bandTimeMs + a bandScheme column),
+# (Tier 1, always) hotspots_<slug>.csv, (Tier 1, path sessions only) transitions_<slug>.csv,
+# (Tier 3 C1, path sessions with >=1 fixation found) fixations_<slug>.csv, (Tier 3 C2, when at
+# least one session carries schema/5 mouse data) mouse_<slug>.csv -- pairwise cc/iou +
+# coincidenceLevel of each session's point-based mouse-dwell grid, (Phase 3, when at least one
+# fragment carries a decision) decisions.csv, (Phase 3, when --graded supplies at least one graded
+# decision) nav_accuracy.csv, summary.md, and (with --figures) per-(slide,session) PNGs under
+# <out>/<slug>/ (incl. the Phase-1 scanpath-raster and magnification-band heatmaps, plus the
+# Tier 3 C2 mouse-dwell map when schema/5 mouse data is present), plus (Tier 1, path sessions
 # only) overlay_<slug>_scanpaths.png at <out> root.
 
 # Resolve this script's own directory so `source()` works regardless of the caller's working
