@@ -53,6 +53,7 @@ into a temp dir and asserts the documented output contract:
 
 Exits non-zero (via an uncaught ``AssertionError``/traceback) on any failure.
 """
+import csv
 import json
 import math
 import os
@@ -208,10 +209,11 @@ def _make_annotations_fc(row0, row1, col0, col1):
 def _fragment(
     session_id, schema, grid, duration_ms, sample_count, path=None,
     base_magnification=None, path_truncated=None, annotations=None,
+    decision=None, slide_key=None,
 ):
     d = {
         "schema": f"atlas-focus-contribution/{schema}",
-        "slideKey": "sha256:selftest-slide-0001",
+        "slideKey": slide_key or "sha256:selftest-slide-0001",
         "sessionId": session_id,
         "imageWidth": IMG_W, "imageHeight": IMG_H,
         "gridWidth": GW, "gridHeight": GH,
@@ -230,7 +232,19 @@ def _fragment(
         d["pathTruncated"] = path_truncated
     if annotations is not None:
         d["annotations"] = annotations
+    # Phase 3: a hand-entered decision object ({"diagnosis", "confidence", "decisionMs"}).
+    # Deliberately independent of `annotations`/`path` -- a reader can submit a decision on any
+    # schema fragment.
+    if decision is not None:
+        d["decision"] = decision
     return d
+
+
+def _decision(diagnosis, confidence, decision_ms):
+    """A synthetic hand-entered decision object -- {"diagnosis", "confidence", "decisionMs"} --
+    matching what the QuPath extension's blinded-focus recorder writes into a fragment's
+    ``decision`` field."""
+    return {"diagnosis": diagnosis, "confidence": confidence, "decisionMs": decision_ms}
 
 
 def build_fragments():
@@ -242,16 +256,23 @@ def build_fragments():
     shared_annotation = _make_annotations_fc(1, 3, 1, 3)  # rows 1-3, cols 1-3 -> overlaps s1's dwell/path center
 
     # s1: schema/5, 8-element path (varying dsMilli + mouse, some off-slide) + a known
-    # baseMagnification + an annotation overlapping its own dwell center.
+    # baseMagnification + an annotation overlapping its own dwell center. Also carries a Phase 3
+    # decision (diagnosis="tumor", confidence=4 -> confidenceScaled=(4-1)/4=0.75).
     f1 = _fragment(
         "s1", 5, grid_s1, 40 * 250, 40,
         path=_make_path_v5(2, 2, n=40, seed=101),
         base_magnification=40.0, path_truncated=False,
         annotations=shared_annotation,
+        decision=_decision("tumor", 4, 5000),
     )
     # s2: schema/3, 5-element path (w-proxy zoom fallback; no dsMilli/baseMagnification/annotations).
-    f2 = _fragment("s2", 3, grid_s2, 35 * 250, 35, path=_make_path(2, 2, n=35, seed=102))
-    # s3: schema/2, no path, no annotations at all.
+    # Also carries a Phase 3 decision (diagnosis="benign", confidence=2).
+    f2 = _fragment(
+        "s2", 3, grid_s2, 35 * 250, 35, path=_make_path(2, 2, n=35, seed=102),
+        decision=_decision("benign", 2, 5000),
+    )
+    # s3: schema/2, no path, no annotations, and (deliberately) no decision either -- exercises
+    # the blank-diagnosis/confidence/correct degrade path in decisions.csv.
     f3 = _fragment("s3", 2, grid_s3, 8000, 32, path=None)
     # s4: schema/4, 6-element path (varying dsMilli, no mouse, unknown baseMagnification ->
     # exercises point_zoom's ds-only fallback branch) that deliberately bounces in/out of the
@@ -263,6 +284,64 @@ def build_fragments():
         annotations=shared_annotation,
     )
     return [f1, f2, f3, f4]
+
+
+GRADED_SLIDE_KEY = "sha256:selftest-slide-graded-0001"
+#: The display-only answer key's correctDx for GRADED_SLIDE_KEY.
+GRADED_KEY_DX = "tumor"
+
+
+def build_graded_fragments():
+    """A second, independent slide (6 sessions, no paths/annotations) purpose-built to exercise
+    the navigation<->accuracy correlation (:func:`blinded_focus.analyze._nav_accuracy_rows`):
+
+    - ``coveragePct`` (grid-only, always populated) is deliberately separable by outcome: g1-g3
+      (graded ``correct=1``) get a dense grid (56/64 nonzero cells -> ~87.5% coverage), g4-g6
+      (graded ``correct=0``) get a sparse grid (6/64 nonzero cells -> ~9.4% coverage) -- so
+      ``meanCorrect > meanIncorrect`` (a positive ``meanDiff``) is the expected, hand-derivable
+      result.
+    - ``avgZoom`` (path-only) is blank for every session here (none carry a ``path``) -> n=0,
+      exercising the "n < 5" blank-pointBiserialR guard.
+    - ``dwellInAnnotationPct`` (grid-only, always populated) is exactly 0.0 for every session
+      (none carry ``annotations``) -> zero variance, exercising the "zero variance" blank guard
+      distinctly from the n=0 case above.
+
+    Diagnoses are chosen so `correct` can NOT be reconstructed by string-matching `diagnosis`
+    against the answer key ("tumor"): g1 (correct=1) is diagnosed "benign" (a MISMATCH that is
+    still graded correct), and g4 (correct=0) is diagnosed "tumor" (an exact MATCH that is still
+    graded incorrect) -- a hand-grade-only pipeline must report exactly the graded value in both
+    cases; a string-matching one would get both backwards.
+
+    Returns ``(fragments, graded_rows, key_rows)`` where ``graded_rows`` is a list of
+    ``(slideKey, sessionId, correct)`` tuples (for a synthetic ``--graded`` CSV) and ``key_rows``
+    is a list of ``(slideKey, correctDx)`` tuples (for a synthetic ``--key`` CSV).
+    """
+    def _sparse_grid(n_nonzero, value=100.0):
+        g = [0.0] * (GW * GH)
+        for i in range(n_nonzero):
+            g[i] = value
+        return g
+
+    # (sessionId, diagnosis, confidence, nNonzeroCells, correct)
+    spec = [
+        ("g1", "benign", 4, 56, 1),   # dense/high-coverage, MISMATCHED diagnosis, graded correct
+        ("g2", "tumor", 5, 55, 1),    # dense/high-coverage, matched diagnosis, graded correct
+        ("g3", "tumor", 3, 54, 1),    # dense/high-coverage, matched diagnosis, graded correct
+        ("g4", "tumor", 5, 6, 0),     # sparse/low-coverage, MATCHED diagnosis, graded INcorrect
+        ("g5", "benign", 2, 7, 0),    # sparse/low-coverage, matched diagnosis, graded incorrect
+        ("g6", "unknown", 1, 8, 0),   # sparse/low-coverage, matched diagnosis, graded incorrect
+    ]
+    fragments, graded_rows = [], []
+    for i, (sid, dx, conf, n_nonzero, correct) in enumerate(spec):
+        f = _fragment(
+            sid, 2, _sparse_grid(n_nonzero), 6000, 30,
+            slide_key=GRADED_SLIDE_KEY,
+            decision=_decision(dx, conf, 4000 + i * 50),
+        )
+        fragments.append(f)
+        graded_rows.append((GRADED_SLIDE_KEY, sid, correct))
+    key_rows = [(GRADED_SLIDE_KEY, GRADED_KEY_DX)]
+    return fragments, graded_rows, key_rows
 
 
 def write_fragments_to_dir(fragments, d):
@@ -284,6 +363,134 @@ def _assert_png(path):
     assert magic == b"\x89PNG\r\n\x1a\n", f"not a valid PNG (bad magic): {path}"
 
 
+def _write_simple_csv(path, header, rows):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(header)
+        w.writerows(rows)
+
+
+def check_decisions(out_dir):
+    """Phase 3: ``decisions.csv`` exists with one row per (slide, session), hand-grade-only
+    columns populated for the sessions that carry a ``decision`` (s1, s2) and blank for the ones
+    that don't (s3, s4) -- and, absent ``--graded``, every row's ``correct`` is blank (nothing is
+    ever auto-derived from ``diagnosis``)."""
+    path = os.path.join(out_dir, "decisions.csv")
+    assert os.path.isfile(path), "decisions.csv missing"
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 4, f"expected 4 decisions rows (one per slide,session), got {len(rows)}"
+    expected_cols = [
+        "slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
+        "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+    ]
+    assert list(rows[0].keys()) == expected_cols, list(rows[0].keys())
+
+    by_session = {r["session"]: r for r in rows}
+    s1 = by_session["s1"]
+    assert s1["diagnosis"] == "tumor", s1["diagnosis"]
+    assert s1["confidence"] == "4", s1["confidence"]
+    assert s1["confidenceScaled"] == "0.75", s1["confidenceScaled"]
+    assert s1["decisionMs"] not in ("", None), "s1 decisionMs should be non-empty"
+    assert s1["decisionLatencyMs"] not in ("", None), "s1 decisionLatencyMs should be non-empty"
+
+    s3 = by_session["s3"]
+    assert s3["diagnosis"] == "", f"undecided session should have blank diagnosis, got {s3['diagnosis']!r}"
+    assert s3["confidence"] == "", f"undecided session should have blank confidence, got {s3['confidence']!r}"
+    assert s3["correct"] == "", f"undecided session should have blank correct, got {s3['correct']!r}"
+
+    # Without --graded, every row's `correct` is blank -- HAND-GRADE ONLY, never auto-derived.
+    for r in rows:
+        assert r["correct"] == "", f"correct should be blank without --graded, got row {r}"
+    return rows
+
+
+def check_nav_accuracy(nongraded_out_dir, graded_out_dir):
+    """Phase 3: without ``--graded``, ``nav_accuracy.csv`` is not written and the summary has no
+    "Navigation" section; with ``--graded`` (the ``build_graded_fragments`` fixture), the file
+    exists with the documented columns, a metric with n<5 (``avgZoom``, no session here has a
+    path) and a metric with zero variance (``dwellInAnnotationPct``, constant 0.0 -- no session
+    here has an annotation) both have a blank ``pointBiserialR``, and the deliberately-separable
+    ``coveragePct`` metric has a non-blank, positive ``meanDiff`` (dense/correct sessions have
+    higher coverage than sparse/incorrect ones)."""
+    # --- without --graded: no nav_accuracy.csv, no summary section ---
+    assert not os.path.isfile(os.path.join(nongraded_out_dir, "nav_accuracy.csv")), (
+        "nav_accuracy.csv should not be written without --graded"
+    )
+    with open(os.path.join(nongraded_out_dir, "summary.md"), encoding="utf-8") as fh:
+        nongraded_summary = fh.read()
+    assert "Navigation" not in nongraded_summary, (
+        "nav-accuracy summary section should be absent without --graded"
+    )
+
+    # --- with --graded: nav_accuracy.csv + summary section present ---
+    nav_path = os.path.join(graded_out_dir, "nav_accuracy.csv")
+    assert os.path.isfile(nav_path), "nav_accuracy.csv missing when graded decisions exist"
+    with open(nav_path, newline="", encoding="utf-8") as fh:
+        nav_rows = list(csv.DictReader(fh))
+    expected_cols = [
+        "metric", "n", "pointBiserialR", "meanCorrect", "meanIncorrect",
+        "medianCorrect", "medianIncorrect", "meanDiff",
+    ]
+    assert list(nav_rows[0].keys()) == expected_cols, list(nav_rows[0].keys())
+    by_metric = {r["metric"]: r for r in nav_rows}
+
+    # n<5 guard (avgZoom: path-only, no session here has a path -> n=0)
+    assert by_metric["avgZoom"]["n"] == "0", by_metric["avgZoom"]
+    assert by_metric["avgZoom"]["pointBiserialR"] == "", (
+        f"n=0 should yield a blank pointBiserialR, got {by_metric['avgZoom']}"
+    )
+
+    # zero-variance guard (dwellInAnnotationPct: constant 0.0 across all 6 graded sessions)
+    assert by_metric["dwellInAnnotationPct"]["n"] == "6", by_metric["dwellInAnnotationPct"]
+    assert by_metric["dwellInAnnotationPct"]["pointBiserialR"] == "", (
+        f"zero-variance navMetric should yield a blank pointBiserialR, got "
+        f"{by_metric['dwellInAnnotationPct']}"
+    )
+
+    # deliberately-separable metric: non-blank meanDiff, positive sign (correct > incorrect)
+    cov = by_metric["coveragePct"]
+    assert cov["n"] == "6", cov
+    assert cov["meanDiff"] != "", "coveragePct meanDiff should be populated (n=3 in each group)"
+    assert float(cov["meanDiff"]) > 0, (
+        f"expected a positive meanDiff (dense/correct sessions have higher coveragePct than "
+        f"sparse/incorrect ones), got {cov['meanDiff']}"
+    )
+
+    with open(os.path.join(graded_out_dir, "summary.md"), encoding="utf-8") as fh:
+        graded_summary = fh.read()
+    assert "## Navigation ↔ diagnostic accuracy" in graded_summary, (
+        "nav-accuracy summary section missing from summary.md"
+    )
+    return nav_rows
+
+
+def check_hand_grade_only(graded_out_dir):
+    """Phase 3 invariant: ``correct`` in ``decisions.csv`` is never derivable by string-matching
+    ``diagnosis`` against ``--key``'s ``correctDx`` -- it comes only from ``--graded``. g1 (graded
+    correct=1) is diagnosed "benign", a MISMATCH against the key's "tumor"; g4 (graded correct=0)
+    is diagnosed "tumor", an exact MATCH. A string-matching implementation would report both
+    backwards; a hand-grade-only one reports exactly what ``--graded`` said."""
+    path = os.path.join(graded_out_dir, "decisions.csv")
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = {r["sessionId"]: r for r in csv.DictReader(fh)}
+    g1, g4 = rows["g1"], rows["g4"]
+    assert g1["correctDx"] == GRADED_KEY_DX, g1
+    assert g1["diagnosis"] == "benign" and g1["diagnosis"] != g1["correctDx"], (
+        "g1 should have a diagnosis that MISMATCHES correctDx (regression guard fixture)"
+    )
+    assert g1["correct"] == "1", (
+        f"g1 was hand-graded correct despite a diagnosis/correctDx mismatch -- got {g1['correct']}"
+    )
+    assert g4["correctDx"] == GRADED_KEY_DX, g4
+    assert g4["diagnosis"] == g4["correctDx"] == "tumor", (
+        "g4 should have a diagnosis that MATCHES correctDx (regression guard fixture)"
+    )
+    assert g4["correct"] == "0", (
+        f"g4 was hand-graded incorrect despite a diagnosis/correctDx match -- got {g4['correct']}"
+    )
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="bfa-selftest-")
     try:
@@ -299,6 +506,10 @@ def run():
         out_dir = os.path.join(tmp, "out")
 
         analyze([in_dir], out_dir, reference="s1", make_figures=True, res=256)
+
+        # --- decisions.csv (Phase 3): hand-grade-only, populated for s1/s2, blank for s3/s4,
+        # `correct` blank throughout since no --graded was passed to this run ---
+        check_decisions(out_dir)
 
         # --- metrics.csv: 4 rows + expected columns (Phase 1 + Phase 2) ---
         metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
@@ -629,6 +840,23 @@ def run():
         analyze([zip_path], zip_out, reference="s1")
         zip_metrics = pd.read_csv(os.path.join(zip_out, "metrics.csv"))
         assert len(zip_metrics) == 4, f"zip input: expected 4 metrics rows, got {len(zip_metrics)}"
+
+        # --- Phase 3: navigation<->accuracy correlation, on a dedicated graded fixture ---
+        graded_fragments, graded_rows, key_rows = build_graded_fragments()
+        graded_in = os.path.join(tmp, "in_graded")
+        os.makedirs(graded_in, exist_ok=True)
+        write_fragments_to_dir(graded_fragments, graded_in)
+
+        graded_csv_path = os.path.join(tmp, "graded.csv")
+        _write_simple_csv(graded_csv_path, ["slideKey", "sessionId", "correct"], graded_rows)
+        key_csv_path = os.path.join(tmp, "key.csv")
+        _write_simple_csv(key_csv_path, ["slideKey", "correctDx"], key_rows)
+
+        graded_out = os.path.join(tmp, "out_graded")
+        analyze([graded_in], graded_out, key_csv=key_csv_path, graded_csv=graded_csv_path)
+
+        check_nav_accuracy(out_dir, graded_out)
+        check_hand_grade_only(graded_out)
 
         print("OK: all selftest assertions passed")
     finally:
