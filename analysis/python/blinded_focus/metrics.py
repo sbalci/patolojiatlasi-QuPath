@@ -48,6 +48,16 @@ known ``baseMagnification`` *and* per-point ``dsMilli`` (auto-falls back to the 
 ``analyze.py``'s ``magnificationSource`` column) -- disambiguates true-objective-power sessions
 from proxy/downsample-relative ones so pooled ``avgZoom``-family statistics are never silently
 mixed across the two.
+
+Tier 3 C1 (same spec doc, additive): ``fixations_idt`` -- a deterministic I-DT (dispersion-
+threshold, Salvucci & Goldberg 2000) fixation detector over the scanpath's viewport centers, plus
+``n_fixations``/``mean_fixation_ms``/``median_fixation_ms``/``sd_fixation_ms``/
+``fixations_per_min`` summary statistics wired into ``metrics.csv``, and a per-fixation
+``fixations_<slug>.csv`` export in ``analyze.py``. Deliberately NOT a clustering library (e.g.
+DBSCAN), whose cluster assignment is not guaranteed identical across languages/library versions --
+see :func:`fixations_idt`'s docstring for the full, index-based, parity-pinned algorithm.
+Directional metrics (turn-angle, transitions, etc.) stay tick-based and are untouched; fixations
+are an added lens, not a rebase.
 """
 import math
 from collections import Counter
@@ -1282,6 +1292,173 @@ def active_fraction_pct(path, duration_ms):
     if span <= 0:
         return float("nan")
     return 100.0 * d / span
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): I-DT (dispersion-
+# threshold, Salvucci & Goldberg 2000) fixation extraction over the scanpath's viewport centers.
+# Deterministic and index-based -- deliberately NOT DBSCAN (or any other library clustering
+# routine), whose cluster assignment is not guaranteed identical across languages/library versions
+# and would break the toolkit's 1e-6 Python<->R parity contract. Directional metrics
+# (turnAngle/transitions/etc., above) stay tick-based and are untouched by this section -- fixations
+# are an added lens on the scanpath, not a rebase of any existing metric.
+# ---------------------------------------------------------------------------
+
+#: Minimum time span (ms) a candidate fixation window must cover before its dispersion is even
+#: tested -- Salvucci & Goldberg's duration threshold. An R port must use the identical literal.
+MIN_FIXATION_MS = 250.0
+#: Fraction of the window's starting viewport width used as its dispersion threshold (image px):
+#: ``threshold = DISPERSION_FRAC * w_at_window_start``, where ``w_at_window_start`` is FIXED to the
+#: ``w`` of the window's first point at the moment step 1 (see :func:`fixations_idt`) finds it, and
+#: is never recomputed as the window later expands -- recomputing it from a later point would make
+#: the threshold depend on exactly which points already got folded into the window, a circular
+#: dependency the spec explicitly rules out. An R port must use the identical literal.
+DISPERSION_FRAC = 0.25
+
+
+def _window_dispersion(path, start, end):
+    """``(max(cx)-min(cx)) + (max(cy)-min(cy))`` over ``path[start..end]`` inclusive (image px,
+    0-based Python indices) -- the I-DT dispersion of one candidate fixation window."""
+    cxs = [float(path[i][1]) for i in range(start, end + 1)]
+    cys = [float(path[i][2]) for i in range(start, end + 1)]
+    return (max(cxs) - min(cxs)) + (max(cys) - min(cys))
+
+
+def fixations_idt(path):
+    """Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector over the
+    scanpath's ordered viewport centers -- per-point data ``(t=path[i][0], cx=path[i][1],
+    cy=path[i][2], w=path[i][3])``. Deterministic and index-based (see the module-section note
+    above for why this is NOT DBSCAN).
+
+    Algorithm, operating on ``path``'s existing point order (no sorting/resampling), starting with
+    ``start = 0``:
+
+    1. Grow the window ``[start, end]`` one point at a time until its time span (``t[end] -
+       t[start]``) first reaches :data:`MIN_FIXATION_MS` -- the smallest possible window that could
+       qualify as a fixation. If the path runs out of points before the span is reached (``end``
+       would run past the last index), STOP -- no more fixations.
+    2. The window's dispersion threshold is fixed **once**, from the ``w`` of the window's first
+       point (``path[start][3]``) at the moment this minimal window is found:
+       ``threshold = DISPERSION_FRAC * w_at_window_start``. It is never recomputed as the window
+       later expands (see :data:`DISPERSION_FRAC`'s docstring).
+    3. If the minimal window's dispersion (:func:`_window_dispersion`) is ``<= threshold``: expand
+       the window one point at a time for as long as the NEXT point keeps the (whole, from
+       ``start``) window's dispersion ``<= threshold``; the moment adding the next point would
+       exceed the threshold (or the path runs out of points), STOP expanding and emit one fixation
+       over the final window: ``startMs = t[start]``, ``durationMs = t[final_end] - t[start]``,
+       ``centerImageX = mean(cx over the window)``, ``centerImageY = mean(cy over the window)``,
+       ``nPoints = final_end - start + 1``. Advance ``start`` to ``final_end + 1`` (past the whole
+       emitted window, so its points are never reused by a later fixation) and go to step 1.
+    4. Else (the minimal window is already over threshold -- no fixation starts here): advance
+       ``start`` by exactly ONE point (not past the whole rejected window) and go to step 1 -- this
+       lets a fixation start at ``start + 1`` even though it was itself part of the rejected window.
+
+    Returns ``None`` if ``path`` has fewer than 2 points -- fixation extraction is not computable at
+    all, distinct from an empty list (see below); this is the sentinel every metrics.csv column
+    below (:func:`n_fixations` etc.) maps to a blank cell. Returns ``[]`` (a real, well-defined
+    "zero fixations found" -- NOT blank) if the path has >=2 points but no window ever qualifies,
+    e.g. a path shorter than :data:`MIN_FIXATION_MS` in total span, or one whose dispersion never
+    drops to or below its own threshold. Otherwise returns a list of dicts (in start-index/time
+    order): ``{"startMs", "durationMs", "centerImageX", "centerImageY", "nPoints"}``.
+
+    Every arithmetic step here (max/min, sum/len mean, ``<``/``<=`` comparisons) is plain, order-
+    independent float arithmetic over already-float-coerced inputs -- ``durationMs`` is an exact
+    integer difference of integer millisecond timestamps (so mean/median/sd of durations are exact
+    across languages), and an R port using the same step-by-step index loop (not a vectorized/
+    library shortcut) reproduces the identical fixation sequence to 1e-6 (only the
+    ``centerImageX``/``centerImageY`` mean of non-integer real coordinates carries the sub-1e-6
+    long-double-vs-double summation wobble a mean over few, small-magnitude values can show)."""
+    if not path or len(path) < 2:
+        return None
+    n = len(path)
+    out = []
+    start = 0
+    while start < n:
+        t_start = float(path[start][0])
+        end = start
+        while end < n and (float(path[end][0]) - t_start) < MIN_FIXATION_MS:
+            end += 1
+        if end >= n:
+            break
+        w_start = float(path[start][3])
+        threshold = DISPERSION_FRAC * w_start
+        disp = _window_dispersion(path, start, end)
+        if disp <= threshold:
+            cur_end = end
+            while cur_end + 1 < n:
+                if _window_dispersion(path, start, cur_end + 1) <= threshold:
+                    cur_end += 1
+                else:
+                    break
+            cxs = [float(path[i][1]) for i in range(start, cur_end + 1)]
+            cys = [float(path[i][2]) for i in range(start, cur_end + 1)]
+            out.append({
+                "startMs": t_start,
+                "durationMs": float(path[cur_end][0]) - t_start,
+                "centerImageX": sum(cxs) / len(cxs),
+                "centerImageY": sum(cys) / len(cys),
+                "nPoints": cur_end - start + 1,
+            })
+            start = cur_end + 1
+        else:
+            start += 1
+    return out
+
+
+def n_fixations(fixations):
+    """``len(fixations)`` (an ``int``, including ``0`` for a genuinely empty-but-computed list), or
+    ``float("nan")`` (blank in ``metrics.csv``) if ``fixations`` is ``None`` (the path had fewer
+    than 2 points -- see :func:`fixations_idt`). Takes the already-computed
+    ``fixations_idt(path)`` result (not ``path`` itself) so a caller that needs the list anyway
+    (e.g. ``fixations_<slug>.csv``) computes it exactly once."""
+    if fixations is None:
+        return float("nan")
+    return len(fixations)
+
+
+def mean_fixation_ms(fixations):
+    """Mean ``durationMs`` over ``fixations`` (see :func:`fixations_idt`). ``float("nan")`` (blank)
+    if ``fixations`` is ``None`` or empty -- the mean of zero fixations is undefined, not ``0.0``."""
+    if not fixations:
+        return float("nan")
+    durs = [f["durationMs"] for f in fixations]
+    return float(sum(durs) / len(durs))
+
+
+def median_fixation_ms(fixations):
+    """Median ``durationMs`` over ``fixations``. ``float("nan")`` (blank) if ``fixations`` is
+    ``None`` or empty."""
+    if not fixations:
+        return float("nan")
+    return float(np.median([f["durationMs"] for f in fixations]))
+
+
+def sd_fixation_ms(fixations):
+    """Sample standard deviation (``ddof=1``, matching R's default ``sd()``) of ``durationMs``
+    over ``fixations`` -- same ``ddof=1`` convention as :func:`zoom_variance`. ``float("nan")``
+    (blank) if ``fixations`` is ``None`` or has fewer than 2 fixations -- a single fixation (or
+    none) has no defensible sample spread."""
+    if not fixations or len(fixations) < 2:
+        return float("nan")
+    return float(np.std([f["durationMs"] for f in fixations], ddof=1))
+
+
+def fixations_per_min(fixations, path):
+    """``len(fixations) / active_minutes``, where ``active_minutes = active_span_ms(path) /
+    60000.0`` -- Tier 2 B1's idle-excluded active span, the SAME denominator convention
+    :func:`scanning_rate_px_per_min`/:func:`drilling_rate_per_min` use, so idle "stepped away" time
+    does not inflate the rate. ``float("nan")`` (blank) if ``fixations`` is ``None`` (path had
+    fewer than 2 points) or the active span is non-positive (a 0/0 rate has no defensible value,
+    matching :func:`avg_zoom_log2_w`'s NaN-for-undefined convention rather than
+    :func:`drilling_rate_per_min`'s 0.0-for-zero-duration one). ``0.0`` (not blank) when
+    ``fixations`` is a genuinely empty list (zero fixations found) but the active span is positive
+    -- a well-defined rate of zero events over a real duration."""
+    if fixations is None:
+        return float("nan")
+    active_min = active_span_ms(path) / 60000.0
+    if active_min <= 0:
+        return float("nan")
+    return float(len(fixations)) / active_min
 
 
 # ---------------------------------------------------------------------------

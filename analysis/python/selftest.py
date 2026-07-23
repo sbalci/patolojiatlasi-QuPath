@@ -442,6 +442,49 @@ def build_zoom_fidelity_fragment():
     )
 
 
+FIXATION_SLIDE_KEY = "sha256:selftest-slide-fixation-0001"
+#: Tier 3 C1 fixture: a schema/3, 6-point hand-constructed path with a KNOWN fixation structure --
+#: "3 tight points spanning 300ms = one fixation, then a jump, then 3 more (a second fixation)".
+#: Every number below is hand-derivable (and independently verified against the Python
+#: implementation before this fixture was written) -- see docs/superpowers/sdd/t3-report.md for the
+#: full derivation.
+#:
+#: points (t, cx, cy, w, h):
+#:   p0=(0,   100,100,400,300)
+#:   p1=(100, 102, 99,400,300)
+#:   p2=(300, 101,101,400,300)   -- span p0->p2 = 300ms >= MIN_FIXATION_MS(250); dispersion
+#:                                  (102-100)+(101-99)=4 <= threshold(0.25*400=100) -> candidate OK
+#:   p3=(350, 900,900,400,300)   -- THE JUMP: expanding [p0..p3] would have dispersion (900-100)+
+#:                                  (900-99)=1601 > threshold -> expansion stops at p2.
+#:     => FIXATION 1: startMs=0, durationMs=300, centerX=(100+102+101)/3=101.0,
+#:        centerY=(100+99+101)/3=100.0, nPoints=3. start advances to p3 (index 3).
+#:   p4=(450, 899,902,400,300)
+#:   p5=(650, 901,898,400,300)   -- from start=p3: span p3->p5=300ms>=250; w_start=400,threshold=100;
+#:                                  dispersion (901-899)+(902-898)=6<=100 -> candidate OK; no more
+#:                                  points to expand into (n=6, cur_end=5=n-1).
+#:     => FIXATION 2: startMs=350, durationMs=300, centerX=(900+899+901)/3=900.0,
+#:        centerY=(900+902+898)/3=900.0, nPoints=3. start advances to 6 == n -> STOP.
+#:
+#: nFixations=2, both durationMs=300.0 -> meanFixationMs=300.0, medianFixationMs=300.0,
+#: sdFixationMs=0.0 (identical durations -> zero sample spread). No idle gap (max step dt=250ms
+#: <<IDLE_GAP_MS) -> activeSpanMs == total span == 650ms -> fixationsPerMin = 2/(650/60000) =
+#: 184.61538461538458.
+def build_fixation_fragment():
+    grid = _n_nonzero_grid(10)
+    path = [
+        [0, 100, 100, 400, 300],
+        [100, 102, 99, 400, 300],
+        [300, 101, 101, 400, 300],
+        [350, 900, 900, 400, 300],
+        [450, 899, 902, 400, 300],
+        [650, 901, 898, 400, 300],
+    ]
+    return _fragment(
+        "fix1", 3, grid, 650, 6, path=path,
+        slide_key=FIXATION_SLIDE_KEY,
+    )
+
+
 def write_fragments_to_dir(fragments, d):
     for f in fragments:
         with open(os.path.join(d, f"{f['sessionId']}.json"), "w", encoding="utf-8") as fh:
@@ -969,6 +1012,170 @@ def check_tier2_magband_scheme_cli(tmp):
     )
 
 
+# ---------------------------------------------------------------------------
+# Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md, I-DT fixations)
+# ---------------------------------------------------------------------------
+
+def check_tier3_direct_unit_asserts():
+    """Direct, pipeline-independent unit checks for the new Tier 3 C1 ``fixations_idt`` (and its
+    summary-statistic wrappers) -- TDD-style asserts on hand-built inputs, bypassing the full
+    ``analyze()`` pipeline entirely."""
+    # --- degenerate inputs: not computable at all (None), never a crash ---
+    assert bf_metrics.fixations_idt([]) is None, "fixations_idt should be None for an empty path"
+    assert bf_metrics.fixations_idt(None) is None, "fixations_idt should be None for path=None"
+    assert bf_metrics.fixations_idt([[0, 0, 0, 400]]) is None, (
+        "fixations_idt should be None for a 1-point path"
+    )
+    assert math.isnan(bf_metrics.n_fixations(None)), "n_fixations should be blank (NaN) for None"
+    assert math.isnan(bf_metrics.mean_fixation_ms(None))
+    assert math.isnan(bf_metrics.median_fixation_ms(None))
+    assert math.isnan(bf_metrics.sd_fixation_ms(None))
+    assert math.isnan(bf_metrics.fixations_per_min(None, [[0, 0, 0, 400]]))
+
+    # --- >=2 points but NO window ever reaches MIN_FIXATION_MS at all (too-short total span) ->
+    # a real, well-defined [] (zero fixations found), NOT None/blank ---
+    too_short_path = [[0, 0, 0, 400], [100, 0, 0, 400]]
+    fx_short = bf_metrics.fixations_idt(too_short_path)
+    assert fx_short == [], f"expected [] (zero fixations, not None) for a too-short path, got {fx_short}"
+    assert bf_metrics.n_fixations(fx_short) == 0, "n_fixations should be 0 (not blank) for []"
+    assert math.isnan(bf_metrics.mean_fixation_ms(fx_short)), (
+        "mean_fixation_ms should be blank for zero fixations found"
+    )
+    assert math.isnan(bf_metrics.median_fixation_ms(fx_short))
+    assert math.isnan(bf_metrics.sd_fixation_ms(fx_short))
+    # active span IS positive here (100ms, no idle gap) -> fixationsPerMin is a well-defined 0.0,
+    # not blank (a real "zero events over a real duration" rate).
+    assert bf_metrics.fixations_per_min(fx_short, too_short_path) == 0.0, (
+        "fixationsPerMin should be 0.0 (not blank) for zero fixations over a positive active span"
+    )
+
+    # --- >=2 points, total span DOES reach MIN_FIXATION_MS, but dispersion is always over
+    # threshold for every candidate window (a jittery/noisy path) -> also a real [] ---
+    always_over_threshold_path = [
+        [0, 0, 0, 10],        # threshold = 0.25*10 = 2.5
+        [125, 50, 50, 10],
+        [250, 100, 100, 10],  # span p0->p2 = 250 >= 250; dispersion (100-0)+(100-0)=200 > 2.5
+                               # -> reject, advance start by 1; from p1, span p1->p2=125<250, and
+                               # no more points remain -> STOP with zero fixations.
+    ]
+    fx_disp = bf_metrics.fixations_idt(always_over_threshold_path)
+    assert fx_disp == [], (
+        f"expected [] for a path whose dispersion never drops to/below threshold, got {fx_disp}"
+    )
+
+    # --- zero ACTIVE SPAN (duplicate timestamps): fixations_idt still returns [] (well-defined,
+    # not None -- the path has >=2 points), but fixationsPerMin must be blank (0/0 rate is
+    # undefined), distinct from the too-short-path case above where active span was positive ---
+    dup_ts_path = [[0, 0, 0, 400], [0, 0, 0, 400]]
+    fx_dup = bf_metrics.fixations_idt(dup_ts_path)
+    assert fx_dup == [], f"expected [] for a zero-duration 2-point path, got {fx_dup}"
+    assert math.isnan(bf_metrics.fixations_per_min(fx_dup, dup_ts_path)), (
+        "fixationsPerMin should be blank (NaN) when active span is zero, even with fixations=[]"
+    )
+
+    # --- step 4 ("advance start by ONE, not past the whole rejected window"): the first candidate
+    # window [p0,p1] is over threshold and rejected; the NEXT window must be allowed to start at
+    # p1 (not p2) -- i.e. p1 is reused as a fixation's first point despite having been part of the
+    # rejected window. ---
+    advance_by_one_path = [
+        [0, 0, 0, 400],         # threshold(from p0) = 100
+        [260, 1000, 0, 400],    # span p0->p1=260>=250; dispersion (1000-0)+0=1000 > 100 -> reject;
+                                 # advance start to p1 (index 1), NOT to index 2.
+        [520, 1001, 1, 400],    # from start=p1: span p1->p2=260>=250; w_start=w[p1]=400,
+                                 # threshold=100; dispersion (1001-1000)+(1-0)=2<=100 -> candidate
+                                 # OK; no more points to expand into.
+    ]
+    fx_adv = bf_metrics.fixations_idt(advance_by_one_path)
+    assert fx_adv is not None and len(fx_adv) == 1, (
+        f"expected exactly 1 fixation (starting at p1, after rejecting [p0,p1]), got {fx_adv}"
+    )
+    fxn = fx_adv[0]
+    assert fxn["startMs"] == 260.0 and fxn["nPoints"] == 2, (
+        f"expected the fixation to start at p1 (startMs=260, nPoints=2), got {fxn} -- if startMs "
+        f"were 0 this would mean 'advance by one' was implemented as 'advance past the whole "
+        f"window' instead"
+    )
+    assert abs(fxn["durationMs"] - 260.0) < 1e-9
+    assert abs(fxn["centerImageX"] - 1000.5) < 1e-9
+    assert abs(fxn["centerImageY"] - 0.5) < 1e-9
+
+    # --- sdFixationMs: blank for exactly 1 fixation (not 0.0) -- distinct from the 0.0 sd of TWO
+    # identical-duration fixations (see check_tier3_fixation_fixture) ---
+    assert math.isnan(bf_metrics.sd_fixation_ms(fx_adv)), (
+        "sd_fixation_ms should be blank (NaN) for a single fixation, not 0.0"
+    )
+    assert bf_metrics.n_fixations(fx_adv) == 1
+    assert bf_metrics.mean_fixation_ms(fx_adv) == 260.0
+    assert bf_metrics.median_fixation_ms(fx_adv) == 260.0
+
+    # --- mean/median/sd over a THREE-fixation list with genuinely different durations, to exercise
+    # the actual arithmetic (not just trivial all-equal/degenerate cases) ---
+    synth_fixations = [
+        {"durationMs": 300.0, "centerImageX": 0.0, "centerImageY": 0.0, "startMs": 0.0, "nPoints": 3},
+        {"durationMs": 400.0, "centerImageX": 0.0, "centerImageY": 0.0, "startMs": 500.0, "nPoints": 3},
+        {"durationMs": 500.0, "centerImageX": 0.0, "centerImageY": 0.0, "startMs": 1000.0, "nPoints": 3},
+    ]
+    assert bf_metrics.n_fixations(synth_fixations) == 3
+    assert abs(bf_metrics.mean_fixation_ms(synth_fixations) - 400.0) < 1e-9
+    assert abs(bf_metrics.median_fixation_ms(synth_fixations) - 400.0) < 1e-9
+    # sample sd (ddof=1) of [300,400,500]: mean=400, sq devs=[10000,0,10000], sum=20000,
+    # var=20000/2=10000, sd=100.0
+    assert abs(bf_metrics.sd_fixation_ms(synth_fixations) - 100.0) < 1e-9, (
+        bf_metrics.sd_fixation_ms(synth_fixations)
+    )
+
+
+def check_tier3_fixation_fixture(tmp):
+    """Tier 3 C1 pipeline-level check: runs the hand-derivable fixation fixture (see
+    :func:`build_fixation_fragment`) through the full ``analyze()`` pipeline and asserts every
+    documented number -- ``metrics.csv``'s summary columns AND ``fixations_<slug>.csv``'s per-
+    fixation rows -- against its hand-derived expected values."""
+    frag = build_fixation_fragment()
+    in_dir = os.path.join(tmp, "in_fixation")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_fixation")
+    analyze([in_dir], out_dir)
+
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 1, len(metrics)
+    row = metrics.iloc[0]
+
+    assert row["nFixations"] == 2, f"expected nFixations == 2, got {row['nFixations']}"
+    assert abs(row["meanFixationMs"] - 300.0) < 1e-9, row["meanFixationMs"]
+    assert abs(row["medianFixationMs"] - 300.0) < 1e-9, row["medianFixationMs"]
+    assert abs(row["sdFixationMs"] - 0.0) < 1e-9, (
+        f"expected sdFixationMs == 0.0 (both fixations are exactly 300ms), got {row['sdFixationMs']}"
+    )
+    expected_fpm = 2.0 / (650.0 / 60000.0)
+    assert abs(row["fixationsPerMin"] - expected_fpm) < 1e-6, (
+        f"expected fixationsPerMin == {expected_fpm}, got {row['fixationsPerMin']}"
+    )
+
+    fixation_files = [f for f in os.listdir(out_dir) if f.startswith("fixations_")]
+    assert len(fixation_files) == 1, fixation_files
+    fixations = pd.read_csv(os.path.join(out_dir, fixation_files[0]))
+    assert list(fixations.columns) == [
+        "session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY", "nPoints",
+    ], fixations.columns.tolist()
+    assert len(fixations) == 2, f"expected 2 fixation rows, got {len(fixations)}"
+
+    f1 = fixations[fixations["idx"] == 1].iloc[0]
+    assert f1["session"] == "fix1"
+    assert abs(f1["startMs"] - 0.0) < 1e-9
+    assert abs(f1["durationMs"] - 300.0) < 1e-9
+    assert abs(f1["centerImageX"] - 101.0) < 1e-9
+    assert abs(f1["centerImageY"] - 100.0) < 1e-9
+    assert f1["nPoints"] == 3
+
+    f2 = fixations[fixations["idx"] == 2].iloc[0]
+    assert abs(f2["startMs"] - 350.0) < 1e-9
+    assert abs(f2["durationMs"] - 300.0) < 1e-9
+    assert abs(f2["centerImageX"] - 900.0) < 1e-9
+    assert abs(f2["centerImageY"] - 900.0) < 1e-9
+    assert f2["nPoints"] == 3
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="bfa-selftest-")
     try:
@@ -1005,6 +1212,7 @@ def run():
             "mouseVelocityPxPerSec", "activeFractionPct",
             "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
             "magnificationSource",
+            "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
         ]
         assert list(metrics.columns) == expected_cols, metrics.columns.tolist()
         assert metrics["dwellInAnnotationPct"].between(0, 100).all(), metrics["dwellInAnnotationPct"].tolist()
@@ -1013,6 +1221,33 @@ def run():
         row_s2 = metrics[metrics.session == "s2"].iloc[0]
         row_s3 = metrics[metrics.session == "s3"].iloc[0]
         row_s4 = metrics[metrics.session == "s4"].iloc[0]
+
+        # --- Tier 3 C1: nFixations/meanFixationMs/fixationsPerMin populated (non-blank, >=0) for
+        # the path-carrying sessions (s1, s2, s4), blank for s3 (no path at all) ---
+        for r in (row_s1, row_s2, row_s4):
+            assert pd.notna(r["nFixations"]) and r["nFixations"] >= 0, r["nFixations"]
+            assert pd.notna(r["fixationsPerMin"]) and r["fixationsPerMin"] >= 0, r["fixationsPerMin"]
+        assert pd.isna(row_s3["nFixations"]), (
+            f"nFixations should be blank for a pathless session, got {row_s3['nFixations']}"
+        )
+        assert pd.isna(row_s3["fixationsPerMin"]), row_s3["fixationsPerMin"]
+
+        # --- fixations_<slug>.csv (Tier 3 C1): written for the path-carrying sessions that found
+        # at least one fixation each (s1/s2/s4's jittered synthetic paths all do) ---
+        fixation_files = [f for f in os.listdir(out_dir) if f.startswith("fixations_")]
+        assert len(fixation_files) == 1, fixation_files
+        fixations = pd.read_csv(os.path.join(out_dir, fixation_files[0]))
+        assert list(fixations.columns) == [
+            "session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY", "nPoints",
+        ], fixations.columns.tolist()
+        assert set(fixations["session"].unique()) <= {"s1", "s2", "s4"}, (
+            fixations["session"].unique()
+        )
+        assert (fixations["durationMs"] > 0).all(), "every fixation must have a positive duration"
+        assert (fixations["nPoints"] >= 1).all()
+        for sess, grp in fixations.groupby("session"):
+            idxs = grp.sort_values("idx")["idx"].tolist()
+            assert idxs == list(range(1, len(idxs) + 1)), f"{sess}: idx should be 1..N: {idxs}"
 
         # --- compare_<slug>.csv: symmetric cc matrix, diagonal 1.0, similar > dissimilar ---
         compare_files = [f for f in os.listdir(out_dir) if f.startswith("compare_")]
@@ -1649,6 +1884,10 @@ def run():
         check_tier2_idle_fixture(tmp)
         check_tier2_zoom_fidelity_fixture(tmp)
         check_tier2_magband_scheme_cli(tmp)
+
+        # --- Tier 3 C1: I-DT fixation extraction ---
+        check_tier3_direct_unit_asserts()
+        check_tier3_fixation_fixture(tmp)
 
         print("OK: all selftest assertions passed")
     finally:

@@ -33,6 +33,10 @@ Output files (written to ``--out DIR``):
   ``magnificationSource`` (``"true"``/``"proxy-downsample"``, path-only). **B1 CHANGES**
   ``scanningRatePxPerMin``/``drillingRatePerMin``/``pathVelocityPxPerSec``/``searchFocusRatio``
   numbers for any session with a >60s idle gap (byte-identical to before for sessions without one).
+  (Tier 3 C1, additive) ``nFixations``, ``meanFixationMs``, ``medianFixationMs``, ``sdFixationMs``,
+  ``fixationsPerMin`` -- a deterministic I-DT (dispersion-threshold, Salvucci & Goldberg 2000)
+  fixation-extraction summary over the scanpath, path-only (blank without a path); see
+  :func:`blinded_focus.metrics.fixations_idt` for the pinned algorithm.
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus).
@@ -77,6 +81,10 @@ Output files (written to ``--out DIR``):
   top-:data:`TRANSITIONS_TOP_N` directed cell-to-cell transitions per session: ``session``,
   ``fromCell``, ``toCell``, ``count`` (ties broken deterministically — see
   :func:`blinded_focus.metrics.top_transitions`).
+- per slide, when any session has a schema/3+ ``path`` AND at least one fixation was found on this
+  slide (Tier 3 C1): ``fixations_<slug>.csv`` — one row per I-DT fixation, per session: ``session``,
+  ``idx`` (1-based, in scanpath order), ``startMs``, ``durationMs``, ``centerImageX``,
+  ``centerImageY``, ``nPoints`` — see :func:`blinded_focus.metrics.fixations_idt`.
 - ``summary.md`` — counts, (Tier 2 B4, when any path-carrying session exists) a magnification-
   source caveat line, per-slide agreement, reference ranking, headline zoom/scanning numbers,
   (Phase 2) headline annotation-coverage + cursor-coupling numbers, and (Phase 3, gated on
@@ -729,6 +737,13 @@ def analyze(
                 "avgZoomLog2W": "",
                 "drillingRateOctavesPerMin": "",
                 "magnificationSource": "",
+                # Tier 3 C1 (docs/superpowers/specs/2026-07-23-...): I-DT fixation extraction --
+                # path-only (blank without a path at all, like the Tier 1/2 blocks above).
+                "nFixations": "",
+                "meanFixationMs": "",
+                "medianFixationMs": "",
+                "sdFixationMs": "",
+                "fixationsPerMin": "",
             }
 
             path = f.get("path")
@@ -776,6 +791,19 @@ def analyze(
                 row["avgZoomLog2W"] = m.avg_zoom_log2_w(path, base_mag, img_w)
                 row["drillingRateOctavesPerMin"] = m.drilling_rate_octaves_per_min(path, base_mag, img_w)
                 row["magnificationSource"] = "true" if base_mag is not None else "proxy-downsample"
+                # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
+                # deterministic dispersion-threshold detector over the viewport centers. Computed
+                # once here for metrics.csv's summary columns; the per-fixation
+                # fixations_<slug>.csv rows are built later (per slide) by recomputing this same
+                # call directly off each path session's own fragment (mirrors the magband-split
+                # export's recompute-don't-cache convention), so no extra per-slide cache dict is
+                # needed here.
+                fx = m.fixations_idt(path)
+                row["nFixations"] = m.n_fixations(fx)
+                row["meanFixationMs"] = m.mean_fixation_ms(fx)
+                row["medianFixationMs"] = m.median_fixation_ms(fx)
+                row["sdFixationMs"] = m.sd_fixation_ms(fx)
+                row["fixationsPerMin"] = m.fixations_per_min(fx, path)
 
             metrics_rows.append(row)
 
@@ -1077,6 +1105,39 @@ def analyze(
                 )
 
         # ------------------------------------------------------------------
+        # Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): per-session
+        # I-DT fixations (path sessions only), same tidy long-format / gate-on-nonempty-rows
+        # convention as transitions_<slug>.csv above -- the file is only written if at least one
+        # fixation was found across every path-carrying session on this slide (a session
+        # contributing zero rows, e.g. a very short scanpath, is simply absent from the file rather
+        # than emitting an empty per-session block). Recomputes blinded_focus.metrics.fixations_idt
+        # directly off each session's own path (same recompute-don't-cache convention the
+        # magnification-split section below uses for its own per-session band assignment).
+        # ------------------------------------------------------------------
+        if scan_sids:
+            fixation_rows = []
+            for sid in scan_sids:
+                label = labels.get(sid, sid)
+                fx = m.fixations_idt(frag_by_sid[sid]["path"]) or []
+                for idx, fxn in enumerate(fx, start=1):
+                    fixation_rows.append({
+                        "session": label,
+                        "idx": idx,
+                        "startMs": fxn["startMs"],
+                        "durationMs": fxn["durationMs"],
+                        "centerImageX": fxn["centerImageX"],
+                        "centerImageY": fxn["centerImageY"],
+                        "nPoints": fxn["nPoints"],
+                    })
+            if fixation_rows:
+                _write_csv(
+                    os.path.join(out_dir, f"fixations_{slide_slug}.csv"),
+                    fixation_rows,
+                    ["session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY",
+                     "nPoints"],
+                )
+
+        # ------------------------------------------------------------------
         # magnification-split (Phase 1; Tier 2 B1 idle-exclusion + B3 canonical-band scheme):
         # per-session dwell time in each zoom band -- band ASSIGNMENT is unaffected by idle
         # exclusion (matches the tercile scheme's pre-existing behavior: quantile cuts, or the
@@ -1209,7 +1270,10 @@ def analyze(
          # column order above (incl. Tier 1) is unchanged. B1: idleMs/activeSpanMs. B2:
          # avgZoomLog2W/drillingRateOctavesPerMin. B4: magnificationSource.
          "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
-         "magnificationSource"],
+         "magnificationSource",
+         # Tier 3 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1/2) is unchanged. C1: I-DT fixation extraction.
+         "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):

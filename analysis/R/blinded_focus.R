@@ -1701,6 +1701,150 @@ active_fraction_pct <- function(path, duration_ms) {
 }
 
 # ---------------------------------------------------------------------------
+# Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): I-DT (dispersion-
+# threshold, Salvucci & Goldberg 2000) fixation extraction over the scanpath's viewport centers.
+# Deterministic and index-based -- deliberately NOT DBSCAN (or any other library clustering
+# routine), whose cluster assignment is not guaranteed identical across languages/library versions
+# and would break the toolkit's 1e-6 Python<->R parity contract. Mirrors
+# `blinded_focus.metrics.fixations_idt` (Python) function-for-function; directional metrics
+# (turn-angle, transitions, etc., above) stay tick-based and are untouched by this section --
+# fixations are an added lens on the scanpath, not a rebase of any existing metric.
+# ---------------------------------------------------------------------------
+
+#: Minimum time span (ms) a candidate fixation window must cover before its dispersion is even
+#: tested -- Salvucci & Goldberg's duration threshold. Matches the Python toolkit's
+#: `MIN_FIXATION_MS` literal exactly.
+MIN_FIXATION_MS <- 250.0
+#: Fraction of the window's starting viewport width used as its dispersion threshold (image px):
+#: `threshold = DISPERSION_FRAC * w_at_window_start`, where `w_at_window_start` is FIXED to the `w`
+#: of the window's first point at the moment step 1 (see `fixations_idt`) finds it, and is never
+#: recomputed as the window later expands. Matches the Python toolkit's `DISPERSION_FRAC` literal
+#: exactly.
+DISPERSION_FRAC <- 0.25
+
+#' `(max(cx)-min(cx)) + (max(cy)-min(cy))` over `pm[start:end, ]` inclusive (1-based row indices,
+#' image px) -- the I-DT dispersion of one candidate fixation window. `pm` is an
+#' `as_path_matrix()`-shaped matrix.
+.window_dispersion <- function(pm, start, end) {
+  cxs <- pm[start:end, 2]
+  cys <- pm[start:end, 3]
+  (max(cxs) - min(cxs)) + (max(cys) - min(cys))
+}
+
+#' Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector -- exact port
+#' of `blinded_focus.metrics.fixations_idt` (Python); see its docstring for the full algorithm
+#' description (deterministic, index-based, NOT a clustering library). Per-point data
+#' `(t=pm[i,1], cx=pm[i,2], cy=pm[i,3], w=pm[i,4])`, 1-based R row indices throughout.
+#'
+#' Returns `NULL` if `path` has fewer than 2 points -- fixation extraction is not computable at
+#' all, distinct from an empty list (see below); every metrics.csv column below (`n_fixations`
+#' etc.) maps this to a blank cell. Returns `list()` (a real, well-defined "zero fixations found" --
+#' NOT blank) if the path has >=2 points but no window ever qualifies. Otherwise a list of
+#' `list(startMs=, durationMs=, centerImageX=, centerImageY=, nPoints=)`, one per fixation, in
+#' start-index/time order.
+fixations_idt <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NULL)
+  }
+  out <- list()
+  start <- 1L
+  while (start <= n) {
+    t_start <- pm[start, 1]
+    end <- start
+    while (end <= n && (pm[end, 1] - t_start) < MIN_FIXATION_MS) {
+      end <- end + 1L
+    }
+    if (end > n) {
+      break
+    }
+    w_start <- pm[start, 4]
+    threshold <- DISPERSION_FRAC * w_start
+    disp <- .window_dispersion(pm, start, end)
+    if (disp <= threshold) {
+      cur_end <- end
+      while (cur_end + 1L <= n) {
+        if (.window_dispersion(pm, start, cur_end + 1L) <= threshold) {
+          cur_end <- cur_end + 1L
+        } else {
+          break
+        }
+      }
+      cxs <- pm[start:cur_end, 2]
+      cys <- pm[start:cur_end, 3]
+      out[[length(out) + 1]] <- list(
+        startMs = t_start,
+        durationMs = pm[cur_end, 1] - t_start,
+        centerImageX = mean(cxs),
+        centerImageY = mean(cys),
+        nPoints = cur_end - start + 1L
+      )
+      start <- cur_end + 1L
+    } else {
+      start <- start + 1L
+    }
+  }
+  out
+}
+
+#' `length(fixations)` (an integer, including `0` for a genuinely empty-but-computed list), or
+#' `NaN` (blank in `metrics.csv`) if `fixations` is `NULL` (path had fewer than 2 points). Mirrors
+#' `blinded_focus.metrics.n_fixations`.
+n_fixations <- function(fixations) {
+  if (is.null(fixations)) {
+    return(NaN)
+  }
+  length(fixations)
+}
+
+#' Mean `durationMs` over `fixations`. `NaN` (blank) if `fixations` is `NULL` or empty -- the mean
+#' of zero fixations is undefined, not `0.0`. Mirrors `blinded_focus.metrics.mean_fixation_ms`.
+mean_fixation_ms <- function(fixations) {
+  if (is.null(fixations) || length(fixations) == 0) {
+    return(NaN)
+  }
+  mean(vapply(fixations, function(f) f$durationMs, numeric(1)))
+}
+
+#' Median `durationMs` over `fixations`. `NaN` (blank) if `fixations` is `NULL` or empty. Mirrors
+#' `blinded_focus.metrics.median_fixation_ms`.
+median_fixation_ms <- function(fixations) {
+  if (is.null(fixations) || length(fixations) == 0) {
+    return(NaN)
+  }
+  stats::median(vapply(fixations, function(f) f$durationMs, numeric(1)))
+}
+
+#' Sample standard deviation (`sd()`'s default divide-by-`n-1`, matching numpy's `ddof=1`) of
+#' `durationMs` over `fixations`. `NaN` (blank) if `fixations` is `NULL` or has fewer than 2
+#' fixations -- a single fixation (or none) has no defensible sample spread. Mirrors
+#' `blinded_focus.metrics.sd_fixation_ms`.
+sd_fixation_ms <- function(fixations) {
+  if (is.null(fixations) || length(fixations) < 2) {
+    return(NaN)
+  }
+  stats::sd(vapply(fixations, function(f) f$durationMs, numeric(1)))
+}
+
+#' `length(fixations) / active_minutes`, where `active_minutes = active_span_ms(path) / 60000.0`
+#' (Tier 2 B1's idle-excluded active span -- same denominator convention as
+#' `scanning_rate_px_per_min`/`drilling_rate_per_min`). `NaN` (blank) if `fixations` is `NULL`
+#' (path had fewer than 2 points) or the active span is non-positive. `0.0` (not blank) when
+#' `fixations` is a genuinely empty list (zero fixations found) but the active span is positive.
+#' Mirrors `blinded_focus.metrics.fixations_per_min`.
+fixations_per_min <- function(fixations, path) {
+  if (is.null(fixations)) {
+    return(NaN)
+  }
+  active_min <- active_span_ms(path) / 60000.0
+  if (active_min <= 0) {
+    return(NaN)
+  }
+  length(fixations) / active_min
+}
+
+# ---------------------------------------------------------------------------
 # Inter-observer agreement
 # ---------------------------------------------------------------------------
 
@@ -2424,13 +2568,20 @@ MIN_CORRELATION_N <- 5
 #'   populated for every session — 0/0.0 when a session has no `annotations`;
 #'   `annotationReentryCount` blank without a `path`; `enrichmentRatio` blank when its mask has no
 #'   in/out split to compare) plus cursor metrics `cursorOverSlidePct`, `mouseViewportCouplingPx`
-#'   (blank unless the session's `path` carries schema/5 8-element points with `mouseX`/`mouseY`).
+#'   (blank unless the session's `path` carries schema/5 8-element points with `mouseX`/`mouseY`)
+#'   plus (Tier 3 C1, docs/superpowers/specs/2026-07-23-...) a deterministic I-DT fixation-
+#'   extraction summary: `nFixations`, `meanFixationMs`, `medianFixationMs`, `sdFixationMs`,
+#'   `fixationsPerMin` (path-only, blank without a path) -- see `fixations_idt`.
 #' - per slide: `compare_<slug>.csv` (pairwise cc/sim/iou, tidy long format), `consensus_<slug>.png`.
 #'   Also carries a slide-level `coincidenceLevel` (one row) and a per-session
 #'   `regionCoveragePct` (vs the slide consensus).
 #' - per slide, when `reference`/`roi` given: `reference_<slug>.csv`.
 #' - per slide, when any session has a schema/3+ `path`: `scanpath_<slug>.csv`, and (Phase 1)
 #'   `magbands_<slug>.csv` — per-session dwell time in each of `magbands` within-path zoom bands.
+#' - per slide, when any session has a schema/3+ `path` AND at least one fixation was found on
+#'   this slide (Tier 3 C1): `fixations_<slug>.csv` — one row per I-DT fixation, per session:
+#'   `session`, `idx` (1-based, in scanpath order), `startMs`, `durationMs`, `centerImageX`,
+#'   `centerImageY`, `nPoints` — see `fixations_idt`.
 #' - per slide, when any session has at least one annotation: (Phase 2) `annotations_<slug>.csv` —
 #'   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
 #'   diagonal-reuse convention as `compare_<slug>.csv`) plus a slide-level `coincidenceLevel` over
@@ -2612,7 +2763,14 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         activeSpanMs = NA,
         avgZoomLog2W = NA,
         drillingRateOctavesPerMin = NA,
-        magnificationSource = NA_character_
+        magnificationSource = NA_character_,
+        # Tier 3 C1 (docs/superpowers/specs/2026-07-23-...): I-DT fixation extraction -- path-only
+        # (NA without a path at all, like the Tier 1/2 blocks above).
+        nFixations = NA,
+        meanFixationMs = NA,
+        medianFixationMs = NA,
+        sdFixationMs = NA,
+        fixationsPerMin = NA
       )
 
       path <- f$path
@@ -2659,6 +2817,18 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$avgZoomLog2W <- avg_zoom_log2_w(path, base_mag, img_w)
         row$drillingRateOctavesPerMin <- drilling_rate_octaves_per_min(path, base_mag, img_w)
         row$magnificationSource <- if (!is.null(base_mag)) "true" else "proxy-downsample"
+        # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
+        # deterministic dispersion-threshold detector over the viewport centers. Computed once here
+        # for metrics.csv's summary columns; the per-fixation fixations_<slug>.csv rows are built
+        # later (per slide) by recomputing this same call directly off each path session's own
+        # fragment (mirrors the magband-split export's recompute-don't-cache convention), so no
+        # extra per-slide cache list is needed here.
+        fx <- fixations_idt(path)
+        row$nFixations <- n_fixations(fx)
+        row$meanFixationMs <- mean_fixation_ms(fx)
+        row$medianFixationMs <- median_fixation_ms(fx)
+        row$sdFixationMs <- sd_fixation_ms(fx)
+        row$fixationsPerMin <- fixations_per_min(fx, path)
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
 
@@ -2967,6 +3137,37 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
+    # Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): per-session I-DT
+    # fixations (path sessions only), same tidy long-format / gate-on-nonempty-rows convention as
+    # transitions_<slug>.csv above -- the file is only written if at least one fixation was found
+    # across every path-carrying session on this slide. Recomputes fixations_idt directly off each
+    # session's own path (same recompute-don't-cache convention the magnification-split section
+    # below uses for its own per-session band assignment).
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      fixation_rows <- list()
+      for (sid in scan_sids) {
+        label <- label_for(sid, labels)
+        f <- by_session[[sid]]
+        fx <- fixations_idt(f$path)
+        if (is.null(fx)) fx <- list()
+        for (i in seq_along(fx)) {
+          fxn <- fx[[i]]
+          fixation_rows[[length(fixation_rows) + 1]] <- list(
+            session = label, idx = i, startMs = fxn$startMs, durationMs = fxn$durationMs,
+            centerImageX = fxn$centerImageX, centerImageY = fxn$centerImageY, nPoints = fxn$nPoints
+          )
+        }
+      }
+      if (length(fixation_rows) > 0) {
+        write_csv_tidy(
+          fixation_rows, file.path(out_dir, paste0("fixations_", slide_slug, ".csv")),
+          c("session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY", "nPoints")
+        )
+      }
+    }
+
+    # ------------------------------------------------------------------
     # magnification-split (Phase 1; Tier 2 B1 idle-exclusion + B3 canonical-band scheme):
     # per-session dwell time in each zoom band -- band ASSIGNMENT is unaffected by idle exclusion
     # (matches the tercile scheme's pre-existing behavior: quantile cuts, or the canonical
@@ -3107,7 +3308,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       # order above (incl. Tier 1) is unchanged. B1: idleMs/activeSpanMs. B2:
       # avgZoomLog2W/drillingRateOctavesPerMin. B4: magnificationSource.
       "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
-      "magnificationSource"
+      "magnificationSource",
+      # Tier 3 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
+      # order above (incl. Tier 1/2) is unchanged. C1: I-DT fixation extraction.
+      "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin"
     )
   )
 

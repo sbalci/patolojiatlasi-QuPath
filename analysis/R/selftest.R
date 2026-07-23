@@ -454,6 +454,50 @@ build_zoom_fidelity_fragment <- function() {
   )
 }
 
+FIXATION_SLIDE_KEY <- "sha256:selftest-slide-fixation-0001"
+#' Tier 3 C1 fixture: a schema/3, 6-point hand-constructed path with a KNOWN fixation structure --
+#' "3 tight points spanning 300ms = one fixation, then a jump, then 3 more (a second fixation)".
+#' Mirrors the Python toolkit's `build_fixation_fragment` exactly; see
+#' docs/superpowers/sdd/t3-report.md for the full derivation.
+#'
+#' points (t, cx, cy, w, h):
+#'   p0=(0,   100,100,400,300)
+#'   p1=(100, 102, 99,400,300)
+#'   p2=(300, 101,101,400,300)   -- span p0->p2 = 300ms >= MIN_FIXATION_MS(250); dispersion
+#'                                  (102-100)+(101-99)=4 <= threshold(0.25*400=100) -> candidate OK
+#'   p3=(350, 900,900,400,300)   -- THE JUMP: expanding [p0..p3] would have dispersion (900-100)+
+#'                                  (900-99)=1601 > threshold -> expansion stops at p2.
+#'     => FIXATION 1: startMs=0, durationMs=300, centerX=(100+102+101)/3=101.0,
+#'        centerY=(100+99+101)/3=100.0, nPoints=3. start advances to p3.
+#'   p4=(450, 899,902,400,300)
+#'   p5=(650, 901,898,400,300)   -- from start=p3: span p3->p5=300ms>=250; w_start=400,threshold=100;
+#'                                  dispersion (901-899)+(902-898)=6<=100 -> candidate OK; no more
+#'                                  points to expand into.
+#'     => FIXATION 2: startMs=350, durationMs=300, centerX=(900+899+901)/3=900.0,
+#'        centerY=(900+902+898)/3=900.0, nPoints=3. start advances past the end -> STOP.
+#'
+#' nFixations=2, both durationMs=300.0 -> meanFixationMs=300.0, medianFixationMs=300.0,
+#' sdFixationMs=0.0. No idle gap -> activeSpanMs == total span == 650ms -> fixationsPerMin =
+#' 2/(650/60000) = 184.61538461538458.
+build_fixation_fragment <- function() {
+  grid <- .n_nonzero_grid(10)
+  path <- matrix(
+    c(
+      0, 100, 100, 400, 300,
+      100, 102, 99, 400, 300,
+      300, 101, 101, 400, 300,
+      350, 900, 900, 400, 300,
+      450, 899, 902, 400, 300,
+      650, 901, 898, 400, 300
+    ),
+    nrow = 6, ncol = 5, byrow = TRUE
+  )
+  .fragment(
+    "fix1", 3, grid, 650, 6, path = path,
+    slide_key = FIXATION_SLIDE_KEY
+  )
+}
+
 write_fragments_to_dir <- function(fragments, d) {
   for (f in fragments) {
     writeLines(jsonlite::toJSON(f, auto_unbox = TRUE), file.path(d, paste0(f$sessionId, ".json")))
@@ -1016,6 +1060,185 @@ check_tier2_magband_scheme_cli <- function(tmp) {
   )
 }
 
+# ---------------------------------------------------------------------------
+# Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md, I-DT fixations).
+# Mirrors the Python toolkit's check_tier3_* functions 1:1.
+# ---------------------------------------------------------------------------
+
+#' Direct, pipeline-independent unit checks for the new Tier 3 C1 `fixations_idt` (and its
+#' summary-statistic wrappers) -- TDD-style asserts on hand-built inputs, bypassing the full
+#' `analyze()` pipeline entirely. Mirrors the Python toolkit's `check_tier3_direct_unit_asserts`.
+check_tier3_direct_unit_asserts <- function() {
+  # --- degenerate inputs: not computable at all (NULL), never a crash ---
+  stopifnot(
+    "fixations_idt should be NULL for an empty path" = is.null(fixations_idt(list())),
+    "fixations_idt should be NULL for a 1-point path" =
+      is.null(fixations_idt(matrix(c(0, 0, 0, 400), nrow = 1)))
+  )
+  stopifnot(
+    "n_fixations should be blank (NaN) for NULL" = is.nan(n_fixations(NULL)),
+    is.nan(mean_fixation_ms(NULL)),
+    is.nan(median_fixation_ms(NULL)),
+    is.nan(sd_fixation_ms(NULL))
+  )
+  stopifnot(is.nan(fixations_per_min(NULL, matrix(c(0, 0, 0, 400), nrow = 1))))
+
+  # --- >=2 points but NO window ever reaches MIN_FIXATION_MS at all (too-short total span) -> a
+  # real, well-defined list() (zero fixations found), NOT NULL/blank ---
+  too_short_path <- matrix(c(0, 0, 0, 400, 100, 0, 0, 400), nrow = 2, ncol = 4, byrow = TRUE)
+  fx_short <- fixations_idt(too_short_path)
+  stopifnot(
+    "expected list() (zero fixations, not NULL) for a too-short path" = length(fx_short) == 0,
+    !is.null(fx_short)
+  )
+  stopifnot("n_fixations should be 0 (not blank) for list()" = identical(n_fixations(fx_short), 0L))
+  stopifnot(
+    "mean_fixation_ms should be blank for zero fixations found" = is.nan(mean_fixation_ms(fx_short)),
+    is.nan(median_fixation_ms(fx_short)),
+    is.nan(sd_fixation_ms(fx_short))
+  )
+  # active span IS positive here (100ms, no idle gap) -> fixationsPerMin is a well-defined 0.0, not
+  # blank (a real "zero events over a real duration" rate).
+  stopifnot(
+    "fixationsPerMin should be 0.0 (not blank) for zero fixations over a positive active span" =
+      fixations_per_min(fx_short, too_short_path) == 0.0
+  )
+
+  # --- >=2 points, total span DOES reach MIN_FIXATION_MS, but dispersion is always over threshold
+  # for every candidate window (a jittery/noisy path) -> also a real list() ---
+  always_over_threshold_path <- matrix(
+    c(
+      0, 0, 0, 10,      # threshold = 0.25*10 = 2.5
+      125, 50, 50, 10,
+      250, 100, 100, 10  # span p0->p2=250>=250; dispersion (100-0)+(100-0)=200 > 2.5 -> reject,
+                          # advance start by 1; from p1, span p1->p2=125<250, no more points -> STOP.
+    ),
+    nrow = 3, ncol = 4, byrow = TRUE
+  )
+  fx_disp <- fixations_idt(always_over_threshold_path)
+  stopifnot(
+    "expected list() for a path whose dispersion never drops to/below threshold" =
+      length(fx_disp) == 0 && !is.null(fx_disp)
+  )
+
+  # --- zero ACTIVE SPAN (duplicate timestamps): fixations_idt still returns list() (well-defined,
+  # not NULL -- the path has >=2 points), but fixationsPerMin must be blank (0/0 rate is
+  # undefined), distinct from the too-short-path case above where active span was positive ---
+  dup_ts_path <- matrix(c(0, 0, 0, 400, 0, 0, 0, 400), nrow = 2, ncol = 4, byrow = TRUE)
+  fx_dup <- fixations_idt(dup_ts_path)
+  stopifnot(
+    "expected list() for a zero-duration 2-point path" = length(fx_dup) == 0 && !is.null(fx_dup)
+  )
+  stopifnot(
+    "fixationsPerMin should be blank (NaN) when active span is zero, even with fixations=list()" =
+      is.nan(fixations_per_min(fx_dup, dup_ts_path))
+  )
+
+  # --- step 4 ("advance start by ONE, not past the whole rejected window"): the first candidate
+  # window [p0,p1] is over threshold and rejected; the NEXT window must be allowed to start at p1
+  # (not p2) -- i.e. p1 is reused as a fixation's first point despite having been part of the
+  # rejected window. ---
+  advance_by_one_path <- matrix(
+    c(
+      0, 0, 0, 400,        # threshold(from p0) = 100
+      260, 1000, 0, 400,   # span p0->p1=260>=250; dispersion (1000-0)+0=1000 > 100 -> reject;
+                            # advance start to p1 (index 2), NOT to index 3.
+      520, 1001, 1, 400     # from start=p1: span p1->p2=260>=250; w_start=w[p1]=400, threshold=100;
+                            # dispersion (1001-1000)+(1-0)=2<=100 -> candidate OK; no more points.
+    ),
+    nrow = 3, ncol = 4, byrow = TRUE
+  )
+  fx_adv <- fixations_idt(advance_by_one_path)
+  stopifnot(
+    "expected exactly 1 fixation (starting at p1, after rejecting [p0,p1])" = length(fx_adv) == 1
+  )
+  fxn <- fx_adv[[1]]
+  stopifnot(
+    "expected the fixation to start at p1 (startMs=260, nPoints=2)" =
+      fxn$startMs == 260.0 && fxn$nPoints == 2L
+  )
+  stopifnot(abs(fxn$durationMs - 260.0) < 1e-9)
+  stopifnot(abs(fxn$centerImageX - 1000.5) < 1e-9)
+  stopifnot(abs(fxn$centerImageY - 0.5) < 1e-9)
+
+  # --- sdFixationMs: blank for exactly 1 fixation (not 0.0) -- distinct from the 0.0 sd of TWO
+  # identical-duration fixations (see check_tier3_fixation_fixture) ---
+  stopifnot(
+    "sd_fixation_ms should be blank (NaN) for a single fixation, not 0.0" = is.nan(sd_fixation_ms(fx_adv))
+  )
+  stopifnot(n_fixations(fx_adv) == 1)
+  stopifnot(mean_fixation_ms(fx_adv) == 260.0)
+  stopifnot(median_fixation_ms(fx_adv) == 260.0)
+
+  # --- mean/median/sd over a THREE-fixation list with genuinely different durations, to exercise
+  # the actual arithmetic (not just trivial all-equal/degenerate cases) ---
+  synth_fixations <- list(
+    list(durationMs = 300.0, centerImageX = 0.0, centerImageY = 0.0, startMs = 0.0, nPoints = 3L),
+    list(durationMs = 400.0, centerImageX = 0.0, centerImageY = 0.0, startMs = 500.0, nPoints = 3L),
+    list(durationMs = 500.0, centerImageX = 0.0, centerImageY = 0.0, startMs = 1000.0, nPoints = 3L)
+  )
+  stopifnot(n_fixations(synth_fixations) == 3)
+  stopifnot(abs(mean_fixation_ms(synth_fixations) - 400.0) < 1e-9)
+  stopifnot(abs(median_fixation_ms(synth_fixations) - 400.0) < 1e-9)
+  # sample sd (ddof=1) of [300,400,500]: mean=400, sq devs=[10000,0,10000], sum=20000, var=10000,
+  # sd=100.0
+  stopifnot(abs(sd_fixation_ms(synth_fixations) - 100.0) < 1e-9)
+}
+
+#' Tier 3 C1 pipeline-level check: runs the hand-derivable fixation fixture (see
+#' `build_fixation_fragment`) through the full `analyze()` pipeline and asserts every documented
+#' number -- metrics.csv's summary columns AND fixations_<slug>.csv's per-fixation rows -- against
+#' its hand-derived expected values. Mirrors the Python toolkit's `check_tier3_fixation_fixture`.
+check_tier3_fixation_fixture <- function(tmp) {
+  frag <- build_fixation_fragment()
+  in_dir <- file.path(tmp, "in_fixation")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_fixation")
+  analyze(list(in_dir), out_dir)
+
+  metrics <- utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
+  stopifnot(nrow(metrics) == 1)
+  row <- metrics[1, ]
+
+  stopifnot("expected nFixations == 2" = row$nFixations == 2)
+  stopifnot(abs(row$meanFixationMs - 300.0) < 1e-9)
+  stopifnot(abs(row$medianFixationMs - 300.0) < 1e-9)
+  stopifnot(
+    "expected sdFixationMs == 0.0 (both fixations are exactly 300ms)" =
+      abs(row$sdFixationMs - 0.0) < 1e-9
+  )
+  expected_fpm <- 2.0 / (650.0 / 60000.0)
+  stopifnot(abs(row$fixationsPerMin - expected_fpm) < 1e-6)
+
+  out_files <- list.files(out_dir)
+  fixation_files <- out_files[startsWith(out_files, "fixations_")]
+  stopifnot("expected exactly one fixations_ file" = length(fixation_files) == 1)
+  fixations_df <- utils::read.csv(file.path(out_dir, fixation_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "fixations_<slug>.csv columns mismatch" = identical(
+      colnames(fixations_df),
+      c("session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY", "nPoints")
+    )
+  )
+  stopifnot("expected 2 fixation rows" = nrow(fixations_df) == 2)
+
+  f1 <- fixations_df[fixations_df$idx == 1, ]
+  stopifnot(f1$session == "fix1")
+  stopifnot(abs(f1$startMs - 0.0) < 1e-9)
+  stopifnot(abs(f1$durationMs - 300.0) < 1e-9)
+  stopifnot(abs(f1$centerImageX - 101.0) < 1e-9)
+  stopifnot(abs(f1$centerImageY - 100.0) < 1e-9)
+  stopifnot(f1$nPoints == 3)
+
+  f2 <- fixations_df[fixations_df$idx == 2, ]
+  stopifnot(abs(f2$startMs - 350.0) < 1e-9)
+  stopifnot(abs(f2$durationMs - 300.0) < 1e-9)
+  stopifnot(abs(f2$centerImageX - 900.0) < 1e-9)
+  stopifnot(abs(f2$centerImageY - 900.0) < 1e-9)
+  stopifnot(f2$nPoints == 3)
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -1052,7 +1275,8 @@ run <- function() {
     "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx",
     "mouseVelocityPxPerSec", "activeFractionPct",
     "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
-    "magnificationSource"
+    "magnificationSource",
+    "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin"
   )
   stopifnot("metrics.csv columns mismatch" = identical(colnames(metrics), expected_cols))
   stopifnot(
@@ -1064,6 +1288,38 @@ run <- function() {
   row_s2 <- metrics[metrics$session == "s2", ]
   row_s3 <- metrics[metrics$session == "s3", ]
   row_s4 <- metrics[metrics$session == "s4", ]
+
+  # --- Tier 3 C1: nFixations/fixationsPerMin populated (non-blank, >=0) for the path-carrying
+  # sessions (s1, s2, s4), blank for s3 (no path at all) ---
+  for (r in list(row_s1, row_s2, row_s4)) {
+    stopifnot(!is.na(r$nFixations) && r$nFixations >= 0)
+    stopifnot(!is.na(r$fixationsPerMin) && r$fixationsPerMin >= 0)
+  }
+  stopifnot(
+    "nFixations should be blank for a pathless session" = is.na(row_s3$nFixations)
+  )
+  stopifnot(is.na(row_s3$fixationsPerMin))
+
+  # --- fixations_<slug>.csv (Tier 3 C1): written for the path-carrying sessions that found at
+  # least one fixation each (s1/s2/s4's jittered synthetic paths all do) ---
+  out_files <- list.files(out_dir)
+  fixation_files <- out_files[startsWith(out_files, "fixations_")]
+  stopifnot("expected exactly one fixations_ file" = length(fixation_files) == 1)
+  fixations_df <- utils::read.csv(file.path(out_dir, fixation_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "fixations_<slug>.csv columns mismatch" = identical(
+      colnames(fixations_df),
+      c("session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY", "nPoints")
+    )
+  )
+  stopifnot(all(unique(fixations_df$session) %in% c("s1", "s2", "s4")))
+  stopifnot("every fixation must have a positive duration" = all(fixations_df$durationMs > 0))
+  stopifnot(all(fixations_df$nPoints >= 1))
+  for (sess in unique(fixations_df$session)) {
+    grp <- fixations_df[fixations_df$session == sess, ]
+    idxs <- sort(grp$idx)
+    stopifnot(identical(idxs, seq_len(length(idxs))))
+  }
 
   # --- compare_<slug>.csv: symmetric cc matrix, diagonal 1.0, similar > dissimilar ---
   out_files <- list.files(out_dir)
@@ -1797,6 +2053,10 @@ run <- function() {
   check_tier2_idle_fixture(tmp)
   check_tier2_zoom_fidelity_fixture(tmp)
   check_tier2_magband_scheme_cli(tmp)
+
+  # --- Tier 3 C1: I-DT fixation extraction ---
+  check_tier3_direct_unit_asserts()
+  check_tier3_fixation_fixture(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }
