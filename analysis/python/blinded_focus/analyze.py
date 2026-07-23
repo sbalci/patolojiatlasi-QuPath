@@ -927,9 +927,10 @@ def analyze(
                 # from diagnosis == correctDx string comparison.
                 "correct": graded_val,
                 # Tier 3 C5 (appended, additive): passthrough of the recorder's dialog-shown
-                # timestamp and the derived once-prompted response latency. See the guard comments
-                # above prompt_shown_ms/response_latency_ms.
-                "promptShownMs": prompt_shown_ms,
+                # timestamp and the derived once-prompted response latency. Blank unless numeric
+                # (same guard as confidence + the R sibling's is.numeric()), so a malformed
+                # non-numeric promptShownMs renders blank identically in both toolkits.
+                "promptShownMs": prompt_shown_ms if _prompt_shown_ms_numeric else "",
                 "responseLatencyMs": response_latency_ms,
             })
 
