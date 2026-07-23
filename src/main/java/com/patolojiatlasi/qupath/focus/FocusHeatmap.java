@@ -118,7 +118,7 @@ public final class FocusHeatmap {
         Map<String, Object> toMap() {
             Map<String, Object> d = new LinkedHashMap<>();
             d.put("diagnosis", diagnosis);
-            d.put("confidence", confidence);   // Gson writes JSON null when absent; analysis treats null/absent as blank
+            d.put("confidence", confidence);   // null ⇒ Gson (no serializeNulls) OMITS the key; analysis treats absent/null as blank
             d.put("decisionMs", decisionMs);
             return d;
         }
@@ -128,7 +128,8 @@ public final class FocusHeatmap {
      *  eagerly while still on that slide — so a deferred (post-switch) save builds the correct slide's
      *  fragment without reading instance fields that have since moved to the next slide. */
     private record BlindedSnapshot(String uri, FocusMap map, java.util.List<int[]> path,
-            boolean pathTruncated, Double baseMagnification, JsonElement annotations, long slideStartMs) { }
+            boolean pathTruncated, Double baseMagnification, JsonElement annotations, long slideStartMs,
+            String date) { }
 
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
@@ -582,7 +583,8 @@ public final class FocusHeatmap {
                 baseMag = x;
         } catch (Exception ignored) { }
         return new BlindedSnapshot(currentUri, currentMap, new java.util.ArrayList<>(blindedPath),
-                blindedPathCapped, baseMag, buildAnnotationsFeatureCollection(), blindedSlideStartMs);
+                blindedPathCapped, baseMag, buildAnnotationsFeatureCollection(), blindedSlideStartMs,
+                java.time.LocalDate.now().toString());
     }
 
     /**
@@ -1043,7 +1045,7 @@ public final class FocusHeatmap {
         m.put("sampleCount", snap.map().getSampleCount());
         m.put("weightUnit", "ms");
         m.put("durationMs", snap.map().getTotalWeight());
-        m.put("date", java.time.LocalDate.now().toString());
+        m.put("date", snap.date());   // captured at snapshot time ⇒ a deferred save stamps the view-day, not the save-day
         m.put("grid", snap.map().getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
         m.put("path", new java.util.ArrayList<>(snap.path()));   // ordered [tRelMs,cx,cy,w,h,dsMilli,mouseX,mouseY] points; defensive snapshot
         m.put("pathTruncated", snap.pathTruncated());   // true if MAX_PATH_POINTS was hit and points were dropped
