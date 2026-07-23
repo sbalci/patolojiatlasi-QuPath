@@ -70,7 +70,8 @@ so pooled avgZoom rows are never silently mixed. Plus a `summary.md` caveat line
 **C1 — fixation extraction (I-DT, deterministic/parity-safe — NOT DBSCAN).** Salvucci–Goldberg
 dispersion-threshold over the scanpath: a fixation = a maximal run of consecutive points whose
 (cx,cy) dispersion (`(max_x−min_x)+(max_y−min_y)`, image px) stays ≤ a threshold scaled to the current
-view (`DISPERSION_FRAC=0.25 ×` median visible width of the run) for ≥ `MIN_FIXATION_MS=250`.
+view (`DISPERSION_FRAC=0.25 ×` the visible width `w` at the window's FIRST point — fixed once the window
+starts, avoiding a circular threshold) for ≥ `MIN_FIXATION_MS=250`.
 Outputs (`metrics.csv`): `nFixations`, `meanFixationMs`, `medianFixationMs`, `sdFixationMs`,
 `fixationsPerMin`. `fixations_<slug>.csv`: `session, idx, startMs, durationMs, centerImageX, centerImageY,
 nPoints`. Directional metrics stay tick-based (documented); fixations are an added lens, not a rebase.
