@@ -126,10 +126,16 @@ public final class FocusHeatmap {
 
     /** Immutable snapshot of everything buildBlindedJson needs for one slide's fragment, captured
      *  eagerly while still on that slide — so a deferred (post-switch) save builds the correct slide's
-     *  fragment without reading instance fields that have since moved to the next slide. */
+     *  fragment without reading instance fields that have since moved to the next slide. {@code dir} is
+     *  the {@link #blindedDir} that was live at capture time: a project switch (e.g. a Groovy {@code
+     *  setProject} off the FX thread) between the snapshot and the deferred write reassigns the {@code
+     *  blindedDir} instance field to the new project, so every write/delete for this snapshot must go
+     *  through {@code snap.dir()} rather than re-reading the (by-then-stale) instance field — otherwise
+     *  the departing slide's fragment would land in the wrong project's {@code atlas-focus} folder and
+     *  the checkpoint delete could orphan the real checkpoint or clobber the new project's live one. */
     private record BlindedSnapshot(String uri, FocusMap map, java.util.List<int[]> path,
             boolean pathTruncated, Double baseMagnification, JsonElement annotations, long slideStartMs,
-            String date) { }
+            String date, File dir) { }
 
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
@@ -463,7 +469,10 @@ public final class FocusHeatmap {
                 decisionPromptedSlides.add(leavingUri);   // declined — don't nag on revisit
             }
             writeBlindedFragmentSync(snap, decision);
-            deleteCheckpoint();
+            // Same rationale as writeBlindedFragmentSync above: target snap.dir(), not the (possibly
+            // by-now-reassigned) live blindedDir, so this can't orphan the departing project's real
+            // checkpoint or clobber a new project's live one.
+            deleteCheckpoint(snap.dir());
         } catch (Exception e) {
             logger.debug("Deferred decision prompt/save failed: {}", e.getMessage());
         } finally {
@@ -675,7 +684,7 @@ public final class FocusHeatmap {
         } catch (Exception ignored) { }
         return new BlindedSnapshot(currentUri, currentMap, new java.util.ArrayList<>(blindedPath),
                 blindedPathCapped, baseMag, buildAnnotationsFeatureCollection(), blindedSlideStartMs,
-                java.time.LocalDate.now().toString());
+                java.time.LocalDate.now().toString(), blindedDir);
     }
 
     /**
@@ -696,12 +705,24 @@ public final class FocusHeatmap {
         }
     }
 
-    /** Best-effort delete of the current session's checkpoint file (its data has just been promoted
-     *  into a final fragment). No-op / silent if it doesn't exist or can't be removed. */
+    /** Best-effort delete of the current session's checkpoint file in the live {@link #blindedDir}
+     *  (its data has just been promoted into a final fragment). No-op / silent if it doesn't exist or
+     *  can't be removed. Delegates to {@link #deleteCheckpoint(File)} — used by the synchronous call
+     *  sites, where the live {@code blindedDir} is still the directory the just-written fragment
+     *  belongs to. */
     private void deleteCheckpoint() {
+        deleteCheckpoint(blindedDir);
+    }
+
+    /** Best-effort delete of the current session's checkpoint file in an explicit directory. Used by
+     *  {@link #deferredDecisionPromptAndSave} with the departing slide's {@code snap.dir()}, so a
+     *  project switch that has since reassigned {@link #blindedDir} to a new project can't make this
+     *  delete either miss the real (departing-project) checkpoint or clobber the new project's live
+     *  one. No-op / silent if {@code dir} is null, the file doesn't exist, or it can't be removed. */
+    private void deleteCheckpoint(File dir) {
         try {
-            if (blindedDir != null)
-                new File(blindedDir, "session-" + sessionId + ".partial.json").delete();
+            if (dir != null)
+                new File(dir, "session-" + sessionId + ".partial.json").delete();
         } catch (Exception e) {
             logger.debug("Could not remove blinded checkpoint: {}", e.getMessage());
         }
@@ -1081,14 +1102,19 @@ public final class FocusHeatmap {
      * landed). Hence synchronous, not fire-and-forget. Best-effort (logs and swallows any failure
      * rather than throwing into the caller). Takes an explicit snapshot (rather than reading instance
      * fields) so a deferred (post-switch) save still builds the correct slide's fragment — see {@link
-     * #currentSnapshot()}.
+     * #currentSnapshot()}. Writes into {@code snap.dir()}, not the live {@link #blindedDir} instance
+     * field: for the synchronous call sites the two are identical ({@code dir()} was captured from
+     * {@code blindedDir} moments earlier in {@link #currentSnapshot()}), but a deferred save's snapshot
+     * may have been taken against a project that has since been switched away from — reading {@code
+     * blindedDir} at write time would then misattribute the fragment to the new project instead of the
+     * departing one.
      */
     private void writeBlindedFragmentSync(BlindedSnapshot snap, Decision decision) {
         try {
             final String json = buildBlindedJson(snap, decision);
             final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(snap.uri()))) + "__"
                     + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
-            File dir = blindedDir;
+            File dir = snap.dir();
             if (!dir.exists())
                 dir.mkdirs();
             File file = new File(dir, base + ".json");
