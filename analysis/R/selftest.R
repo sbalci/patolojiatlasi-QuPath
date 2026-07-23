@@ -1168,6 +1168,39 @@ run <- function() {
   )
   stopifnot("blank for an empty path" = is.na(mean_abs_turn_angle_deg(list())))
 
+  # --- A2 parity-critical assert: turn angles landing exactly on a turnAngleEntropy bin boundary
+  # (45-degree multiples), from exact-integer diagonal/axis-aligned pixel deltas -- the realistic
+  # case where the degree-conversion association order (`x*180/pi` vs `x*(180.0/pi)`) could
+  # silently disagree with the Python toolkit, since floor((deg+180)/45) is a discontinuous step
+  # function of `deg`. Path alternates heading 0deg (dx,dy=100,0) and heading 45deg
+  # (dx,dy=100,100) -> turns alternate exactly -45deg/+45deg (two distinct bins, not one, so
+  # entropy is a non-trivial ~1 bit rather than the degenerate 0 the L-path above exercises).
+  bx <- 0; by <- 0; bt <- 0
+  boundary_path <- list(c(0, 0, 0, 400, 300))
+  for (i in 0:20) { # odd count -> 20 turns (even) -> exact 10/10 split, 2 clean bins
+    if (i %% 2 == 0) {
+      bdx <- 100; bdy <- 0
+    } else {
+      bdx <- 100; bdy <- 100
+    }
+    bt <- bt + 100
+    bx <- bx + bdx
+    by <- by + bdy
+    boundary_path[[length(boundary_path) + 1]] <- c(bt, bx, by, 400, 300)
+  }
+  boundary_turns <- .turn_angles_deg(boundary_path)
+  stopifnot(
+    "expected every turn to be exactly +/-45deg" = all(abs(abs(boundary_turns) - 45.0) < 1e-9)
+  )
+  boundary_mean <- mean_abs_turn_angle_deg(boundary_path)
+  stopifnot("boundary path mean turn should be 45deg" = abs(boundary_mean - 45.0) < 1e-6)
+  boundary_ent <- turn_angle_entropy(boundary_path)
+  # 2 equally-likely bins out of 8 -> 1 bit of entropy, normalized by log2(8)=3 -> 1/3.
+  stopifnot(
+    "expected turnAngleEntropy == 1/3 (2 equally-likely bins out of 8)" =
+      abs(boundary_ent - (1.0 / 3.0)) < 1e-6
+  )
+
   # --- A3 targeted assert: mouse kinematics skip segments touching the (-1,-1) sentinel, not
   # bridge across them ---
   mk_path <- list(

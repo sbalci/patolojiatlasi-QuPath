@@ -1303,7 +1303,20 @@ mouse_viewport_coupling_px <- function(path) {
   }
   d <- heads[2:m] - heads[1:(m - 1)]
   wrapped <- atan2(sin(d), cos(d))
-  wrapped * 180.0 / pi
+  # Parity note: multiply by the precomputed constant `(180.0 / pi)` rather than
+  # `wrapped * 180.0 / pi` (left-to-right: multiply then divide) -- floating-point
+  # multiplication/division is not associative, so the two evaluation orders can round to
+  # different doubles. This matches CPython's `math.degrees(x)`, which is implemented as
+  # `x * (180.0 / Py_MATH_PI)` (a single multiply by a precomputed constant), so the pre-`floor()`
+  # value going into turn_angle_entropy's bin assignment stays bit-identical with the Python
+  # toolkit given the same (bit-identical, shared-libm) `wrapped` radians -- turn_angle_entropy's
+  # `floor((deg+180)/45)` bin assignment is a discontinuous step function of this value, so even a
+  # 1-ULP difference right at a 45-degree-multiple boundary (the common case for
+  # exact-integer-pixel diagonal/axis-aligned pans) could otherwise flip a turn into a different
+  # bin and shift the whole entropy histogram by far more than the 1e-6 parity tolerance --
+  # unlike mean_abs_turn_angle_deg, which stays a continuous (1e-6-tolerant) function of the same
+  # value.
+  wrapped * (180.0 / pi)
 }
 
 #' A2: mean of `|turn angle|` (degrees) over every interior point of the ordered viewport centers

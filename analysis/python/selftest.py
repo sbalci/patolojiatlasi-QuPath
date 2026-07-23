@@ -1062,6 +1062,33 @@ def run():
         )
         assert math.isnan(bf_metrics.mean_abs_turn_angle_deg([])), "blank for an empty path"
 
+        # --- A2 parity-critical assert: turn angles landing exactly on a turnAngleEntropy bin
+        # boundary (45-degree multiples), from exact-integer diagonal/axis-aligned pixel deltas --
+        # the realistic case an R port's degree-conversion association order (`x*180/pi` vs
+        # `x*(180.0/pi)`) could silently disagree on, since floor((deg+180)/45) is a discontinuous
+        # step function of `deg`. Path alternates heading 0deg (dx,dy=100,0) and heading 45deg
+        # (dx,dy=100,100) -> turns alternate exactly -45deg/+45deg (two distinct bins, not one, so
+        # entropy is a non-trivial ~1 bit rather than the degenerate 0 the L-path above exercises).
+        boundary_path = [[0, 0, 0, 400, 300]]
+        bx, by, bt = 0, 0, 0
+        for i in range(21):  # odd count -> 20 turns (even) -> exact 10/10 split, 2 clean bins
+            bdx, bdy = (100, 0) if i % 2 == 0 else (100, 100)
+            bt += 100
+            bx += bdx
+            by += bdy
+            boundary_path.append([bt, bx, by, 400, 300])
+        boundary_turns = bf_metrics._turn_angles_deg(boundary_path)
+        assert all(abs(abs(t) - 45.0) < 1e-9 for t in boundary_turns), (
+            f"expected every turn to be exactly +/-45deg, got {boundary_turns}"
+        )
+        boundary_mean = bf_metrics.mean_abs_turn_angle_deg(boundary_path)
+        assert abs(boundary_mean - 45.0) < 1e-6, boundary_mean
+        boundary_ent = bf_metrics.turn_angle_entropy(boundary_path)
+        # 2 equally-likely bins out of 8 -> 1 bit of entropy, normalized by log2(8)=3 -> 1/3.
+        assert abs(boundary_ent - (1.0 / 3.0)) < 1e-6, (
+            f"expected turnAngleEntropy == 1/3 (2 equally-likely bins out of 8), got {boundary_ent}"
+        )
+
         # --- A3 targeted assert: mouse kinematics skip segments touching the (-1,-1) sentinel,
         # not bridge across them ---
         mk_path = [

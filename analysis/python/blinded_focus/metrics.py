@@ -890,7 +890,19 @@ def _turn_angles_deg(path):
     the two toolkits' wrap-around behavior right at the ``±180°`` boundary).
 
     ``[]`` if ``path`` has fewer than 3 points -- a turn needs two consecutive segments, i.e. an
-    "interior" point with both a preceding and a following segment."""
+    "interior" point with both a preceding and a following segment.
+
+    **Parity note:** ``math.degrees(wrapped)`` is CPython's ``x * (180.0 / Py_MATH_PI)`` -- a
+    single multiply by a precomputed constant, not ``x * 180.0 / pi`` (left-to-right: multiply
+    then divide) -- and an R port's degree conversion must use the same precomputed-constant form
+    (``wrapped * (180.0 / pi)``) to stay bit-identical, since float multiplication/division is not
+    associative and the two evaluation orders can round differently. This matters more here than
+    for most float math in this module: :func:`turn_angle_entropy`'s ``floor((deg+180)/45)`` bin
+    assignment is a *discontinuous* step function of this value, so even a 1-ULP difference right
+    at a 45-degree-multiple boundary (the common case for exact-integer-pixel diagonal/
+    axis-aligned pans) could flip a turn into a different bin and shift the whole entropy
+    histogram by far more than the 1e-6 parity tolerance -- unlike :func:`mean_abs_turn_angle_deg`,
+    which stays a continuous (1e-6-tolerant) function of the same value."""
     if not path or len(path) < 3:
         return []
     heads = _headings_rad(path)
