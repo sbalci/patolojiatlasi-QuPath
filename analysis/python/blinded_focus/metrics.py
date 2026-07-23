@@ -80,6 +80,24 @@ transit segments between attended regions, not within-dwell noise). This CHANGES
 ``meanSegmentLinearity``'s value for any session whose path dwells for >=2 consecutive samples in
 one hotspot cell (the normal shape of real viewing) -- see :func:`mean_segment_linearity`'s
 docstring for the exact rule.
+
+Tier 3 C6 (same spec doc, additive -- ``docs/superpowers/sdd/t6-report.md``): ``js_divergence`` --
+Jensen-Shannon divergence (base-2, symmetric, bounded [0,1]) between two grids, via a zero-safe KL
+convention (:func:`_kl_terms`) distinct from the pre-existing :func:`kld`'s additive-EPS smoothing
+-- added to ``compare_<slug>.csv`` alongside ``kld``. ``top_k_frac_mask``/
+``precision_recall_at_topk`` -- the reader's top-:data:`PRECISION_K_FRAC` highest-dwell cells vs a
+reference ROI mask, added to ``reference_<slug>.csv`` as ``precisionAtTopK``/``recall``.
+``visit_count_grid``/``visit_count_jaccard`` -- a +1-per-cell-ENTRY (not per tick) visit-count
+grid, compared via Jaccard against the dwell-time top hotspots (``visitCountJaccard`` in
+``metrics.csv``, path-only) -- disagreement between "lingered longest" and "entered most often" is
+a navigation-style signal. ``annotated_area_union_px`` -- area of the UNIONED rasterized
+annotation mask (``annotatedAreaUnionPx`` in ``metrics.csv``), the overlap-correct companion to
+the existing sum-based ``annotatedAreaPx`` (:func:`blinded_focus.analyze.annotations_area_px`,
+which double-counts overlapping Features). Per-slide ``consensus_count_<slug>.csv`` (per-cell
+reader count above :data:`HOTSPOT_THRESH_FRAC`) is built directly in ``analyze.py`` from
+:func:`normalise_max`, reusing the same threshold :func:`count_hotspots` already uses -- no new
+metrics.py function needed for it. All 5 are purely additive; no existing metric's formula or
+value changes.
 """
 import math
 from collections import Counter
@@ -97,6 +115,12 @@ EPS = 1e-12
 #: every rate/weight computation listed in :func:`idle_step_mask`'s docstring. An R port must use
 #: the identical literal `60000`.
 IDLE_GAP_MS = 60_000
+
+#: Tier 3 C6 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): the reader's
+#: "top-K" attended cells for ``precisionAtTopK``/``recall`` are the cells whose dwell value falls
+#: in the top 10% (by value, tie-inclusive -- see :func:`top_k_frac_mask`). An R port must use the
+#: identical literal `0.10`.
+PRECISION_K_FRAC = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +260,48 @@ def kld(ref, pred):
     return float(np.sum(p * np.log((p + EPS) / (q + EPS))))
 
 
+def _kl_terms(p, q):
+    """Elementwise zero-safe KL contribution ``p_i * log2(p_i / q_i)``, with the standard
+    information-theory convention ``0 * log(0/x) = 0`` -- a cell where ``p_i`` is exactly 0
+    contributes 0 regardless of ``q_i`` (never evaluates ``log2(0/q_i)``). This is a DIFFERENT
+    convention from :func:`kld`'s additive-EPS smoothing (which would make even a self-comparison
+    a tiny nonzero number) -- :func:`js_divergence` needs the zero-safe form specifically so a
+    cell where ONE grid is exactly 0 doesn't force a nonzero floor onto the divergence, and so the
+    diagonal self-pair is exactly 0.0. Base-2 (``log2``), pinned for both languages.
+
+    Contract (relied on by :func:`js_divergence`, not re-checked here): ``q_i`` is never exactly 0
+    at a cell where ``p_i`` is nonzero -- true when ``q = (p + other) / 2``, since then
+    ``q_i >= p_i / 2 > 0`` whenever ``p_i > 0``. Called with any other ``q`` risks a divide-by-zero
+    at a cell this convention does not protect."""
+    p = np.asarray(p, dtype=float)
+    q = np.asarray(q, dtype=float)
+    out = np.zeros_like(p)
+    nz = p > 0
+    out[nz] = p[nz] * np.log2(p[nz] / q[nz])
+    return out
+
+
+def js_divergence(a, b):
+    """Jensen-Shannon divergence (base-2), symmetric and bounded in ``[0, 1]``.
+
+    ``P = normalise_sum(a)``, ``Q = normalise_sum(b)``, ``M = (P + Q) / 2``;
+    ``JSD = 0.5*sum(_kl_terms(P, M)) + 0.5*sum(_kl_terms(Q, M))``. Deliberately NOT built on
+    :func:`kld` (whose additive-EPS convention is the wrong tool here -- see :func:`_kl_terms`'s
+    docstring for why). ``M``'s zero-safety contract is satisfied by construction: wherever
+    ``P``/``Q`` is nonzero, ``M`` is too, so :func:`_kl_terms` never divides by zero.
+
+    Exactly ``0.0`` for two identical grids -- including the both-all-zero case (``P=Q=`` all
+    zero, so both ``_kl_terms`` sums are 0 by the zero-safe convention, no special-casing needed --
+    this is the pinned, deliberate convention for ``compare_<slug>.csv``'s diagonal rows and for
+    two grids that are each entirely empty)."""
+    p = normalise_sum(a)
+    q = normalise_sum(b)
+    mgrid = (p + q) / 2.0
+    kl_pm = float(np.sum(_kl_terms(p, mgrid)))
+    kl_qm = float(np.sum(_kl_terms(q, mgrid)))
+    return 0.5 * kl_pm + 0.5 * kl_qm
+
+
 def nss(salmap, mask):
     """Normalized Scanpath Saliency: mean, over ``mask==1`` cells, of the z-scored ``salmap``:
     ``(salmap - mean(salmap)) / std(salmap)``.
@@ -286,6 +352,53 @@ def iou(a, b, thresh=0.1):
         return 0.0
     inter = np.logical_and(am, bm).sum()
     return float(inter) / float(union)
+
+
+def top_k_frac_mask(grid, frac=PRECISION_K_FRAC):
+    """Tier 3 C6: boolean mask of the top ``frac`` (fraction, e.g. ``0.10`` = top 10%)
+    highest-dwell cells in ``grid``: ``k = ceil(frac * n)`` (at least 1 for a non-empty grid),
+    ``cutoff`` = the value of the ``k``-th largest cell (descending order), mask = ``grid >=
+    cutoff``.
+
+    Tie-inclusive **by construction**: this returns the full ``>= cutoff`` set, not a fixed-size
+    top-``k`` slice, so every cell sharing the exact cutoff value is included even when that pushes
+    the mask's True-count above ``k`` (e.g. several cells tied at the cutoff value) -- pinned,
+    deterministic, and identical across languages regardless of a sort's tie-break, since the final
+    mask only depends on the cutoff VALUE, not on which index a sort happened to rank ``k``-th
+    among ties. ``k``-th-largest is computed via a full descending sort (``n`` is small --
+    grid-cell counts, not path lengths -- so this is not a performance concern).
+
+    Returns an all-``False`` mask for an empty (0-length) grid (no cutoff to compute)."""
+    g = np.asarray(grid, dtype=float).flatten()
+    n = g.size
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    k = max(1, int(math.ceil(frac * n)))
+    cutoff = float(np.sort(g)[::-1][k - 1])
+    return g >= cutoff
+
+
+def precision_recall_at_topk(dwell, roi_mask, frac=PRECISION_K_FRAC):
+    """Tier 3 C6: ``precisionAtTopK``/``recall`` of a reader's top-``frac`` highest-dwell cells
+    (:func:`top_k_frac_mask`) against a reference ROI boolean mask (``roi_mask``, same shape as
+    ``dwell``) -- separates "missed target" (low recall) from "wasted attention" (low precision).
+
+    ``precisionAtTopK = |topK ∩ roi_mask| / |topK|`` -- fraction of the reader's own most-attended
+    cells that fall inside the reference region.
+    ``recall = |topK ∩ roi_mask| / |roi_mask|`` -- fraction of the reference region the reader's
+    top-attended cells cover.
+
+    Returns ``(float("nan"), float("nan"))`` (blank in the CSV) if the ROI mask is empty (no
+    reference region defined at all) OR the top-K set is empty (degenerate zero-size grid only --
+    :func:`top_k_frac_mask` otherwise always returns >=1 cell for a non-empty grid)."""
+    topk = top_k_frac_mask(dwell, frac)
+    roi = np.asarray(roi_mask).astype(bool).flatten()
+    topk_n = int(topk.sum())
+    roi_n = int(roi.sum())
+    if topk_n == 0 or roi_n == 0:
+        return float("nan"), float("nan")
+    inter = int(np.logical_and(topk, roi).sum())
+    return float(inter) / float(topk_n), float(inter) / float(roi_n)
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +507,43 @@ def n_revisits(seq):
             revisits += 1
         seen.add(idx)
     return revisits
+
+
+def visit_count_grid(seq, gw, gh):
+    """Tier 3 C6: +1 per cell ENTRY in a run-length-deduped visited-cell sequence (see
+    :func:`visited_sequence`) -- NOT per raw path tick, so a long dwell in one cell counts as a
+    single entry, not one count per sample. Returns a flat ``(gw*gh,)`` float array (float, not
+    int, to match :func:`top_hotspots`'s expected grid dtype; every value is still a whole number
+    of dwell-run entries)."""
+    gw, gh = int(gw), int(gh)
+    counts = np.zeros(gw * gh, dtype=float)
+    for idx in seq:
+        counts[idx] += 1.0
+    return counts
+
+
+def visit_count_jaccard(dwell_grid, gw, gh, seq, top_n=5):
+    """Tier 3 C6: Jaccard similarity between the top-``top_n`` DWELL-TIME hotspot cells and the
+    top-``top_n`` VISIT-COUNT hotspot cells (:func:`visit_count_grid`) at the same ``(gw, gh)``
+    grid resolution -- disagreement between "where the reader lingered longest" and "which cells
+    the reader entered most often" is a navigation-style signal (e.g. one long dwell vs many brief
+    revisits). Both hotspot sets reuse :func:`top_hotspots` (deterministic tie-break) so flat cell
+    indices align 1:1 between the two grids.
+
+    ``float("nan")`` (blank) if either hotspot set is empty (only possible for a degenerate
+    zero-size grid -- :func:`top_hotspots` otherwise always returns >=1 cell for any grid with
+    >=1 cell)."""
+    visit_grid = visit_count_grid(seq, gw, gh)
+    dwell_top = top_hotspots(dwell_grid, gw, gh, top_n)
+    visit_top = top_hotspots(visit_grid, gw, gh, top_n)
+    gw_i = int(gw)
+    set_a = set(row * gw_i + col for row, col, _ in dwell_top)
+    set_b = set(row * gw_i + col for row, col, _ in visit_top)
+    if not set_a or not set_b:
+        return float("nan")
+    inter = len(set_a & set_b)
+    union = len(set_a | set_b)
+    return float(inter) / float(union) if union > 0 else float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -1059,6 +1209,27 @@ def enrichment_ratio(grid, mask):
         return float("nan")
     mean_in = float(g[msk].mean())
     return mean_in / mean_out
+
+
+def annotated_area_union_px(mask, gw, gh, img_w, img_h):
+    """Tier 3 C6: area (image px^2) of the UNIONED rasterized annotation mask
+    (:func:`blinded_focus.analyze.rasterize_feature_collection`) -- the overlap-correct companion
+    to the existing sum-based ``annotatedAreaPx``
+    (:func:`blinded_focus.analyze.annotations_area_px`, which double-counts overlapping/nested
+    Features -- see its docstring).
+
+    ``count(mask) * (img_w/gw) * (img_h/gh)`` -- each ``True`` cell contributes its rasterized
+    footprint area (approximating each grid cell as an ``img_w/gw`` x ``img_h/gh`` rectangle), NOT
+    the exact vector polygon-union area (no polygon-clipping library is used here, consistent with
+    the rest of this module's dependency-free approach -- the raster resolution is the grid's own
+    ``(gw, gh)``, same as every other per-session native-grid metric).
+
+    ``0.0`` for an all-``False`` (no-annotations, or a degenerate zero-size grid) mask."""
+    gw, gh = int(gw), int(gh)
+    if gw <= 0 or gh <= 0:
+        return 0.0
+    cell_area = (float(img_w) / gw) * (float(img_h) / gh)
+    return float(np.count_nonzero(mask)) * cell_area
 
 
 def annotation_reentry_count(path, mask, gw, gh, img_w, img_h):

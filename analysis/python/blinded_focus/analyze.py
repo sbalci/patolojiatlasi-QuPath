@@ -42,10 +42,37 @@ Output files (written to ``--out DIR``):
   data or zero on-slide points. (Tier 3 C4, additive) ``meanSegmentLinearity`` -- mean
   :func:`blinded_focus.metrics.linearity` over sub-paths split at the session's own top-hotspot
   cells, path-only (blank if fewer than 2 hotspots or fewer than 2 boundary points are found).
+  (Tier 3 C6, additive) ``annotatedAreaUnionPx`` -- area of the UNIONED rasterized annotation mask
+  (see :func:`blinded_focus.metrics.annotated_area_union_px`), always populated (``0.0`` with no
+  annotations) — the overlap-correct companion to the sum-based ``annotatedAreaPx`` above (which
+  double-counts overlapping/nested annotation Features); and ``visitCountJaccard`` -- Jaccard
+  similarity between the session's dwell-time top hotspots and its visit-count top hotspots (see
+  :func:`blinded_focus.metrics.visit_count_jaccard`), path-only (blank without a path). Both
+  columns are appended at the END of the CSV (after ``meanSegmentLinearity``), not interleaved
+  with the columns they conceptually relate to, per the additive/append-only column-order
+  invariant.
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
-  per-session ``regionCoveragePct`` (vs the slide consensus).
-- per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``.
+  per-session ``regionCoveragePct`` (vs the slide consensus). (Tier 3 C6, appended) ``jsDivergence``
+  -- Jensen-Shannon divergence (base-2, symmetric, bounded ``[0, 1]``; see
+  :func:`blinded_focus.metrics.js_divergence`) of every pairwise row (not diagonal-only — unlike
+  ``diffFromConsensus``/``coincidenceLevel``, this is a genuine pairwise quantity), exactly ``0.0``
+  on the diagonal.
+- per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``. (Tier 3 C6, appended)
+  ``precisionAtTopK``/``recall`` -- the reader's top-:data:`blinded_focus.metrics.PRECISION_K_FRAC`
+  (10%) highest-dwell cells vs the SAME reference mask this file already compares against (whichever
+  of ``--roi``/``--reference`` built it — see :func:`blinded_focus.metrics.precision_recall_at_topk`),
+  separating "missed target" (low recall) from "wasted attention" (low precision). Blank if the
+  reference mask or the top-K set is empty.
+- per slide, when the slide has >=2 sessions (Tier 3 C6): ``consensus_count_<slug>.csv`` — the
+  spatial structure ``coincidenceLevel`` collapses to one scalar: for every grid cell (on the
+  slide's common resampled grid) with ``nReaders`` (count of sessions whose own
+  :func:`blinded_focus.metrics.normalise_max`-normalized dwell exceeds
+  :data:`HOTSPOT_THRESH_FRAC`, the SAME threshold :func:`blinded_focus.metrics.count_hotspots`
+  already uses for ``nHotspots`` — a different, coarser threshold than ``IOU_THRESH`` used by
+  ``coincidenceLevel`` itself) ``>= 1``: ``cellRow``, ``cellCol``, ``nReaders``. Cells with
+  ``nReaders == 0`` are omitted (not written). Written (possibly with zero data rows) for every
+  slide with >=2 sessions, regardless of whether any cell clears the threshold.
 - per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv`` (``sessionA``,
   ``sessionB``, ``levenshteinSim``, ``transitionEntropy`` (diagonal-only), plus (Tier 3 C3,
   additive) ``dtwDistance`` -- Dynamic Time Warping between the two sessions' z-normalized
@@ -695,6 +722,10 @@ def analyze(
             n_ann = len(ann_fc.get("features", []) or [])
             ann_area = annotations_area_px(ann_fc)
             native_ann_mask = rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
+            # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): overlap-correct companion to
+            # ann_area above -- reuses the SAME native_ann_mask (no re-rasterization), so this is
+            # always in sync with dwellInAnnotationPct/enrichmentRatio's mask.
+            ann_area_union = m.annotated_area_union_px(native_ann_mask, gw, gh, img_w, img_h)
             # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the
             # slide's common (tw, th) grid -- resample the already-rasterized native mask (as
             # 0.0/1.0 floats) via the same nearest-neighbour resampler used for dwell grids,
@@ -781,6 +812,16 @@ def analyze(
                 "mouseCoveragePct": "",
                 "mouseEntropy": "",
                 "meanSegmentLinearity": "",
+                # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended at the END of
+                # metrics.csv's fieldnames (additive/append-only column order), NOT interleaved
+                # next to annotatedAreaPx/meanSegmentLinearity above despite the conceptual
+                # relation -- see the module docstring's Tier 3 C6 note.
+                # annotatedAreaUnionPx is grid+annotation-mask-only (no path required), so it's
+                # always populated (0.0 with no annotations), like annotatedAreaPx above.
+                "annotatedAreaUnionPx": ann_area_union,
+                # visitCountJaccard is path-only (blank without a path), populated in the `if
+                # path:` block below.
+                "visitCountJaccard": "",
             }
 
             path = f.get("path")
@@ -860,6 +901,15 @@ def analyze(
                 # top_hotspots call uses), not the slide's common (tw, th) or a scanpath raster.
                 row["meanSegmentLinearity"] = m.mean_segment_linearity(
                     path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N
+                )
+                # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the
+                # visit-count grid needs the session's own NATIVE (gw, gh) visited-cell sequence,
+                # recomputed here (NOT `path_seq[sid]`, which is built at the slide's common
+                # (tw, th) resolution for cross-session scanpath_<slug>.csv comparisons) -- same
+                # native-resolution convention meanSegmentLinearity/hotspots_<slug>.csv use.
+                native_seq = m.visited_sequence(path, gw, gh, img_w, img_h)
+                row["visitCountJaccard"] = m.visit_count_jaccard(
+                    grid, gw, gh, native_seq, HOTSPOT_TOP_N
                 )
 
             metrics_rows.append(row)
@@ -942,7 +992,11 @@ def analyze(
         # This slide's just-appended metrics_rows entries (one per session, same order as
         # `sessions`) -- reused below for the zoom/scanning summary aggregates.
         slide_metric_rows = metrics_rows[-len(sessions):]
-        consensus_grid = np.mean([m.normalise_max(resampled[sid]) for sid in session_ids], axis=0)
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): factored out of the consensus_grid
+        # one-liner below so consensus_count_<slug>.csv can reuse the SAME per-session normalized
+        # grids (identical np.mean input as before -- byte-identical consensus_grid, no drift).
+        norm_grids = [m.normalise_max(resampled[sid]) for sid in session_ids]
+        consensus_grid = np.mean(norm_grids, axis=0)
         # Slide-level (not per-session) statistic -- placed on exactly one row below (see module
         # docstring's "coincidenceLevel" convention note).
         coincidence_val = m.coincidence_level([resampled[sid] for sid in session_ids], IOU_THRESH)
@@ -959,6 +1013,10 @@ def analyze(
                     "diffFromConsensus": "",
                     "coincidenceLevel": "",
                     "regionCoveragePct": "",
+                    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): a genuine PAIRWISE
+                    # quantity (unlike diffFromConsensus/coincidenceLevel), so it is computed on
+                    # EVERY row, not diagonal-only -- exactly 0.0 for a==b (self-comparison).
+                    "jsDivergence": m.js_divergence(resampled[a], resampled[b]),
                 }
                 if a == b:
                     row["diffFromConsensus"] = 1.0 - m.cc(resampled[a], consensus_grid)
@@ -972,12 +1030,44 @@ def analyze(
             os.path.join(out_dir, f"compare_{slide_slug}.csv"),
             compare_rows,
             ["sessionA", "sessionB", "cc", "sim", "iou", "diffFromConsensus",
-             "coincidenceLevel", "regionCoveragePct"],
+             "coincidenceLevel", "regionCoveragePct",
+             # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order
+             # above is unchanged.
+             "jsDivergence"],
         )
         fig.heatmap(
             consensus_grid, tw, th, f"Consensus - {slide_key}",
             os.path.join(out_dir, f"consensus_{slide_slug}.png"),
         )
+
+        # ------------------------------------------------------------------
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): per-cell reader-count "weak
+        # annotation" map -- the spatial structure coincidenceLevel collapses to one scalar.
+        # Reuses norm_grids (same per-session normalise_max arrays as consensus_grid above, at the
+        # slide's common (tw, th) grid) and HOTSPOT_THRESH_FRAC (the SAME threshold
+        # count_hotspots/nHotspots already use -- a coarser per-session-max-relative threshold,
+        # distinct from coincidence_level's own IOU_THRESH). Written whenever the slide has >=2
+        # sessions (a single session's "reader count" is a degenerate/uninformative 0-or-1 map),
+        # regardless of whether any cell actually clears the threshold (possibly a header-only,
+        # zero-row file -- blank-not-crash, not a missing file).
+        # ------------------------------------------------------------------
+        if len(session_ids) >= 2:
+            reader_counts = np.sum(
+                [g > HOTSPOT_THRESH_FRAC for g in norm_grids], axis=0
+            )
+            consensus_count_rows = []
+            for idx in range(tw * th):
+                n_readers = int(reader_counts[idx])
+                if n_readers >= 1:
+                    row_i, col_i = divmod(idx, tw)
+                    consensus_count_rows.append({
+                        "cellRow": row_i, "cellCol": col_i, "nReaders": n_readers,
+                    })
+            _write_csv(
+                os.path.join(out_dir, f"consensus_count_{slide_slug}.csv"),
+                consensus_count_rows,
+                ["cellRow", "cellCol", "nReaders"],
+            )
 
         # ------------------------------------------------------------------
         # Tier 1 A5: top-hotspots export -- surfaces the already-implemented
@@ -1151,6 +1241,11 @@ def analyze(
                     time_off = float(other[~ref_mask].sum())
                     denom = max(int(ref_mask.sum()), 1)
                     ref_cov = float(np.count_nonzero(other[ref_mask] > 0)) / denom
+                    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): precisionAtTopK/recall vs
+                    # the SAME ref_mask this row already compares against (whichever of
+                    # --roi/--reference built it above) -- see
+                    # blinded_focus.metrics.precision_recall_at_topk's docstring.
+                    precision_at_topk, recall_val = m.precision_recall_at_topk(other, ref_mask)
                     return {
                         "session": labels.get(sid, sid),
                         "nss": m.nss(other, ref_mask),
@@ -1160,6 +1255,8 @@ def analyze(
                         "refCoveragePct": ref_cov * 100.0,
                         "timeOnRefMs": time_on,
                         "timeOffRefMs": time_off,
+                        "precisionAtTopK": precision_at_topk,
+                        "recall": recall_val,
                     }
 
                 ref_rows = [_ref_row(sid) for sid in session_ids if sid != reference]
@@ -1171,7 +1268,10 @@ def analyze(
                     os.path.join(out_dir, f"reference_{slide_slug}.csv"),
                     ref_rows,
                     ["session", "nss", "aucJudd", "cc", "iou", "refCoveragePct",
-                     "timeOnRefMs", "timeOffRefMs"],
+                     "timeOnRefMs", "timeOffRefMs",
+                     # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column
+                     # order above is unchanged.
+                     "precisionAtTopK", "recall"],
                 )
                 reference_summaries.append({"slide": slide_key, "slug": slide_slug, "rows": ref_rows})
 
@@ -1412,7 +1512,10 @@ def analyze(
          # Tier 3 C2/C4 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
          # column order above (incl. Tier 1/2/C1) is unchanged. C2: mouse-dwell coverage/entropy.
          # C4: segment-level linearity.
-         "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity"],
+         "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
+         # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
+         "annotatedAreaUnionPx", "visitCountJaccard"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):

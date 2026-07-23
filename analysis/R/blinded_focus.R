@@ -46,6 +46,12 @@ EPS <- 1e-12
 #: `IDLE_GAP_MS` literal exactly.
 IDLE_GAP_MS <- 60000
 
+#: Tier 3 C6 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): the reader's
+#: "top-K" attended cells for `precisionAtTopK`/`recall` are the cells whose dwell value falls in
+#: the top 10% (by value, tie-inclusive -- see `top_k_frac_mask`). Matches the Python toolkit's
+#: `PRECISION_K_FRAC` literal exactly.
+PRECISION_K_FRAC <- 0.10
+
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
 #: /2, /3, /4, /5 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ additionally have
 #: "path" (/3 points are 5-element `[tRelMs,cx,cy,w,h]`; /4 points are 6-element
@@ -545,6 +551,47 @@ kld <- function(ref, pred) {
   sum(p * log((p + EPS) / (q + EPS)))
 }
 
+#' Elementwise zero-safe KL contribution `p_i * log2(p_i / q_i)`, with the standard
+#' information-theory convention `0 * log(0/x) = 0` -- a cell where `p_i` is exactly 0 contributes
+#' 0 regardless of `q_i` (never evaluates `log2(0/q_i)`). This is a DIFFERENT convention from
+#' `kld`'s additive-EPS smoothing (which would make even a self-comparison a tiny nonzero number)
+#' -- `js_divergence` needs the zero-safe form specifically so a cell where ONE grid is exactly 0
+#' doesn't force a nonzero floor onto the divergence, and so the diagonal self-pair is exactly 0.0.
+#' Base-2 (`log2`), pinned to match the Python toolkit's `_kl_terms` exactly.
+#'
+#' Contract (relied on by `js_divergence`, not re-checked here): `q_i` is never exactly 0 at a cell
+#' where `p_i` is nonzero -- true when `q = (p + other) / 2`, since then `q_i >= p_i / 2 > 0`
+#' whenever `p_i > 0`.
+.kl_terms <- function(p, q) {
+  p <- as.numeric(p)
+  q <- as.numeric(q)
+  out <- rep(0.0, length(p))
+  nz <- p > 0
+  out[nz] <- p[nz] * log2(p[nz] / q[nz])
+  out
+}
+
+#' Jensen-Shannon divergence (base-2), symmetric and bounded in `[0, 1]`.
+#'
+#' `P = normalise_sum(a)`, `Q = normalise_sum(b)`, `M = (P + Q) / 2`;
+#' `JSD = 0.5*sum(.kl_terms(P, M)) + 0.5*sum(.kl_terms(Q, M))`. Deliberately NOT built on `kld`
+#' (whose additive-EPS convention is the wrong tool here -- see `.kl_terms`'s docs for why). `M`'s
+#' zero-safety contract is satisfied by construction: wherever `P`/`Q` is nonzero, `M` is too, so
+#' `.kl_terms` never divides by zero.
+#'
+#' Exactly `0.0` for two identical grids -- including the both-all-zero case (`P=Q=` all zero, so
+#' both `.kl_terms` sums are 0 by the zero-safe convention, no special-casing needed -- this is the
+#' pinned, deliberate convention for `compare_<slug>.csv`'s diagonal rows and for two grids that
+#' are each entirely empty).
+js_divergence <- function(a, b) {
+  p <- normalise_sum(a)
+  q <- normalise_sum(b)
+  mgrid <- (p + q) / 2.0
+  kl_pm <- sum(.kl_terms(p, mgrid))
+  kl_qm <- sum(.kl_terms(q, mgrid))
+  0.5 * kl_pm + 0.5 * kl_qm
+}
+
 #' Normalized Scanpath Saliency: mean, over `mask==1` cells, of the z-scored `salmap`
 #' (`(salmap - mean(salmap)) / population_sd(salmap)`). `mask` is a binary attended-region vector
 #' (same length as `salmap`). Returns 0.0 if `salmap` is constant or the mask has no positive
@@ -591,6 +638,52 @@ iou <- function(a, b, thresh = 0.1) {
   }
   inter_n <- sum(am & bm)
   inter_n / union_n
+}
+
+#' Tier 3 C6: boolean mask of the top `frac` (fraction, e.g. `0.10` = top 10%) highest-dwell cells
+#' in `grid`: `k = ceiling(frac * n)` (at least 1 for a non-empty grid), `cutoff` = the value of
+#' the `k`-th largest cell (descending order), mask = `grid >= cutoff`.
+#'
+#' Tie-inclusive **by construction**: this returns the full `>= cutoff` set, not a fixed-size
+#' top-`k` slice, so every cell sharing the exact cutoff value is included even when that pushes
+#' the mask's True-count above `k` -- pinned, deterministic, and identical across languages
+#' regardless of a sort's tie-break, since the final mask only depends on the cutoff VALUE, not on
+#' which index a sort happened to rank `k`-th among ties.
+#'
+#' Returns an all-`FALSE` (length-0) mask for an empty (0-length) grid (no cutoff to compute).
+top_k_frac_mask <- function(grid, frac = PRECISION_K_FRAC) {
+  g <- as.numeric(grid)
+  n <- length(g)
+  if (n == 0) {
+    return(logical(0))
+  }
+  k <- max(1L, as.integer(ceiling(frac * n)))
+  cutoff <- sort(g, decreasing = TRUE)[k]
+  g >= cutoff
+}
+
+#' Tier 3 C6: `precisionAtTopK`/`recall` of a reader's top-`frac` highest-dwell cells
+#' (`top_k_frac_mask`) against a reference ROI boolean mask (`roi_mask`, same length as `dwell`) --
+#' separates "missed target" (low recall) from "wasted attention" (low precision).
+#'
+#' `precisionAtTopK = |topK INTERSECT roi_mask| / |topK|` -- fraction of the reader's own
+#' most-attended cells that fall inside the reference region.
+#' `recall = |topK INTERSECT roi_mask| / |roi_mask|` -- fraction of the reference region the
+#' reader's top-attended cells cover.
+#'
+#' Returns `list(precision = NaN, recall = NaN)` (blank in the CSV) if the ROI mask is empty (no
+#' reference region defined at all) OR the top-K set is empty (degenerate zero-size grid only --
+#' `top_k_frac_mask` otherwise always returns >=1 cell for a non-empty grid).
+precision_recall_at_topk <- function(dwell, roi_mask, frac = PRECISION_K_FRAC) {
+  topk <- top_k_frac_mask(dwell, frac)
+  roi <- as.logical(roi_mask)
+  topk_n <- sum(topk)
+  roi_n <- sum(roi)
+  if (topk_n == 0 || roi_n == 0) {
+    return(list(precision = NaN, recall = NaN))
+  }
+  inter <- sum(topk & roi)
+  list(precision = inter / topk_n, recall = inter / roi_n)
 }
 
 # ---------------------------------------------------------------------------
@@ -734,6 +827,47 @@ n_revisits <- function(seq) {
     seen <- c(seen, idx)
   }
   revisits
+}
+
+#' Tier 3 C6: +1 per cell ENTRY in a run-length-deduped visited-cell sequence (see
+#' `visited_sequence`) -- NOT per raw path tick, so a long dwell in one cell counts as a single
+#' entry, not one count per sample. `seq` is 0-based (as returned by `visited_sequence`; offset by
+#' +1 for R's 1-based vector indexing here). Returns a flat `(gw*gh,)` numeric vector (every value
+#' is a whole number of dwell-run entries, matching the Python toolkit's float-dtype convention).
+visit_count_grid <- function(seq, gw, gh) {
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  counts <- rep(0.0, gw * gh)
+  for (idx in seq) {
+    counts[idx + 1L] <- counts[idx + 1L] + 1.0
+  }
+  counts
+}
+
+#' Tier 3 C6: Jaccard similarity between the top-`top_n` DWELL-TIME hotspot cells and the
+#' top-`top_n` VISIT-COUNT hotspot cells (`visit_count_grid`) at the same `(gw, gh)` grid
+#' resolution -- disagreement between "where the reader lingered longest" and "which cells the
+#' reader entered most often" is a navigation-style signal (e.g. one long dwell vs many brief
+#' revisits). Both hotspot sets reuse `top_hotspots` (deterministic tie-break) so flat cell indices
+#' align 1:1 between the two grids.
+#'
+#' `NaN` (blank) if either hotspot set is empty (only possible for a degenerate zero-size grid --
+#' `top_hotspots` otherwise always returns >=1 cell for any grid with >=1 cell).
+visit_count_jaccard <- function(dwell_grid, gw, gh, seq, top_n = 5) {
+  gw_i <- as.integer(gw); gh_i <- as.integer(gh)
+  visit_grid <- visit_count_grid(seq, gw_i, gh_i)
+  dwell_top <- top_hotspots(dwell_grid, gw_i, gh_i, top_n)
+  visit_top <- top_hotspots(visit_grid, gw_i, gh_i, top_n)
+  set_a <- vapply(dwell_top, function(h) h$row * gw_i + h$col, numeric(1))
+  set_b <- vapply(visit_top, function(h) h$row * gw_i + h$col, numeric(1))
+  if (length(set_a) == 0 || length(set_b) == 0) {
+    return(NaN)
+  }
+  inter <- length(intersect(set_a, set_b))
+  uni <- length(union(set_a, set_b))
+  if (uni == 0) {
+    return(NaN)
+  }
+  inter / uni
 }
 
 # ---------------------------------------------------------------------------
@@ -1411,6 +1545,27 @@ enrichment_ratio <- function(grid, mask) {
   }
   mean_in <- mean(g[msk])
   mean_in / mean_out
+}
+
+#' Tier 3 C6: area (image px^2) of the UNIONED rasterized annotation mask
+#' (`rasterize_feature_collection`) -- the overlap-correct companion to the existing sum-based
+#' `annotatedAreaPx` (`annotations_area_px`, which double-counts overlapping/nested Features -- see
+#' its docs).
+#'
+#' `count(mask) * (img_w/gw) * (img_h/gh)` -- each `TRUE` cell contributes its rasterized footprint
+#' area (approximating each grid cell as an `img_w/gw` x `img_h/gh` rectangle), NOT the exact
+#' vector polygon-union area (no polygon-clipping library is used here, consistent with the rest of
+#' this file's dependency-free approach -- the raster resolution is the grid's own `(gw, gh)`, same
+#' as every other per-session native-grid metric).
+#'
+#' `0.0` for an all-`FALSE` (no-annotations, or a degenerate zero-size grid) mask.
+annotated_area_union_px <- function(mask, gw, gh, img_w, img_h) {
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(0.0)
+  }
+  cell_area <- (as.numeric(img_w) / gw) * (as.numeric(img_h) / gh)
+  sum(as.logical(mask)) * cell_area
 }
 
 #' Count of scanpath re-entries into the annotated region (Brunyé 2017's re-entry rate).
@@ -2900,6 +3055,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       n_ann <- length(ann_fc$features)
       ann_area <- annotations_area_px(ann_fc)
       native_ann_mask <- rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
+      # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): overlap-correct companion to ann_area
+      # above -- reuses the SAME native_ann_mask (no re-rasterization), so this is always in sync
+      # with dwellInAnnotationPct/enrichmentRatio's mask.
+      ann_area_union <- annotated_area_union_px(native_ann_mask, gw, gh, img_w, img_h)
       # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the slide's
       # common (tw, th) grid -- resample the already-rasterized native mask (as 0.0/1.0 doubles)
       # via the same nearest-neighbour resampler used for dwell grids, rather than re-rasterizing
@@ -2982,7 +3141,15 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # linearity (path-only, populated in the path block below).
         mouseCoveragePct = NA,
         mouseEntropy = NA,
-        meanSegmentLinearity = NA
+        meanSegmentLinearity = NA,
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended at the END of metrics.csv's
+        # fieldnames (additive/append-only column order), NOT interleaved next to
+        # annotatedAreaPx/meanSegmentLinearity above despite the conceptual relation.
+        # annotatedAreaUnionPx is grid+annotation-mask-only (no path required), so it's always
+        # populated (0.0 with no annotations), like annotatedAreaPx above.
+        annotatedAreaUnionPx = ann_area_union,
+        # visitCountJaccard is path-only (NA without a path), populated in the path block below.
+        visitCountJaccard = NA
       )
 
       path <- f$path
@@ -3058,6 +3225,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # recorded dwell grid (same resolution hotspots_<slug>.csv's top_hotspots call uses), not
         # the slide's common (tw, th) or a scanpath raster.
         row$meanSegmentLinearity <- mean_segment_linearity(path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N)
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the visit-count
+        # grid needs the session's own NATIVE (gw, gh) visited-cell sequence, recomputed here (NOT
+        # `path_seq[[sid]]`, which is built at the slide's common (tw, th) resolution for
+        # cross-session scanpath_<slug>.csv comparisons) -- same native-resolution convention
+        # meanSegmentLinearity/hotspots_<slug>.csv use.
+        native_seq <- visited_sequence(path, gw, gh, img_w, img_h)
+        row$visitCountJaccard <- visit_count_jaccard(grid, gw, gh, native_seq, HOTSPOT_TOP_N)
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
 
@@ -3137,8 +3311,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     slide_metric_rows <- metrics_rows[
       seq(length(metrics_rows) - length(session_ids) + 1, length(metrics_rows))
     ]
-    consensus_grid <- Reduce(`+`, lapply(session_ids, function(sid) normalise_max(resampled[[sid]]))) /
-      length(session_ids)
+    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): factored out of the consensus_grid
+    # one-liner below so consensus_count_<slug>.csv can reuse the SAME per-session normalized
+    # grids (identical Reduce(`+`, ...) input as before -- byte-identical consensus_grid, no drift).
+    norm_grids <- lapply(session_ids, function(sid) normalise_max(resampled[[sid]]))
+    consensus_grid <- Reduce(`+`, norm_grids) / length(session_ids)
     # Slide-level (not per-session) statistic -- placed on exactly one row below (see
     # blinded_focus.analyze's module docstring "coincidenceLevel" convention note; the two
     # toolkits must place it identically for their compare_<slug>.csv files to diff-match).
@@ -3156,7 +3333,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           iou = iou(resampled[[a]], resampled[[b]], IOU_THRESH),
           diffFromConsensus = NA,
           coincidenceLevel = NA,
-          regionCoveragePct = NA
+          regionCoveragePct = NA,
+          # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): a genuine PAIRWISE quantity (unlike
+          # diffFromConsensus/coincidenceLevel), so it is computed on EVERY row, not
+          # diagonal-only -- exactly 0.0 for a==b (self-comparison).
+          jsDivergence = js_divergence(resampled[[a]], resampled[[b]])
         )
         if (identical(a, b)) {
           r$diffFromConsensus <- 1.0 - cc(resampled[[a]], consensus_grid)
@@ -3171,12 +3352,42 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     write_csv_tidy(
       compare_rows, file.path(out_dir, paste0("compare_", slide_slug, ".csv")),
       c("sessionA", "sessionB", "cc", "sim", "iou", "diffFromConsensus",
-        "coincidenceLevel", "regionCoveragePct")
+        "coincidenceLevel", "regionCoveragePct",
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order above
+        # is unchanged.
+        "jsDivergence")
     )
     plot_heatmap(
       consensus_grid, tw, th, paste0("Consensus - ", slide_key),
       file.path(out_dir, paste0("consensus_", slide_slug, ".png"))
     )
+
+    # ------------------------------------------------------------------
+    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): per-cell reader-count "weak annotation"
+    # map -- the spatial structure coincidenceLevel collapses to one scalar. Reuses norm_grids
+    # (same per-session normalise_max vectors as consensus_grid above, at the slide's common
+    # (tw, th) grid) and HOTSPOT_THRESH_FRAC (the SAME threshold count_hotspots/nHotspots already
+    # use -- a coarser per-session-max-relative threshold, distinct from coincidence_level's own
+    # IOU_THRESH). Written whenever the slide has >=2 sessions (a single session's "reader count"
+    # is a degenerate/uninformative 0-or-1 map), regardless of whether any cell actually clears the
+    # threshold (possibly a header-only, zero-row file -- blank-not-crash, not a missing file).
+    # ------------------------------------------------------------------
+    if (length(session_ids) >= 2) {
+      reader_counts <- Reduce(`+`, lapply(norm_grids, function(g) as.numeric(g > HOTSPOT_THRESH_FRAC)))
+      consensus_count_rows <- list()
+      for (idx0 in seq_len(tw * th) - 1L) {
+        n_readers <- as.integer(reader_counts[idx0 + 1])
+        if (n_readers >= 1) {
+          consensus_count_rows[[length(consensus_count_rows) + 1]] <- list(
+            cellRow = idx0 %/% tw, cellCol = idx0 %% tw, nReaders = n_readers
+          )
+        }
+      }
+      write_csv_tidy(
+        consensus_count_rows, file.path(out_dir, paste0("consensus_count_", slide_slug, ".csv")),
+        c("cellRow", "cellCol", "nReaders")
+      )
+    }
 
     # ------------------------------------------------------------------
     # Tier 1 A5: top-hotspots export -- surfaces the already-implemented top_hotspots at each
@@ -3353,6 +3564,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           time_off <- sum(other[!ref_mask])
           denom <- max(sum(ref_mask), 1)
           ref_cov <- sum(other[ref_mask] > 0) / denom
+          # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): precisionAtTopK/recall vs the SAME
+          # ref_mask this row already compares against (whichever of --roi/--reference built it
+          # above) -- see precision_recall_at_topk's docs.
+          pr <- precision_recall_at_topk(other, ref_mask)
           list(
             session = label_for(sid, labels),
             nss = nss(other, ref_mask),
@@ -3361,10 +3576,20 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             iou = iou(other, ref_map, IOU_THRESH),
             refCoveragePct = ref_cov * 100.0,
             timeOnRefMs = time_on,
-            timeOffRefMs = time_off
+            timeOffRefMs = time_off,
+            precisionAtTopK = pr$precision,
+            recall = pr$recall
           )
         }
-        other_sids <- session_ids[session_ids != reference]
+        # Pre-existing latent bug fix (found by Tier 3 C6's roi-only/no-reference fixture, the
+        # first R test to exercise this combination): `session_ids != reference` when
+        # `reference` is NULL evaluates to `logical(0)` (R's `!=` against NULL is length-0, not
+        # broadcast), so `session_ids[logical(0)]` silently returns an EMPTY vector rather than
+        # every session -- diverging from the Python toolkit's `sid != reference` (always TRUE
+        # for a string `sid` when `reference is None`), which correctly keeps every session. Guard
+        # explicitly so a `--roi`-only call (no `--reference`) includes every session, matching
+        # Python exactly; unaffected when `reference` is a real string (identical to before).
+        other_sids <- if (is.null(reference)) session_ids else session_ids[session_ids != reference]
         ref_rows <- lapply(other_sids, ref_row_fn)
         if (!is.null(reference) && reference %in% session_ids) {
           ref_rows <- c(list(ref_row_fn(reference)), ref_rows)
@@ -3373,7 +3598,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         ref_rows <- ref_rows[order(-nss_vals)]
         write_csv_tidy(
           ref_rows, file.path(out_dir, paste0("reference_", slide_slug, ".csv")),
-          c("session", "nss", "aucJudd", "cc", "iou", "refCoveragePct", "timeOnRefMs", "timeOffRefMs")
+          c("session", "nss", "aucJudd", "cc", "iou", "refCoveragePct", "timeOnRefMs", "timeOffRefMs",
+            # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order
+            # above is unchanged.
+            "precisionAtTopK", "recall")
         )
         reference_summaries[[length(reference_summaries) + 1]] <- list(
           slide = slide_key, slug = slide_slug, rows = ref_rows
@@ -3630,7 +3858,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       # Tier 3 C2/C4 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
       # column order above (incl. Tier 1/2/C1) is unchanged. C2: mouse-dwell coverage/entropy.
       # C4: segment-level linearity.
-      "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity"
+      "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
+      # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+      # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
+      "annotatedAreaUnionPx", "visitCountJaccard"
     )
   )
 

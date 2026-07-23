@@ -67,7 +67,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from blinded_focus.analyze import analyze, rasterize_feature_collection  # noqa: E402
+from blinded_focus.analyze import analyze, rasterize_feature_collection, annotations_area_px  # noqa: E402
 from blinded_focus import io as bf_io  # noqa: E402
 from blinded_focus import metrics as bf_metrics  # noqa: E402
 
@@ -634,6 +634,147 @@ def build_seglin_dwell_fragment():
         "seglindwell1", 3, grid, 400, 5, path=path,
         slide_key=SEGLIN_DWELL_SLIDE_KEY,
     )
+
+
+C6_SLIDE_KEY = "sha256:selftest-slide-c6-0001"
+#: Tier 3 C6 fixture: its own small custom grid/image dims (GW=GH=4, IMG_W=IMG_H=400 -> cell =
+#: 100x100 image px), deliberately NOT the shared module GW/GH/IMG_W/IMG_H (8/8/2000/1500) --
+#: every documented number below is exactly hand-derivable at this resolution (verified against
+#: the Python implementation before this fixture was written; see docs/superpowers/sdd/t6-report.md).
+#:
+#: 2 sessions on one slide (>=2 needed for compare_<slug>.csv's jsDivergence + consensus_count):
+#:
+#: c6a (schema/3, HAS a path + an overlapping-annotation pair): grid = 100.0 at flat idx0 (row0,
+#:   col0) and idx1 (row0,col1), 0.0 elsewhere (14 cells).
+#:   - precisionAtTopK/recall (frac=0.10, n=16 -> k=ceil(1.6)=2): cutoff = 2nd-largest value = 100
+#:     (idx0/idx1 tie) -> topK={idx0,idx1}. ROI (below) = row0's 4 cells {idx0,idx1,idx2,idx3} ->
+#:     intersection={idx0,idx1} (size2) -> precisionAtTopK=2/2=1.0, recall=2/4=0.5.
+#:   - path alternates between cell1 (row0,col1, center (150,50)) and cell8 (row2,col0, center
+#:     (50,250)), 9 points -> visited_sequence (native gw=gh=4, no consecutive dupes to dedup) =
+#:     [1,8,1,8,1,8,1,8,1] -> visit_count_grid: idx1=5, idx8=4, rest 0. DIRECT-unit
+#:     visit_count_jaccard(top_n=2): dwell top2={idx0,idx1} (tie at 100, ascending-index
+#:     tie-break), visit top2={idx1,idx8} -> jaccard = |{idx1}| / |{idx0,idx1,idx8}| = 1/3 EXACTLY.
+#:     (The pipeline itself uses HOTSPOT_TOP_N=5, a different -- and NOT independently
+#:     hand-verified as "clean" -- number; the pipeline check only bounds-checks it in [0,1] and
+#:     leaves exactness to the Python<->R parity diff. See t6-report.md.)
+#:   - annotations: an outer rectangle [100,100]-[300,300] (area 200*200=40000) with a smaller
+#:     rectangle [140,140]-[260,260] (area 120*120=14400) nested fully inside it. Both rasterize
+#:     (native gw=gh=4) to the SAME 4 cells -- rows/cols {1,2} (centers 150,250 fall inside both
+#:     rects; centers 50,350 fall inside neither) -- so the true raster UNION is those 4 cells:
+#:     annotatedAreaUnionPx = 4 * (100*100) = 40000.0, vs the sum-based
+#:     annotatedAreaPx = 40000 + 14400 = 54400.0 (double-counts the fully-nested overlap) ->
+#:     union(40000) < sum(54400) EXACTLY, as expected for overlapping annotations.
+#:
+#: c6b (schema/2, NO path -- exercises visitCountJaccard's path-required blank): grid = 100.0 at
+#:   idx1 (row0,col1) and idx10 (row2,col2), 0.0 elsewhere. No annotations (annotatedAreaUnionPx=
+#:   annotatedAreaPx=0.0).
+#:   - precisionAtTopK/recall: cutoff=100 (idx1/idx10 tie) -> topK={idx1,idx10}. Intersection with
+#:     ROI({idx0..idx3}) = {idx1} (size1) -> precisionAtTopK=1/2=0.5, recall=1/4=0.25.
+#:
+#: compare_<slug>.csv jsDivergence(c6a,c6b): P=normalise_sum(c6a)=[0.5@idx0,0.5@idx1,0...],
+#:   Q=normalise_sum(c6b)=[0.5@idx1,0.5@idx10,0...], M=(P+Q)/2 -> M_idx0=0.25, M_idx1=0.5,
+#:   M_idx10=0.25 (elsewhere 0). KL(P||M) = 0.5*log2(0.5/0.25) + 0.5*log2(0.5/0.5) = 0.5*1+0 = 0.5.
+#:   KL(Q||M) = 0.5*log2(0.5/0.5) + 0.5*log2(0.5/0.25) = 0+0.5*1 = 0.5. jsDivergence = 0.5*0.5+
+#:   0.5*0.5 = 0.5 EXACTLY (this is the standard "2 distributions sharing exactly one support cell
+#:   out of a 2-cell support each" pattern -- independent of the total grid length, since every
+#:   cell where both P and Q are 0 contributes 0 to both KL sums by the zero-safe convention).
+#:   Diagonal rows (c6a,c6a)/(c6b,c6b) are exactly 0.0.
+#:
+#: consensus_count_<slug>.csv (>=2 sessions; HOTSPOT_THRESH_FRAC=0.5, normalise_max per session --
+#:   at this common (tw=gh=4) grid, resampled==native since both sessions already share (4,4)):
+#:   normalise_max(c6a) = [1.0@idx0, 1.0@idx1, 0...]; normalise_max(c6b) = [1.0@idx1, 1.0@idx10,
+#:   0...]. nReaders>0.5 per cell: idx0 -> c6a only -> 1; idx1 -> BOTH -> 2; idx10 -> c6b only -> 1;
+#:   every other cell -> 0 (omitted). Exactly 3 rows: (row0,col0,1), (row0,col1,2), (row2,col2,1).
+#:
+#: ROI (passed via --roi, NOT --reference -- so BOTH sessions appear in reference_<slug>.csv with
+#:   no reference-session special-casing): a rectangle x in [-10,410], y in [-10,140] -- covers
+#:   row0's 4 cell-centers (y=50) with margin, safely excludes row1's (y=150, 10px clear of the
+#:   y<=140 boundary) -- rasterizes to exactly {idx0,idx1,idx2,idx3}.
+def _c6_fragment(session_id, schema, grid, gw, gh, img_w, img_h, duration_ms, sample_count,
+                  path=None, annotations=None):
+    d = {
+        "schema": f"atlas-focus-contribution/{schema}",
+        "slideKey": C6_SLIDE_KEY,
+        "sessionId": session_id,
+        "imageWidth": img_w, "imageHeight": img_h,
+        "gridWidth": gw, "gridHeight": gh,
+        "grid": grid,
+        "durationMs": duration_ms,
+        "sampleCount": sample_count,
+        "date": "2026-07-24",
+    }
+    if path is not None:
+        d["path"] = path
+    if annotations is not None:
+        d["annotations"] = annotations
+    return d
+
+
+def build_c6_fixture():
+    c6_gw = c6_gh = 4
+    c6_img_w = c6_img_h = 400
+
+    grid_c6a = [0.0] * 16
+    grid_c6a[0] = 100.0
+    grid_c6a[1] = 100.0
+    path_c6a = []
+    t = 0
+    for i in range(9):
+        if i % 2 == 0:
+            path_c6a.append([t, 150, 50, 400, 300])   # cell1 (row0, col1)
+        else:
+            path_c6a.append([t, 50, 250, 400, 300])   # cell8 (row2, col0)
+        t += 250
+    ann_fc_c6a = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[100, 100], [300, 100], [300, 300], [100, 300], [100, 100]]],
+                },
+                "properties": {"name": "outer"},
+            },
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[140, 140], [260, 140], [260, 260], [140, 260], [140, 140]]],
+                },
+                "properties": {"name": "inner"},
+            },
+        ],
+    }
+    f_c6a = _c6_fragment(
+        "c6a", 3, grid_c6a, c6_gw, c6_gh, c6_img_w, c6_img_h, 2000, 9,
+        path=path_c6a, annotations=ann_fc_c6a,
+    )
+
+    grid_c6b = [0.0] * 16
+    grid_c6b[1] = 100.0
+    grid_c6b[10] = 100.0
+    f_c6b = _c6_fragment(
+        "c6b", 2, grid_c6b, c6_gw, c6_gh, c6_img_w, c6_img_h, 5000, 1,
+    )
+
+    return [f_c6a, f_c6b]
+
+
+def build_c6_roi_fc():
+    """The ROI FeatureCollection for :func:`build_c6_fixture` -- see that function's docstring for
+    the exact rasterization derivation (rasterizes to exactly row0's 4 cells)."""
+    return {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[-10, -10], [410, -10], [410, 140], [-10, 140], [-10, -10]]],
+            },
+            "properties": {},
+        }],
+    }
 
 
 def write_fragments_to_dir(fragments, d):
@@ -1583,6 +1724,197 @@ def check_tier4_seglin_dwell_fixture(tmp):
     )
 
 
+def check_tier6_direct_unit_asserts():
+    """Direct, pipeline-independent unit checks for the new Tier 3 C6 functions (``js_divergence``,
+    ``top_k_frac_mask``/``precision_recall_at_topk``, ``visit_count_grid``/``visit_count_jaccard``,
+    ``annotated_area_union_px``) -- TDD-style asserts on hand-built inputs, bypassing the full
+    ``analyze()`` pipeline entirely."""
+    # ---- js_divergence: base-2, symmetric, bounded [0,1] ----
+    # Identical distributions -> exactly 0.0 (zero-safe convention, no EPS floor).
+    assert bf_metrics.js_divergence([3.0, 1.0, 0.0, 6.0], [3.0, 1.0, 0.0, 6.0]) == 0.0
+    # Fully disjoint 2-cell distributions -> maximum base-2 JSD == 1.0 EXACTLY.
+    jsd_disjoint = bf_metrics.js_divergence([1.0, 0.0], [0.0, 1.0])
+    assert abs(jsd_disjoint - 1.0) < 1e-12, f"expected JSD([1,0],[0,1]) == 1.0, got {jsd_disjoint}"
+    # Partial overlap (each a 2-of-4-cell uniform distribution, sharing exactly 1 cell) -> 0.5
+    # EXACTLY -- hand-derived: P=[.5,.5,0,0], Q=[0,.5,.5,0], M=[.25,.5,.25,0];
+    # KL(P||M)=.5*log2(2)+.5*log2(1)=.5; KL(Q||M)=.5*log2(1)+.5*log2(2)=.5; JSD=.5*.5+.5*.5=.5.
+    jsd_partial = bf_metrics.js_divergence([1.0, 1.0, 0.0, 0.0], [0.0, 1.0, 1.0, 0.0])
+    assert abs(jsd_partial - 0.5) < 1e-12, f"expected JSD == 0.5, got {jsd_partial}"
+    # Symmetry: JSD(a,b) == JSD(b,a).
+    jsd_rev = bf_metrics.js_divergence([0.0, 1.0, 1.0, 0.0], [1.0, 1.0, 0.0, 0.0])
+    assert abs(jsd_partial - jsd_rev) < 1e-12, "js_divergence must be symmetric"
+    # Both-all-zero -> pinned convention 0.0 (never NaN/crash).
+    assert bf_metrics.js_divergence([0.0, 0.0], [0.0, 0.0]) == 0.0
+    # One all-zero vs a real distribution -> 0.5 EXACTLY (P contributes 0 by the zero-safe
+    # convention; Q contributes its own full self-entropy-vs-half-mass term) -- NOT 1.0, NOT NaN.
+    jsd_one_zero = bf_metrics.js_divergence([0.0, 0.0], [1.0, 0.0])
+    assert abs(jsd_one_zero - 0.5) < 1e-12, f"expected JSD(all-zero, point-mass) == 0.5, got {jsd_one_zero}"
+
+    # ---- top_k_frac_mask / precision_recall_at_topk ----
+    # Tie-inclusive cutoff: grid of 10 cells, 3 tied at the top value -> frac=0.10 wants k=1, but
+    # the tie means the mask includes all 3 (superset of k, per the spec's ">=cutoff" rule).
+    tie_grid = [5.0, 5.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    tie_mask = bf_metrics.top_k_frac_mask(tie_grid, 0.10)
+    assert list(tie_mask) == [True, True, True, False, False, False, False, False, False, False], (
+        list(tie_mask)
+    )
+    # Clean k=1 (no ties): 10 distinct descending values, ROI = first 2 cells.
+    distinct_grid = [10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]
+    roi_first_two = [True, True] + [False] * 8
+    precision, recall = bf_metrics.precision_recall_at_topk(distinct_grid, roi_first_two, 0.10)
+    assert abs(precision - 1.0) < 1e-12 and abs(recall - 0.5) < 1e-12, (precision, recall)
+    # Blank when the ROI mask is empty.
+    p_blank, r_blank = bf_metrics.precision_recall_at_topk(distinct_grid, [False] * 10, 0.10)
+    assert math.isnan(p_blank) and math.isnan(r_blank), (p_blank, r_blank)
+    # Blank when the grid (hence topK) is empty.
+    p_empty, r_empty = bf_metrics.precision_recall_at_topk([], [], 0.10)
+    assert math.isnan(p_empty) and math.isnan(r_empty), (p_empty, r_empty)
+
+    # ---- visit_count_grid / visit_count_jaccard ----
+    dwell4 = [100.0, 10.0, 5.0, 1.0]
+    visit_seq = [0, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2]  # cell0 once, cell1 x5, cell2 x5
+    visit_grid = bf_metrics.visit_count_grid(visit_seq, 2, 2)
+    assert list(visit_grid) == [1.0, 5.0, 5.0, 0.0], list(visit_grid)
+    # dwell top-2 = {0,1} (100,10); visit top-2 = {1,2} (5,5, ascending-index tie-break) ->
+    # jaccard = |{1}| / |{0,1,2}| = 1/3 EXACTLY.
+    jaccard = bf_metrics.visit_count_jaccard(dwell4, 2, 2, visit_seq, top_n=2)
+    assert abs(jaccard - (1.0 / 3.0)) < 1e-12, f"expected visitCountJaccard == 1/3, got {jaccard}"
+    # Degenerate: a zero-size grid (0 cells) -> both hotspot sets empty -> blank.
+    assert math.isnan(bf_metrics.visit_count_jaccard([], 0, 0, [], top_n=5))
+
+    # ---- annotated_area_union_px: reuses the existing overlap_fc regression fixture (outer
+    # [20,80]x[20,80] + inner [40,60]x[40,60] nested, 10x10 grid over a 100x100 image) already
+    # built later in this file's inline overlap-mask test -- re-derived here standalone so this
+    # function has no ordering dependency on it.
+    overlap_gw = overlap_gh = 10
+    overlap_img_w = overlap_img_h = 100
+    overlap_fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[20, 20], [80, 20], [80, 80], [20, 80], [20, 20]]],
+                },
+                "properties": {"name": "tumor"},
+            },
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[[40, 40], [60, 40], [60, 60], [40, 60], [40, 40]]],
+                },
+                "properties": {"name": "focus"},
+            },
+        ],
+    }
+    overlap_mask = rasterize_feature_collection(overlap_fc, overlap_gw, overlap_gh, overlap_img_w, overlap_img_h)
+    union_area = bf_metrics.annotated_area_union_px(overlap_mask, overlap_gw, overlap_gh, overlap_img_w, overlap_img_h)
+    sum_area = annotations_area_px(overlap_fc)
+    assert abs(union_area - 3600.0) < 1e-6, (
+        f"expected annotatedAreaUnionPx == 3600.0 (36 raster cells x 10x10 px^2 each), got {union_area}"
+    )
+    assert abs(sum_area - 4000.0) < 1e-6, (
+        f"expected sum-based annotatedAreaPx == 4000.0 (3600 outer + 400 inner, double-counting "
+        f"the nested overlap), got {sum_area}"
+    )
+    assert union_area < sum_area, (
+        f"annotatedAreaUnionPx ({union_area}) should be < the sum-based annotatedAreaPx "
+        f"({sum_area}) for overlapping/nested annotations"
+    )
+    # 0.0 for an all-False (no annotations) mask.
+    assert bf_metrics.annotated_area_union_px(
+        np.zeros(overlap_gw * overlap_gh, dtype=bool), overlap_gw, overlap_gh, overlap_img_w, overlap_img_h
+    ) == 0.0
+
+
+def check_tier6_c6_fixture(tmp):
+    """Tier 3 C6 pipeline-level check: runs :func:`build_c6_fixture` (2 sessions, an overlapping
+    annotation pair, a path, and a ``--roi``-driven reference mask) through the full ``analyze()``
+    pipeline and asserts every hand-derived number documented in the fixture's own docstring:
+    ``compare_<slug>.csv``'s ``jsDivergence``, ``reference_<slug>.csv``'s ``precisionAtTopK``/
+    ``recall``, ``metrics.csv``'s ``annotatedAreaUnionPx``/``annotatedAreaPx``, and
+    ``consensus_count_<slug>.csv``'s per-cell reader counts. ``visitCountJaccard`` is only
+    bounds-checked here (``[0, 1]``) -- the pipeline's ``HOTSPOT_TOP_N=5`` value is NOT the same
+    hand-derived ``top_n=2`` case asserted exactly in :func:`check_tier6_direct_unit_asserts`; its
+    exactness is instead carried by the Python<->R parity diff (see t6-report.md)."""
+    fragments = build_c6_fixture()
+    in_dir = os.path.join(tmp, "in_c6")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    roi_path = os.path.join(tmp, "c6_roi.geojson")
+    with open(roi_path, "w", encoding="utf-8") as fh:
+        json.dump(build_c6_roi_fc(), fh)
+    out_dir = os.path.join(tmp, "out_c6")
+    analyze([in_dir], out_dir, roi=roi_path)
+
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 2, len(metrics)
+    row_a = metrics[metrics.session == "c6a"].iloc[0]
+    row_b = metrics[metrics.session == "c6b"].iloc[0]
+
+    # --- annotatedAreaUnionPx / annotatedAreaPx (metrics.csv) ---
+    assert abs(row_a["annotatedAreaUnionPx"] - 40000.0) < 1e-6, row_a["annotatedAreaUnionPx"]
+    assert abs(row_a["annotatedAreaPx"] - 54400.0) < 1e-6, row_a["annotatedAreaPx"]
+    assert row_a["annotatedAreaUnionPx"] < row_a["annotatedAreaPx"], (
+        "annotatedAreaUnionPx should be < the sum-based annotatedAreaPx for overlapping annotations"
+    )
+    assert abs(row_b["annotatedAreaUnionPx"] - 0.0) < 1e-9, row_b["annotatedAreaUnionPx"]
+    assert abs(row_b["annotatedAreaPx"] - 0.0) < 1e-9, row_b["annotatedAreaPx"]
+
+    # --- visitCountJaccard (metrics.csv): c6a has a path -> populated, bounded [0,1]; c6b has no
+    # path at all -> blank ---
+    assert pd.notna(row_a["visitCountJaccard"]), "c6a has a path -- visitCountJaccard should be populated"
+    assert 0.0 <= row_a["visitCountJaccard"] <= 1.0, row_a["visitCountJaccard"]
+    assert pd.isna(row_b["visitCountJaccard"]), (
+        f"c6b has no path -- visitCountJaccard should be blank, got {row_b['visitCountJaccard']}"
+    )
+
+    # --- compare_<slug>.csv: jsDivergence -- diagonal 0.0, cross-pair 0.5 EXACTLY (both directions) ---
+    compare_files = [f for f in os.listdir(out_dir) if f.startswith("compare_")]
+    assert len(compare_files) == 1, compare_files
+    compare = pd.read_csv(os.path.join(out_dir, compare_files[0]))
+    assert "jsDivergence" in compare.columns, compare.columns.tolist()
+    diag_a = compare[(compare.sessionA == "c6a") & (compare.sessionB == "c6a")].iloc[0]
+    diag_b = compare[(compare.sessionA == "c6b") & (compare.sessionB == "c6b")].iloc[0]
+    assert abs(diag_a["jsDivergence"] - 0.0) < 1e-9, diag_a["jsDivergence"]
+    assert abs(diag_b["jsDivergence"] - 0.0) < 1e-9, diag_b["jsDivergence"]
+    cross_ab = compare[(compare.sessionA == "c6a") & (compare.sessionB == "c6b")].iloc[0]
+    cross_ba = compare[(compare.sessionA == "c6b") & (compare.sessionB == "c6a")].iloc[0]
+    assert abs(cross_ab["jsDivergence"] - 0.5) < 1e-9, (
+        f"expected jsDivergence(c6a,c6b) == 0.5, got {cross_ab['jsDivergence']}"
+    )
+    assert abs(cross_ba["jsDivergence"] - 0.5) < 1e-9, (
+        f"expected jsDivergence(c6b,c6a) == 0.5 (symmetric), got {cross_ba['jsDivergence']}"
+    )
+
+    # --- reference_<slug>.csv (--roi, no --reference -- both sessions appear): precisionAtTopK/
+    # recall ---
+    ref_files = [f for f in os.listdir(out_dir) if f.startswith("reference_")]
+    assert len(ref_files) == 1, ref_files
+    ref = pd.read_csv(os.path.join(out_dir, ref_files[0]))
+    assert {"precisionAtTopK", "recall"} <= set(ref.columns), ref.columns.tolist()
+    assert set(ref["session"]) == {"c6a", "c6b"}, (
+        f"expected both sessions in reference_<slug>.csv (roi-only, no --reference), got "
+        f"{ref['session'].tolist()}"
+    )
+    ref_a = ref[ref.session == "c6a"].iloc[0]
+    ref_b = ref[ref.session == "c6b"].iloc[0]
+    assert abs(ref_a["precisionAtTopK"] - 1.0) < 1e-9, ref_a["precisionAtTopK"]
+    assert abs(ref_a["recall"] - 0.5) < 1e-9, ref_a["recall"]
+    assert abs(ref_b["precisionAtTopK"] - 0.5) < 1e-9, ref_b["precisionAtTopK"]
+    assert abs(ref_b["recall"] - 0.25) < 1e-9, ref_b["recall"]
+
+    # --- consensus_count_<slug>.csv: exactly 3 rows ---
+    cc_files = [f for f in os.listdir(out_dir) if f.startswith("consensus_count_")]
+    assert len(cc_files) == 1, cc_files
+    cc = pd.read_csv(os.path.join(out_dir, cc_files[0]))
+    assert list(cc.columns) == ["cellRow", "cellCol", "nReaders"], cc.columns.tolist()
+    got = {(int(r.cellRow), int(r.cellCol)): int(r.nReaders) for _, r in cc.iterrows()}
+    assert got == {(0, 0): 1, (0, 1): 2, (2, 2): 1}, got
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="bfa-selftest-")
     try:
@@ -1621,6 +1953,7 @@ def run():
             "magnificationSource",
             "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
             "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
+            "annotatedAreaUnionPx", "visitCountJaccard",
         ]
         assert list(metrics.columns) == expected_cols, metrics.columns.tolist()
         assert metrics["dwellInAnnotationPct"].between(0, 100).all(), metrics["dwellInAnnotationPct"].tolist()
@@ -2372,6 +2705,10 @@ def run():
         check_tier4_mouse_fixture(tmp)
         check_tier4_seglin_fixture(tmp)
         check_tier4_seglin_dwell_fixture(tmp)
+
+        # --- Tier 3 C6: JSD, precision@k/recall, visit-count Jaccard, union area, reader-count map ---
+        check_tier6_direct_unit_asserts()
+        check_tier6_c6_fixture(tmp)
 
         print("OK: all selftest assertions passed")
     finally:

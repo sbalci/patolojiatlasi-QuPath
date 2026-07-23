@@ -636,6 +636,138 @@ build_seglin_dwell_fragment <- function() {
   )
 }
 
+C6_SLIDE_KEY <- "sha256:selftest-slide-c6-0001"
+#' Tier 3 C6 fixture: its own small custom grid/image dims (GW=GH=4, IMG_W=IMG_H=400 -> cell =
+#' 100x100 image px), deliberately NOT the shared module GW/GH/IMG_W/IMG_H (8/8/2000/1500) -- every
+#' documented number below is exactly hand-derivable at this resolution. Mirrors the Python
+#' toolkit's `build_c6_fixture` exactly; see docs/superpowers/sdd/t6-report.md for the full
+#' derivation.
+#'
+#' 2 sessions on one slide (>=2 needed for compare_<slug>.csv's jsDivergence + consensus_count):
+#'
+#' c6a (schema/3, HAS a path + an overlapping-annotation pair): grid = 100.0 at flat idx0 (row0,
+#'   col0) and idx1 (row0,col1), 0.0 elsewhere.
+#'   - precisionAtTopK/recall (frac=0.10, n=16 -> k=2): cutoff=100 (idx0/idx1 tie) ->
+#'     topK={idx0,idx1}. ROI (below) = row0's 4 cells {idx0..idx3} -> intersection={idx0,idx1}
+#'     (size2) -> precisionAtTopK=2/2=1.0, recall=2/4=0.5.
+#'   - path alternates cell1 (row0,col1, center (150,50)) / cell8 (row2,col0, center (50,250)), 9
+#'     points -> visited_sequence = [1,8,1,8,1,8,1,8,1] (0-based) -> visit_count_grid: idx1=5,
+#'     idx8=4. DIRECT-unit visit_count_jaccard(top_n=2): dwell top2={idx0,idx1}, visit
+#'     top2={idx1,idx8} -> jaccard=1/3 EXACTLY. (Pipeline uses HOTSPOT_TOP_N=5 -- only
+#'     bounds-checked there; exactness is carried by the Python<->R parity diff.)
+#'   - annotations: outer rect [100,100]-[300,300] (area 40000) + nested inner rect
+#'     [140,140]-[260,260] (area 14400). Both rasterize (native gw=gh=4) to the SAME 4 cells
+#'     (rows/cols {1,2}) -> annotatedAreaUnionPx = 4*(100*100) = 40000.0 vs sum-based
+#'     annotatedAreaPx = 40000+14400 = 54400.0 -> union < sum EXACTLY.
+#'
+#' c6b (schema/2, NO path -- exercises visitCountJaccard's path-required blank): grid = 100.0 at
+#'   idx1 (row0,col1) and idx10 (row2,col2). No annotations (both area columns 0.0).
+#'   - precisionAtTopK/recall: cutoff=100 -> topK={idx1,idx10}. Intersection with
+#'     ROI({idx0..idx3})={idx1} -> precisionAtTopK=1/2=0.5, recall=1/4=0.25.
+#'
+#' compare_<slug>.csv jsDivergence(c6a,c6b) = 0.5 EXACTLY (2 distributions sharing exactly one
+#' support cell out of a 2-cell support each -- see js_divergence's own hand-derived unit test for
+#' the full derivation). Diagonal rows are exactly 0.0.
+#'
+#' consensus_count_<slug>.csv (HOTSPOT_THRESH_FRAC=0.5, normalise_max per session): nReaders>0.5:
+#' idx0 -> c6a only -> 1; idx1 -> BOTH -> 2; idx10 -> c6b only -> 1; else 0 (omitted). Exactly 3
+#' rows: (row0,col0,1), (row0,col1,2), (row2,col2,1).
+#'
+#' ROI (passed via --roi, NOT --reference -- both sessions appear in reference_<slug>.csv): a
+#' rectangle x in [-10,410], y in [-10,140] -- rasterizes to exactly row0's 4 cells.
+.c6_fragment <- function(session_id, schema, grid, gw, gh, img_w, img_h, duration_ms, sample_count,
+                          path = NULL, annotations = NULL) {
+  d <- list(
+    schema = paste0("atlas-focus-contribution/", schema),
+    slideKey = C6_SLIDE_KEY,
+    sessionId = session_id,
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = gw, gridHeight = gh,
+    grid = grid,
+    durationMs = duration_ms,
+    sampleCount = sample_count,
+    date = "2026-07-24"
+  )
+  if (!is.null(path)) {
+    d$path <- lapply(seq_len(nrow(path)), function(i) as.numeric(path[i, ]))
+  }
+  if (!is.null(annotations)) {
+    d$annotations <- annotations
+  }
+  d
+}
+
+build_c6_fixture <- function() {
+  c6_gw <- 4L; c6_gh <- 4L
+  c6_img_w <- 400; c6_img_h <- 400
+
+  grid_c6a <- rep(0.0, 16)
+  grid_c6a[1] <- 100.0   # idx0 (row0, col0)
+  grid_c6a[2] <- 100.0   # idx1 (row0, col1)
+  path_rows <- list()
+  t <- 0
+  for (i in 0:8) {
+    if (i %% 2 == 0) {
+      path_rows[[length(path_rows) + 1]] <- c(t, 150, 50, 400, 300)   # cell1 (row0, col1)
+    } else {
+      path_rows[[length(path_rows) + 1]] <- c(t, 50, 250, 400, 300)   # cell8 (row2, col0)
+    }
+    t <- t + 250
+  }
+  path_c6a <- do.call(rbind, path_rows)
+
+  ann_fc_c6a <- list(
+    type = "FeatureCollection",
+    features = list(
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(100, 100), c(300, 100), c(300, 300), c(100, 300), c(100, 100)))
+        ),
+        properties = list(name = "outer")
+      ),
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(140, 140), c(260, 140), c(260, 260), c(140, 260), c(140, 140)))
+        ),
+        properties = list(name = "inner")
+      )
+    )
+  )
+  f_c6a <- .c6_fragment(
+    "c6a", 3, grid_c6a, c6_gw, c6_gh, c6_img_w, c6_img_h, 2000, 9,
+    path = path_c6a, annotations = ann_fc_c6a
+  )
+
+  grid_c6b <- rep(0.0, 16)
+  grid_c6b[2] <- 100.0    # idx1 (row0, col1)
+  grid_c6b[11] <- 100.0   # idx10 (row2, col2)
+  f_c6b <- .c6_fragment(
+    "c6b", 2, grid_c6b, c6_gw, c6_gh, c6_img_w, c6_img_h, 5000, 1
+  )
+
+  list(f_c6a, f_c6b)
+}
+
+#' The ROI FeatureCollection for `build_c6_fixture` -- see that function's docs for the exact
+#' rasterization derivation (rasterizes to exactly row0's 4 cells).
+build_c6_roi_fc <- function() {
+  list(
+    type = "FeatureCollection",
+    features = list(list(
+      type = "Feature",
+      geometry = list(
+        type = "Polygon",
+        coordinates = list(list(c(-10, -10), c(410, -10), c(410, 140), c(-10, 140), c(-10, -10)))
+      ),
+      properties = list()
+    ))
+  )
+}
+
 write_fragments_to_dir <- function(fragments, d) {
   for (f in fragments) {
     writeLines(jsonlite::toJSON(f, auto_unbox = TRUE), file.path(d, paste0(f$sessionId, ".json")))
@@ -1644,6 +1776,159 @@ check_tier4_seglin_dwell_fixture <- function(tmp) {
   )
 }
 
+#' Direct, pipeline-independent unit checks for the new Tier 3 C6 functions (`js_divergence`,
+#' `top_k_frac_mask`/`precision_recall_at_topk`, `visit_count_grid`/`visit_count_jaccard`,
+#' `annotated_area_union_px`) -- TDD-style asserts on hand-built inputs, bypassing the full
+#' `analyze()` pipeline entirely. Mirrors the Python toolkit's `check_tier6_direct_unit_asserts`
+#' exactly.
+check_tier6_direct_unit_asserts <- function() {
+  # ---- js_divergence: base-2, symmetric, bounded [0,1] ----
+  stopifnot(js_divergence(c(3.0, 1.0, 0.0, 6.0), c(3.0, 1.0, 0.0, 6.0)) == 0.0)
+  jsd_disjoint <- js_divergence(c(1.0, 0.0), c(0.0, 1.0))
+  stopifnot("expected JSD([1,0],[0,1]) == 1.0" = abs(jsd_disjoint - 1.0) < 1e-12)
+  jsd_partial <- js_divergence(c(1.0, 1.0, 0.0, 0.0), c(0.0, 1.0, 1.0, 0.0))
+  stopifnot("expected JSD == 0.5" = abs(jsd_partial - 0.5) < 1e-12)
+  jsd_rev <- js_divergence(c(0.0, 1.0, 1.0, 0.0), c(1.0, 1.0, 0.0, 0.0))
+  stopifnot("js_divergence must be symmetric" = abs(jsd_partial - jsd_rev) < 1e-12)
+  stopifnot(js_divergence(c(0.0, 0.0), c(0.0, 0.0)) == 0.0)
+  jsd_one_zero <- js_divergence(c(0.0, 0.0), c(1.0, 0.0))
+  stopifnot(
+    "expected JSD(all-zero, point-mass) == 0.5" = abs(jsd_one_zero - 0.5) < 1e-12
+  )
+
+  # ---- top_k_frac_mask / precision_recall_at_topk ----
+  tie_grid <- c(5.0, 5.0, 5.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+  tie_mask <- top_k_frac_mask(tie_grid, 0.10)
+  stopifnot(identical(tie_mask, c(TRUE, TRUE, TRUE, rep(FALSE, 7))))
+  distinct_grid <- c(10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0)
+  roi_first_two <- c(TRUE, TRUE, rep(FALSE, 8))
+  pr <- precision_recall_at_topk(distinct_grid, roi_first_two, 0.10)
+  stopifnot(abs(pr$precision - 1.0) < 1e-12, abs(pr$recall - 0.5) < 1e-12)
+  pr_blank <- precision_recall_at_topk(distinct_grid, rep(FALSE, 10), 0.10)
+  stopifnot(is.nan(pr_blank$precision), is.nan(pr_blank$recall))
+  pr_empty <- precision_recall_at_topk(numeric(0), logical(0), 0.10)
+  stopifnot(is.nan(pr_empty$precision), is.nan(pr_empty$recall))
+
+  # ---- visit_count_grid / visit_count_jaccard ----
+  dwell4 <- c(100.0, 10.0, 5.0, 1.0)
+  visit_seq <- c(0, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2)
+  vgrid <- visit_count_grid(visit_seq, 2, 2)
+  stopifnot(identical(vgrid, c(1.0, 5.0, 5.0, 0.0)))
+  jaccard <- visit_count_jaccard(dwell4, 2, 2, visit_seq, top_n = 2)
+  stopifnot("expected visitCountJaccard == 1/3" = abs(jaccard - (1.0 / 3.0)) < 1e-12)
+  stopifnot(is.nan(visit_count_jaccard(numeric(0), 0, 0, integer(0), top_n = 5)))
+
+  # ---- annotated_area_union_px: reuses the same outer/inner nested-rectangle geometry as the
+  # Python toolkit's regression fixture (10x10 grid over a 100x100 image). ----
+  overlap_gw <- 10L; overlap_gh <- 10L
+  overlap_img_w <- 100; overlap_img_h <- 100
+  overlap_fc <- list(
+    type = "FeatureCollection",
+    features = list(
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(20, 20), c(80, 20), c(80, 80), c(20, 80), c(20, 20)))
+        ),
+        properties = list(name = "tumor")
+      ),
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(40, 40), c(60, 40), c(60, 60), c(40, 60), c(40, 40)))
+        ),
+        properties = list(name = "focus")
+      )
+    )
+  )
+  overlap_mask <- rasterize_feature_collection(overlap_fc, overlap_gw, overlap_gh, overlap_img_w, overlap_img_h)
+  union_area <- annotated_area_union_px(overlap_mask, overlap_gw, overlap_gh, overlap_img_w, overlap_img_h)
+  sum_area <- annotations_area_px(overlap_fc)
+  stopifnot(
+    "expected annotatedAreaUnionPx == 3600.0" = abs(union_area - 3600.0) < 1e-6
+  )
+  stopifnot(
+    "expected sum-based annotatedAreaPx == 4000.0" = abs(sum_area - 4000.0) < 1e-6
+  )
+  stopifnot(union_area < sum_area)
+  stopifnot(
+    annotated_area_union_px(rep(FALSE, overlap_gw * overlap_gh), overlap_gw, overlap_gh, overlap_img_w, overlap_img_h) == 0.0
+  )
+}
+
+#' Tier 3 C6 pipeline-level check: runs `build_c6_fixture` (2 sessions, an overlapping annotation
+#' pair, a path, and a `--roi`-driven reference mask) through the full `analyze()` pipeline and
+#' asserts every hand-derived number documented in the fixture's own docs: `compare_<slug>.csv`'s
+#' `jsDivergence`, `reference_<slug>.csv`'s `precisionAtTopK`/`recall`, `metrics.csv`'s
+#' `annotatedAreaUnionPx`/`annotatedAreaPx`, and `consensus_count_<slug>.csv`'s per-cell reader
+#' counts. `visitCountJaccard` is only bounds-checked here (`[0, 1]`) -- the pipeline's
+#' `HOTSPOT_TOP_N=5` value is NOT the same hand-derived `top_n=2` case asserted exactly in
+#' `check_tier6_direct_unit_asserts`; its exactness is instead carried by the Python<->R parity
+#' diff (see t6-report.md).
+check_tier6_c6_fixture <- function(tmp) {
+  fragments <- build_c6_fixture()
+  in_dir <- file.path(tmp, "in_c6")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  roi_path <- file.path(tmp, "c6_roi.geojson")
+  writeLines(jsonlite::toJSON(build_c6_roi_fc(), auto_unbox = TRUE), roi_path)
+  out_dir <- file.path(tmp, "out_c6")
+  analyze(list(in_dir), out_dir, roi = roi_path)
+
+  metrics <- utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
+  stopifnot(nrow(metrics) == 2)
+  row_a <- metrics[metrics$session == "c6a", ]
+  row_b <- metrics[metrics$session == "c6b", ]
+
+  stopifnot(abs(row_a$annotatedAreaUnionPx - 40000.0) < 1e-6)
+  stopifnot(abs(row_a$annotatedAreaPx - 54400.0) < 1e-6)
+  stopifnot(row_a$annotatedAreaUnionPx < row_a$annotatedAreaPx)
+  stopifnot(abs(row_b$annotatedAreaUnionPx - 0.0) < 1e-9)
+  stopifnot(abs(row_b$annotatedAreaPx - 0.0) < 1e-9)
+
+  stopifnot("c6a visitCountJaccard should be populated" = !is.na(row_a$visitCountJaccard))
+  stopifnot(row_a$visitCountJaccard >= 0.0 && row_a$visitCountJaccard <= 1.0)
+  stopifnot("c6b visitCountJaccard should be blank (no path)" = is.na(row_b$visitCountJaccard))
+
+  out_files <- list.files(out_dir)
+  compare_files <- out_files[startsWith(out_files, "compare_")]
+  stopifnot(length(compare_files) == 1)
+  compare <- utils::read.csv(file.path(out_dir, compare_files[1]), stringsAsFactors = FALSE)
+  stopifnot("jsDivergence" %in% colnames(compare))
+  diag_a <- compare[compare$sessionA == "c6a" & compare$sessionB == "c6a", ]
+  diag_b <- compare[compare$sessionA == "c6b" & compare$sessionB == "c6b", ]
+  stopifnot(abs(diag_a$jsDivergence - 0.0) < 1e-9)
+  stopifnot(abs(diag_b$jsDivergence - 0.0) < 1e-9)
+  cross_ab <- compare[compare$sessionA == "c6a" & compare$sessionB == "c6b", ]
+  cross_ba <- compare[compare$sessionA == "c6b" & compare$sessionB == "c6a", ]
+  stopifnot("expected jsDivergence(c6a,c6b) == 0.5" = abs(cross_ab$jsDivergence - 0.5) < 1e-9)
+  stopifnot("expected jsDivergence(c6b,c6a) == 0.5" = abs(cross_ba$jsDivergence - 0.5) < 1e-9)
+
+  ref_files <- out_files[startsWith(out_files, "reference_")]
+  stopifnot(length(ref_files) == 1)
+  ref <- utils::read.csv(file.path(out_dir, ref_files[1]), stringsAsFactors = FALSE)
+  stopifnot(all(c("precisionAtTopK", "recall") %in% colnames(ref)))
+  stopifnot(setequal(ref$session, c("c6a", "c6b")))
+  ref_a <- ref[ref$session == "c6a", ]
+  ref_b <- ref[ref$session == "c6b", ]
+  stopifnot(abs(ref_a$precisionAtTopK - 1.0) < 1e-9)
+  stopifnot(abs(ref_a$recall - 0.5) < 1e-9)
+  stopifnot(abs(ref_b$precisionAtTopK - 0.5) < 1e-9)
+  stopifnot(abs(ref_b$recall - 0.25) < 1e-9)
+
+  cc_files <- out_files[startsWith(out_files, "consensus_count_")]
+  stopifnot(length(cc_files) == 1)
+  cc <- utils::read.csv(file.path(out_dir, cc_files[1]), stringsAsFactors = FALSE)
+  stopifnot(identical(colnames(cc), c("cellRow", "cellCol", "nReaders")))
+  stopifnot(nrow(cc) == 3)
+  got <- setNames(as.numeric(cc$nReaders), paste(cc$cellRow, cc$cellCol))
+  expected <- c("0 0" = 1, "0 1" = 2, "2 2" = 1)
+  stopifnot(all(names(expected) %in% names(got)))
+  stopifnot(all(abs(got[names(expected)] - expected) < 1e-9))
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -1682,7 +1967,8 @@ run <- function() {
     "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
     "magnificationSource",
     "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
-    "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity"
+    "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
+    "annotatedAreaUnionPx", "visitCountJaccard"
   )
   stopifnot("metrics.csv columns mismatch" = identical(colnames(metrics), expected_cols))
   stopifnot(
@@ -2550,6 +2836,10 @@ run <- function() {
   check_tier4_mouse_fixture(tmp)
   check_tier4_seglin_fixture(tmp)
   check_tier4_seglin_dwell_fixture(tmp)
+
+  # --- Tier 3 C6: JSD, precision@k/recall, visit-count Jaccard, union area, reader-count map ---
+  check_tier6_direct_unit_asserts()
+  check_tier6_c6_fixture(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }
