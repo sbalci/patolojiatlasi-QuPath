@@ -4,17 +4,18 @@
 # Usage:
 #   Rscript run_analysis.R <input...> --out DIR [--reference SESSIONID] [--roi geojson]
 #       [--labels csv] [--key csv] [--graded csv] [--figures] [--res 512] [--magbands 3]
+#       [--magband-scheme canonical|tercile]
 #
 # <input...> may be fragment JSON files, directories (recursed for *.json), and/or .zip archives,
 # in any mix. Writes the SAME output files as the Python toolkit's `python -m
 # blinded_focus.analyze` (see ../python/README.md and ./README.md for the full contract):
 # metrics.csv, compare_<slug>.csv, consensus_<slug>.png, reference_<slug>.csv, scanpath_<slug>.csv,
-# magbands_<slug>.csv, (Tier 1, always) hotspots_<slug>.csv, (Tier 1, path sessions only)
-# transitions_<slug>.csv, (Phase 3, when at least one fragment carries a decision) decisions.csv,
-# (Phase 3, when --graded supplies at least one graded decision) nav_accuracy.csv, summary.md, and
-# (with --figures) per-(slide,session) PNGs under <out>/<slug>/ (incl. the Phase-1 scanpath-raster
-# and magnification-band heatmaps), plus (Tier 1, path sessions only)
-# overlay_<slug>_scanpaths.png at <out> root.
+# magbands_<slug>.csv (Tier 2 B1/B3: idle-excluded bandTimeMs + a bandScheme column), (Tier 1,
+# always) hotspots_<slug>.csv, (Tier 1, path sessions only) transitions_<slug>.csv, (Phase 3, when
+# at least one fragment carries a decision) decisions.csv, (Phase 3, when --graded supplies at
+# least one graded decision) nav_accuracy.csv, summary.md, and (with --figures) per-(slide,session)
+# PNGs under <out>/<slug>/ (incl. the Phase-1 scanpath-raster and magnification-band heatmaps),
+# plus (Tier 1, path sessions only) overlay_<slug>_scanpaths.png at <out> root.
 
 # Resolve this script's own directory so `source()` works regardless of the caller's working
 # directory (Rscript does not chdir to the script's location).
@@ -39,6 +40,7 @@ source(file.path(.script_dir, "blinded_focus.R"))
   make_figures <- FALSE
   res <- DEFAULT_RES
   magbands <- DEFAULT_MAGBANDS
+  magband_scheme <- DEFAULT_MAGBAND_SCHEME
   i <- 1
   n <- length(argv)
   while (i <= n) {
@@ -61,6 +63,14 @@ source(file.path(.script_dir, "blinded_focus.R"))
       res <- as.integer(argv[i + 1]); i <- i + 2
     } else if (a == "--magbands") {
       magbands <- as.integer(argv[i + 1]); i <- i + 2
+    } else if (a == "--magband-scheme") {
+      magband_scheme <- argv[i + 1]; i <- i + 2
+      if (!(magband_scheme %in% c("canonical", "tercile"))) {
+        stop(
+          sprintf("--magband-scheme must be 'canonical' or 'tercile', got '%s'", magband_scheme),
+          call. = FALSE
+        )
+      }
     } else {
       inputs <- c(inputs, a); i <- i + 1
     }
@@ -68,14 +78,16 @@ source(file.path(.script_dir, "blinded_focus.R"))
   if (length(inputs) == 0 || is.null(out_dir)) {
     stop(
       "usage: Rscript run_analysis.R <input...> --out DIR [--reference ID] [--roi geojson] ",
-      "[--labels csv] [--key csv] [--graded csv] [--figures] [--res 512] [--magbands 3]",
+      "[--labels csv] [--key csv] [--graded csv] [--figures] [--res 512] [--magbands 3] ",
+      "[--magband-scheme canonical|tercile]",
       call. = FALSE
     )
   }
   list(
     inputs = inputs, out_dir = out_dir, reference = reference, roi = roi,
     labels_csv = labels_csv, key_csv = key_csv, graded_csv = graded_csv,
-    make_figures = make_figures, res = res, magbands = magbands
+    make_figures = make_figures, res = res, magbands = magbands,
+    magband_scheme = magband_scheme
   )
 }
 
@@ -86,7 +98,8 @@ source(file.path(.script_dir, "blinded_focus.R"))
     opts$inputs, opts$out_dir,
     reference = opts$reference, roi = opts$roi, labels_csv = opts$labels_csv,
     make_figures = opts$make_figures, res = opts$res, magbands = opts$magbands,
-    key_csv = opts$key_csv, graded_csv = opts$graded_csv
+    key_csv = opts$key_csv, graded_csv = opts$graded_csv,
+    magband_scheme = opts$magband_scheme
   )
   invisible(NULL)
 }

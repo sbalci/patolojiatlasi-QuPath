@@ -387,6 +387,61 @@ def build_graded_fragments():
     return fragments, graded_rows, key_rows
 
 
+IDLE_SLIDE_KEY = "sha256:selftest-slide-idle-0001"
+#: Tier 2 B1/B2/B3/B4 fixture: a schema/4, 5-point/4-step path with ONE >60s idle gap (step1,
+#: p1->p2) that is deliberately ZOOM-UNCHANGED (exercises B1's pan-exclusion of an idle-but-
+#: unchanged step, distinct from a zoom-change step), plus a real non-idle zoom-change step (step2)
+#: so drillingRatePerMin/drillingRateOctavesPerMin are non-trivial post-exclusion, not just "goes
+#: to 0". Every number below is hand-derivable from these exact points -- see
+#: docs/superpowers/sdd/t2-report.md for the full derivation.
+#:
+#: steps (path[i] -> path[i+1]):
+#:   step0 (i=0): dt=1000 (active),  zoom 25->25  (unchanged), dist=100
+#:   step1 (i=1): dt=70000 (IDLE),   zoom 25->25  (unchanged), dist=50
+#:   step2 (i=2): dt=1000 (active),  zoom 25->100 (CHANGED),   dist=50
+#:   step3 (i=3): dt=1000 (active),  zoom 100->100 (unchanged), dist=60
+#: totalSpan=73000ms, idleMs=70000ms, activeSpanMs=3000ms (0.05 active-minutes).
+def build_idle_fragment():
+    grid = _n_nonzero_grid(10)
+    path = [
+        [0, 0, 0, 400, 300, 1600],
+        [1000, 100, 0, 400, 300, 1600],
+        [71000, 100, 50, 400, 300, 1600],
+        [72000, 150, 50, 400, 300, 400],
+        [73000, 210, 50, 400, 300, 400],
+    ]
+    return _fragment(
+        "idle1", 4, grid, 73000, 5, path=path,
+        base_magnification=40.0, path_truncated=False,
+        slide_key=IDLE_SLIDE_KEY,
+    )
+
+
+ZOOMFID_SLIDE_KEY = "sha256:selftest-slide-zoomfid-0001"
+#: Tier 2 B2 fixture, isolated from B1's idle complexity (no idle gap): a schema/4, 3-point/2-step
+#: path with NO ``baseMagnification`` (exercises point_zoom's ds-only fallback -- B4
+#: "proxy-downsample" -- and B3's per-session tercile auto-fallback, since a canonical scheme needs
+#: baseMagnification too), and a clean doubling-each-step dsMilli schedule so
+#: avgZoomLog2W/drillingRateOctavesPerMin are simple, hand-derivable numbers:
+#:
+#:   zoom (base_mag=None -> 1000/dsMilli): point0=1.0, point1=2.0, point2=4.0
+#:   step0 (i=0): dt=1000, zoom0=1.0 -> log2=0.0
+#:   step1 (i=1): dt=1000, zoom1=2.0 -> log2=1.0
+#:   avgZoomLog2W = (1000*0.0 + 1000*1.0) / 2000 = 0.5
+#:   drillingRateOctavesPerMin = (|1-0| + |2-1|) / (2000ms/60000) = 2.0 / (1/30) = 60.0
+def build_zoom_fidelity_fragment():
+    grid = _n_nonzero_grid(10)
+    path = [
+        [0, 0, 0, 400, 300, 1000],
+        [1000, 0, 0, 400, 300, 500],
+        [2000, 0, 0, 400, 300, 250],
+    ]
+    return _fragment(
+        "zoomfid1", 4, grid, 2000, 3, path=path,
+        slide_key=ZOOMFID_SLIDE_KEY,
+    )
+
+
 def write_fragments_to_dir(fragments, d):
     for f in fragments:
         with open(os.path.join(d, f"{f['sessionId']}.json"), "w", encoding="utf-8") as fh:
@@ -612,6 +667,308 @@ def check_label_collision_regression(tmp):
     )
 
 
+# ---------------------------------------------------------------------------
+# Tier 2 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md, B1-B4)
+# ---------------------------------------------------------------------------
+
+def check_tier2_direct_unit_asserts():
+    """Direct, pipeline-independent unit checks for the new Tier 2 B1/B2/B3 metric functions --
+    TDD-style asserts on hand-built inputs, bypassing the full ``analyze()`` pipeline entirely."""
+    # --- B1: idle_step_mask/idle_ms/active_span_ms on a minimal 3-point/2-step path with one
+    # >60s gap ---
+    idle_path = [
+        [0, 0, 0, 400, 300],
+        [1000, 10, 0, 400, 300],       # step0: dt=1000 (active)
+        [65000, 20, 0, 400, 300],      # step1: dt=64000 (IDLE, >60000)
+    ]
+    assert bf_metrics.idle_step_mask(idle_path) == [False, True], (
+        f"expected [False, True], got {bf_metrics.idle_step_mask(idle_path)}"
+    )
+    assert bf_metrics.idle_ms(idle_path) == 64000.0, bf_metrics.idle_ms(idle_path)
+    assert bf_metrics.active_span_ms(idle_path) == 1000.0, bf_metrics.active_span_ms(idle_path)
+    assert bf_metrics.idle_step_mask([]) == [], "idle_step_mask should be [] for an empty path"
+    assert bf_metrics.idle_ms([[0, 0, 0, 400, 300]]) == 0.0, "idle_ms should be 0.0 for a 1-point path"
+    assert bf_metrics.active_span_ms([[0, 0, 0, 400, 300]]) == 0.0, (
+        "active_span_ms should be 0.0 for a 1-point path"
+    )
+    # A path with NO idle gap must report idleMs==0 and activeSpanMs==total span exactly (the core
+    # B1 no-drift invariant).
+    no_gap_path = [[0, 0, 0, 400, 300], [1000, 10, 0, 400, 300], [2000, 20, 0, 400, 300]]
+    assert bf_metrics.idle_ms(no_gap_path) == 0.0
+    assert bf_metrics.active_span_ms(no_gap_path) == 2000.0
+
+    # --- B1 targeted assert: search_focus_ratio's idle-exclusion, via an INVARIANCE property
+    # rather than a hand-predicted numeric outcome (the "focused" rule is an OR of two
+    # median-split conditions, so hand-predicting its exact value for an arbitrary extra point is
+    # fragile -- an invariance check is not). A clean, non-degenerate 4-step baseline path (steps
+    # alternate low-zoom/high-vel and high-zoom/low-vel, giving a genuine partial 0 < ratio < 1
+    # split, not the trivial all-focused/all-unfocused outcome a naive fixture tends to produce)
+    # gets ONE extra point appended, with deliberately extreme/bizarre zoom+velocity values:
+    #   - appended with dt=70000 (IDLE, >IDLE_GAP_MS): must be excluded entirely -> ratio UNCHANGED
+    #     from the baseline, no matter how extreme its own zoom/velocity are.
+    #   - the SAME extreme point appended with dt=59999 (NOT idle, <=IDLE_GAP_MS): participates in
+    #     both the threshold computation and total_dt -> ratio MUST differ from the baseline.
+    focus_baseline_path = [
+        [0, 0, 0, 400, 300, 1000],          # zoom0 = 1000/1000 = 1    (low)
+        [1000, 1000, 0, 400, 300, 10],      # zoom1 = 1000/10 = 100   (high); step0 dist=1000 -> vel=1000 (high)
+        [2000, 1001, 0, 400, 300, 1000],    # zoom2 = 1                (low); step1 dist=1 -> vel=1 (low)
+        [3000, 2001, 0, 400, 300, 10],      # zoom3 = 100             (high); step2 dist=1000 -> vel=1000 (high)
+        [4000, 2002, 0, 400, 300, 10],      # (endpoint only)          step3 dist=1 -> vel=1 (low)
+    ]
+    baseline_ratio = bf_metrics.search_focus_ratio(focus_baseline_path, None, IMG_W)
+    assert 0.0 < baseline_ratio < 1.0, (
+        f"expected a genuine partial focus split (not all-focused/all-unfocused) on the baseline "
+        f"path, got {baseline_ratio}"
+    )
+
+    extreme_point = [999999999, -999999999, 400, 300, 1]  # zoom = 1000/1 = 1000 (extreme)
+
+    idle_extended_path = focus_baseline_path + [[4000 + 70000] + extreme_point]
+    ratio_with_idle_extra = bf_metrics.search_focus_ratio(idle_extended_path, None, IMG_W)
+    assert ratio_with_idle_extra == baseline_ratio, (
+        f"appending an IDLE (dt=70000 > IDLE_GAP_MS) step, however extreme its own zoom/velocity, "
+        f"must leave search_focus_ratio unchanged from the baseline ({baseline_ratio}) -- "
+        f"got {ratio_with_idle_extra}"
+    )
+
+    active_extended_path = focus_baseline_path + [[4000 + 59999] + extreme_point]
+    ratio_with_active_extra = bf_metrics.search_focus_ratio(active_extended_path, None, IMG_W)
+    assert ratio_with_active_extra != baseline_ratio, (
+        f"appending the SAME extreme point as a NON-idle (dt=59999 <= IDLE_GAP_MS) step must "
+        f"change search_focus_ratio from the baseline ({baseline_ratio}) -- got "
+        f"{ratio_with_active_extra} (if these match, idle exclusion may not be taking effect at "
+        f"all -- the two paths would be indistinguishable)"
+    )
+
+    # --- B2 targeted assert: avg_zoom_log2_w / drilling_rate_octaves_per_min degenerate (all-idle)
+    # -> blank (NaN), not 0.0 (distinct from avg_zoom's/drilling_rate_per_min's 0.0-for-degenerate
+    # convention -- a 0/0 weighted mean/rate has no defensible value) ---
+    all_idle_path = [
+        [0, 0, 0, 400, 300, 1000],
+        [70000, 10, 0, 400, 300, 1000],
+        [140000, 20, 0, 400, 300, 1000],
+    ]
+    assert math.isnan(bf_metrics.avg_zoom_log2_w(all_idle_path, None, IMG_W)), (
+        "avg_zoom_log2_w should be blank (NaN) when every step is idle"
+    )
+    assert math.isnan(bf_metrics.drilling_rate_octaves_per_min(all_idle_path, None, IMG_W)), (
+        "drilling_rate_octaves_per_min should be blank (NaN) when every step is idle "
+        "(active duration is 0)"
+    )
+    assert math.isnan(bf_metrics.avg_zoom_log2_w([], None, IMG_W)), "blank for an empty path"
+    assert math.isnan(bf_metrics.avg_zoom_log2_w([[0, 0, 0, 400, 300]], None, IMG_W)), (
+        "blank for a 1-point path"
+    )
+    # But scanning/drilling/velocity/searchFocus KEEP their existing 0.0-for-degenerate convention
+    # (unaffected by B2's NaN choice for the two new metrics).
+    assert bf_metrics.scanning_rate_px_per_min(all_idle_path, None, IMG_W) == 0.0
+    assert bf_metrics.drilling_rate_per_min(all_idle_path, None, IMG_W) == 0.0
+    assert bf_metrics.path_velocity_px_per_sec(all_idle_path) == 0.0
+    assert bf_metrics.search_focus_ratio(all_idle_path, None, IMG_W) == 0.0
+    raster_all_idle = bf_metrics.raster_from_path(all_idle_path, IMG_W, IMG_H, 4, 4)
+    assert raster_all_idle is not None and raster_all_idle.sum() == 0.0, (
+        "raster_from_path should return an all-zero (not None) grid for an all-idle >=2-point path"
+    )
+
+    # --- B3 targeted assert: true_magnification / canonical_mag_band_labels / auto-fallback ---
+    assert bf_metrics.true_magnification([0, 0, 0, 400, 300, 2000], 40.0) == 20.0
+    assert bf_metrics.true_magnification([0, 0, 0, 400, 300], 40.0) is None, (
+        "true_magnification should be None for a 5-element (schema/3, no dsMilli) point"
+    )
+    assert bf_metrics.true_magnification([0, 0, 0, 400, 300, 2000], None) is None, (
+        "true_magnification should be None without a baseMagnification"
+    )
+    assert bf_metrics.canonical_mag_band_labels([], 40.0) == [], "empty path -> []"
+    assert bf_metrics.canonical_mag_band_labels(
+        [[0, 0, 0, 400, 300], [100, 10, 0, 400, 300]], 40.0
+    ) is None, "5-element (no dsMilli) points -> None (not computable, signal to fall back)"
+    bands_ok = bf_metrics.canonical_mag_band_labels(
+        [[0, 0, 0, 400, 300, 2000], [100, 0, 0, 400, 300, 1000], [200, 0, 0, 400, 300, 500]], 40.0
+    )
+    # true mags: 40/2.0=20 (cuts<=20 -> 5 of 6 -> band5), 40/1.0=40 (cuts<=40 -> 6 -> band6),
+    # 40/0.5=80 (cuts<=80 -> 6 -> band6, clamped to the top band).
+    assert bands_ok == [5, 6], bands_ok
+
+    bands_tercile, scheme_tercile = bf_metrics.magband_labels_for_scheme(
+        [[0, 0, 0, 400, 300], [100, 10, 0, 400, 300], [200, 20, 0, 400, 300]], None, IMG_W, 3,
+        scheme="canonical",
+    )
+    assert scheme_tercile == "tercile", (
+        "5-element (no dsMilli) path should auto-fall back to tercile even under the canonical "
+        f"default, got {scheme_tercile}"
+    )
+    assert len(bands_tercile) == 2, bands_tercile
+
+    bands_canon, scheme_canon = bf_metrics.magband_labels_for_scheme(
+        [[0, 0, 0, 400, 300, 2000], [100, 0, 0, 400, 300, 1000], [200, 0, 0, 400, 300, 500]],
+        40.0, IMG_W, 3, scheme="canonical",
+    )
+    assert scheme_canon == "canonical", scheme_canon
+    assert bands_canon == [5, 6], bands_canon
+
+    bands_forced, scheme_forced = bf_metrics.magband_labels_for_scheme(
+        [[0, 0, 0, 400, 300, 2000], [100, 0, 0, 400, 300, 1000], [200, 0, 0, 400, 300, 500]],
+        40.0, IMG_W, 3, scheme="tercile",
+    )
+    assert scheme_forced == "tercile", (
+        f"--magband-scheme tercile should force tercile even when canonical IS computable, "
+        f"got {scheme_forced}"
+    )
+    assert len(bands_forced) == 2, bands_forced
+
+
+def check_tier2_idle_fixture(tmp):
+    """Tier 2 B1+B2+B3+B4 pipeline-level check: runs the hand-derivable idle fixture (see
+    :func:`build_idle_fragment`) through the full ``analyze()`` pipeline and asserts every
+    documented number against its hand-derived expected value."""
+    frag = build_idle_fragment()
+    in_dir = os.path.join(tmp, "in_idle")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_idle")
+    analyze([in_dir], out_dir)
+
+    # dtype override: this is a single-row metrics.csv whose sole magnificationSource value is
+    # the literal string "true" -- pandas' C parser auto-infers a column with only "true"/"false"
+    # values as bool dtype (verified: a single-value "true" column reads back as Python True, not
+    # the string), which the multi-row main fixture (mixed "true"/"proxy-downsample") never
+    # triggers. Force str so the comparison below is against the actual written text.
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"), dtype={"magnificationSource": str})
+    assert len(metrics) == 1, len(metrics)
+    row = metrics.iloc[0]
+
+    # --- B1: idleMs/activeSpanMs ---
+    assert row["idleMs"] == 70000.0, f"expected idleMs == 70000.0, got {row['idleMs']}"
+    assert row["activeSpanMs"] == 3000.0, f"expected activeSpanMs == 3000.0, got {row['activeSpanMs']}"
+
+    # --- B1: scanningRatePxPerMin/drillingRatePerMin/pathVelocityPxPerSec, hand-derived (see
+    # build_idle_fragment's docstring for the step-by-step derivation) ---
+    assert abs(row["scanningRatePxPerMin"] - 3200.0) < 1e-6, (
+        f"expected scanningRatePxPerMin == 3200.0 (pan=160px over 0.05 active-min, idle step's "
+        f"50px pan excluded), got {row['scanningRatePxPerMin']}"
+    )
+    assert abs(row["drillingRatePerMin"] - 20.0) < 1e-6, (
+        f"expected drillingRatePerMin == 20.0 (1 active zoom-change / 0.05 active-min), "
+        f"got {row['drillingRatePerMin']}"
+    )
+    assert abs(row["pathVelocityPxPerSec"] - 60.0) < 1e-6, (
+        f"expected pathVelocityPxPerSec == 60.0 (median of active [100,50,60] px/s), "
+        f"got {row['pathVelocityPxPerSec']}"
+    )
+
+    # --- B2: avgZoomLog2W/drillingRateOctavesPerMin, hand-derived ---
+    zoom25, zoom100 = 40.0 / (1600 / 1000.0), 40.0 / (400 / 1000.0)
+    assert abs(zoom25 - 25.0) < 1e-9 and abs(zoom100 - 100.0) < 1e-9
+    expected_avg_zoom_log2_w = (
+        1000.0 * math.log2(zoom25) + 1000.0 * math.log2(zoom25) + 1000.0 * math.log2(zoom100)
+    ) / 3000.0
+    assert abs(row["avgZoomLog2W"] - expected_avg_zoom_log2_w) < 1e-6, (
+        f"expected avgZoomLog2W == {expected_avg_zoom_log2_w}, got {row['avgZoomLog2W']}"
+    )
+    # Only step2 (path[2]->path[3], the sole zoom-change step) contributes a non-zero |Δlog2| term
+    # among the 3 ACTIVE steps (step0/step3 are zoom-unchanged, each contributing 0); step1 (the
+    # idle step, also zoom-unchanged here) is excluded from the sum regardless.
+    expected_drilling_octaves = abs(math.log2(zoom100) - math.log2(zoom25)) / 0.05
+    assert abs(row["drillingRateOctavesPerMin"] - expected_drilling_octaves) < 1e-6, (
+        f"expected drillingRateOctavesPerMin == {expected_drilling_octaves}, "
+        f"got {row['drillingRateOctavesPerMin']}"
+    )
+
+    # --- B4: magnificationSource ---
+    assert row["magnificationSource"] == "true", row["magnificationSource"]
+
+    # --- raster_from_path (direct): total dwell-weight sum equals the ACTIVE dt sum (3000), not
+    # the total span (73000) -- the idle step contributes zero weight to any cell ---
+    raster = bf_metrics.raster_from_path(frag["path"], IMG_W, IMG_H, 16, 16)
+    assert raster is not None
+    assert abs(float(raster.sum()) - 3000.0) < 1e-6, (
+        f"expected raster_from_path total weight == 3000.0 (active dt only), got {raster.sum()}"
+    )
+
+    # --- B3: magbands_<slug>.csv -- canonical scheme (baseMagnification + dsMilli present), 7
+    # bands, band5/band6 dwell hand-derived, idle step excluded from the sum ---
+    magband_files = [f for f in os.listdir(out_dir) if f.startswith("magbands_")]
+    assert len(magband_files) == 1, magband_files
+    magbands = pd.read_csv(os.path.join(out_dir, magband_files[0]))
+    assert (magbands["bandScheme"] == "canonical").all()
+    assert len(magbands) == 7, len(magbands)
+    by_band = dict(zip(magbands["band"], magbands["bandTimeMs"]))
+    assert abs(by_band[5] - 2000.0) < 1e-6, (
+        f"expected band5 (20-40x) bandTimeMs == 2000.0 (step0+step2, idle step1 excluded), "
+        f"got {by_band[5]}"
+    )
+    assert abs(by_band[6] - 1000.0) < 1e-6, (
+        f"expected band6 (>=40x) bandTimeMs == 1000.0 (step3 only), got {by_band[6]}"
+    )
+    for b in (0, 1, 2, 3, 4):
+        assert abs(by_band[b]) < 1e-9, f"expected band{b} bandTimeMs == 0.0, got {by_band[b]}"
+    by_band_pct = dict(zip(magbands["band"], magbands["bandTimePct"]))
+    assert abs(by_band_pct[5] - (2000.0 / 3000.0 * 100.0)) < 1e-6, by_band_pct[5]
+    assert abs(by_band_pct[6] - (1000.0 / 3000.0 * 100.0)) < 1e-6, by_band_pct[6]
+
+
+def check_tier2_zoom_fidelity_fixture(tmp):
+    """Tier 2 B2 pipeline-level check (isolated from B1's idle complexity): runs the clean
+    doubling-zoom fixture (see :func:`build_zoom_fidelity_fragment`) through the full ``analyze()``
+    pipeline and asserts ``avgZoomLog2W``/``drillingRateOctavesPerMin`` against their hand-derived
+    values, plus B3's tercile auto-fallback (no ``baseMagnification``) and B4's "proxy-downsample"
+    flag."""
+    frag = build_zoom_fidelity_fragment()
+    in_dir = os.path.join(tmp, "in_zoomfid")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_zoomfid")
+    analyze([in_dir], out_dir)
+
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 1, len(metrics)
+    row = metrics.iloc[0]
+
+    assert abs(row["avgZoomLog2W"] - 0.5) < 1e-9, (
+        f"expected avgZoomLog2W == 0.5 (see build_zoom_fidelity_fragment's docstring), "
+        f"got {row['avgZoomLog2W']}"
+    )
+    assert abs(row["drillingRateOctavesPerMin"] - 60.0) < 1e-6, (
+        f"expected drillingRateOctavesPerMin == 60.0, got {row['drillingRateOctavesPerMin']}"
+    )
+    assert row["idleMs"] == 0.0, "no idle gap in this fixture"
+    assert abs(row["activeSpanMs"] - 2000.0) < 1e-9, row["activeSpanMs"]
+    assert row["magnificationSource"] == "proxy-downsample", (
+        "no baseMagnification on this fixture -> proxy-downsample"
+    )
+
+    magband_files = [f for f in os.listdir(out_dir) if f.startswith("magbands_")]
+    assert len(magband_files) == 1, magband_files
+    magbands = pd.read_csv(os.path.join(out_dir, magband_files[0]))
+    assert (magbands["bandScheme"] == "tercile").all(), (
+        "no baseMagnification -> canonical not computable -> auto-fallback to tercile"
+    )
+    assert len(magbands) == 3, len(magbands)
+
+
+def check_tier2_magband_scheme_cli(tmp):
+    """Tier 2 B3 CLI check: ``--magband-scheme tercile`` (``magband_scheme="tercile"``) FORCES the
+    tercile scheme even for the idle fixture, whose ``baseMagnification``/``dsMilli`` make the
+    canonical scheme computable and therefore the DEFAULT choice (see
+    :func:`check_tier2_idle_fixture`)."""
+    frag = build_idle_fragment()
+    in_dir = os.path.join(tmp, "in_idle_tercile")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_idle_tercile")
+    analyze([in_dir], out_dir, magband_scheme="tercile")
+
+    magband_files = [f for f in os.listdir(out_dir) if f.startswith("magbands_")]
+    assert len(magband_files) == 1, magband_files
+    magbands = pd.read_csv(os.path.join(out_dir, magband_files[0]))
+    assert (magbands["bandScheme"] == "tercile").all(), (
+        "--magband-scheme tercile should force tercile even when canonical is computable"
+    )
+    assert len(magbands) == 3, (
+        f"tercile scheme should emit the default 3 bands, got {len(magbands)}"
+    )
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="bfa-selftest-")
     try:
@@ -646,6 +1003,8 @@ def run():
             "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
             "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx",
             "mouseVelocityPxPerSec", "activeFractionPct",
+            "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
+            "magnificationSource",
         ]
         assert list(metrics.columns) == expected_cols, metrics.columns.tolist()
         assert metrics["dwellInAnnotationPct"].between(0, 100).all(), metrics["dwellInAnnotationPct"].tolist()
@@ -710,13 +1069,51 @@ def run():
             "missing scanpath-rasterized fine heatmap figure"
         )
 
-        # --- magbands_<slug>.csv: written for the path-carrying sessions (s1, s2, s4) ---
+        # --- magbands_<slug>.csv: written for the path-carrying sessions (s1, s2, s4). Tier 2 B3
+        # (default --magband-scheme canonical): s1 has a known baseMagnification (40.0) AND every
+        # path point carries dsMilli -> true magnification is computable -> CANONICAL scheme, 7
+        # bands (this is an intentional Tier-2 output change vs pre-T2, where s1 used tercile like
+        # every other session -- see t2-report.md). s2 (schema/3, no dsMilli at all) and s4
+        # (schema/4, baseMagnification deliberately None) cannot compute a true magnification ->
+        # auto-fallback to the pre-T2 TERCILE scheme, 3 bands each -- unchanged from before. ---
         magband_files = [f for f in os.listdir(out_dir) if f.startswith("magbands_")]
         assert len(magband_files) == 1, magband_files
         magbands = pd.read_csv(os.path.join(out_dir, magband_files[0]))
+        assert list(magbands.columns) == ["session", "band", "bandTimeMs", "bandTimePct", "bandScheme"], (
+            magbands.columns.tolist()
+        )
         assert set(magbands["session"].unique()) == {"s1", "s2", "s4"}, (
             f"magbands sessions mismatch: {magbands['session'].unique()}"
         )
+        magband_by_session = {sess: grp for sess, grp in magbands.groupby("session")}
+        assert (magband_by_session["s1"]["bandScheme"] == "canonical").all(), (
+            "s1 (known baseMagnification + dsMilli) should use the canonical scheme by default"
+        )
+        assert len(magband_by_session["s1"]) == 7, (
+            f"s1 canonical scheme should emit 7 fixed bands, got {len(magband_by_session['s1'])}"
+        )
+        for sess in ("s2", "s4"):
+            assert (magband_by_session[sess]["bandScheme"] == "tercile").all(), (
+                f"{sess} (no computable true magnification) should auto-fall back to tercile"
+            )
+            assert len(magband_by_session[sess]) == 3, (
+                f"{sess} tercile scheme should emit the default 3 bands, got "
+                f"{len(magband_by_session[sess])}"
+            )
+        # s2/s4's tercile bandTimeMs/bandTimePct are unaffected by B1 (no idle gaps here) or B3
+        # (they never used canonical) -- byte-identical to the pre-T2 baseline captured before this
+        # task's edits.
+        PRE_T2_MAGBANDS = {
+            ("s2", 0): 0.0, ("s2", 1): 0.0, ("s2", 2): 8500.0,
+            ("s4", 0): 0.0, ("s4", 1): 4750.0, ("s4", 2): 5000.0,
+        }
+        for _, r in magbands.iterrows():
+            key = (r["session"], int(r["band"]))
+            if key in PRE_T2_MAGBANDS:
+                assert abs(r["bandTimeMs"] - PRE_T2_MAGBANDS[key]) < 1e-6, (
+                    f"REGRESSION: {key} bandTimeMs drifted -- expected "
+                    f"{PRE_T2_MAGBANDS[key]}, got {r['bandTimeMs']}"
+                )
 
         # --- hotspots_<slug>.csv (Tier 1 A5): written for every session (grid always present),
         # rank ascending + dwellMs descending within each session ---
@@ -837,6 +1234,66 @@ def run():
         assert pd.isna(row_s2["pathTruncated"]), "schema/3 has no pathTruncated field"
         assert pd.isna(row_s3["pathTruncated"]), "schema/2 has no pathTruncated field"
         assert not pd.isna(row_s4["pathTruncated"]), "schema/4 session (s4) should have pathTruncated set"
+
+        # --- Tier 2 B1: idleMs/activeSpanMs, and a HARDCODED-baseline no-drift check -----------
+        # None of s1/s2/s4's synthetic ~250ms-step paths contain a >60s gap -> idleMs must be
+        # exactly 0.0 for every one of them, and activeSpanMs must equal the path's total
+        # wall-clock span -- this IS the B1 invariant "a session with no idle gap is unaffected".
+        for row, frag, label in (
+            (row_s1, fragments[0], "s1"), (row_s2, fragments[1], "s2"), (row_s4, fragments[3], "s4"),
+        ):
+            path_full = frag["path"]
+            expected_span = float(path_full[-1][0]) - float(path_full[0][0])
+            assert row["idleMs"] == 0.0, f"{label}: expected idleMs == 0.0 (no >60s gap), got {row['idleMs']}"
+            assert abs(row["activeSpanMs"] - expected_span) < 1e-9, (
+                f"{label}: expected activeSpanMs == total span ({expected_span}) when idleMs==0, "
+                f"got {row['activeSpanMs']}"
+            )
+        assert pd.isna(row_s3["idleMs"]), "schema/2 (no path) should have blank idleMs"
+        assert pd.isna(row_s3["activeSpanMs"]), "schema/2 (no path) should have blank activeSpanMs"
+
+        # Pre-T2 (pre-B1) hardcoded reference values captured from the unmodified pipeline, before
+        # any of this task's edits -- proves the B1 refactor is a byte-identical no-op for these
+        # idle-free fixtures (rather than merely "close"), which is the core B1 regression the spec
+        # requires guarding: "sessions with NO >60s gap must produce IDENTICAL numbers to before".
+        PRE_T2_RATES = {
+            "s1": {
+                "scanningRatePxPerMin": 24641.026004640848, "drillingRatePerMin": 12.307692307692307,
+                "pathVelocityPxPerSec": 401.756144943671, "searchFocusRatio": 0.7948717948717948,
+            },
+            "s2": {
+                "scanningRatePxPerMin": 25872.270344398752, "drillingRatePerMin": 0.0,
+                "pathVelocityPxPerSec": 361.70452912015685, "searchFocusRatio": 1.0,
+            },
+            "s4": {
+                "scanningRatePxPerMin": 49810.710161413175, "drillingRatePerMin": 6.153846153846153,
+                "pathVelocityPxPerSec": 77.25283166331187, "searchFocusRatio": 0.8205128205128205,
+            },
+        }
+        for row, label in ((row_s1, "s1"), (row_s2, "s2"), (row_s4, "s4")):
+            for col, expected in PRE_T2_RATES[label].items():
+                assert abs(row[col] - expected) < 1e-9, (
+                    f"REGRESSION (B1): {label}.{col} drifted for an idle-free path -- expected "
+                    f"{expected} (pre-T2 value), got {row[col]}"
+                )
+
+        # --- Tier 2 B2: avgZoomLog2W/drillingRateOctavesPerMin -- populated for path sessions,
+        # blank for s3 (no path) ---
+        for row, label in ((row_s1, "s1"), (row_s2, "s2"), (row_s4, "s4")):
+            assert not pd.isna(row["avgZoomLog2W"]), f"{label} missing avgZoomLog2W"
+            assert not pd.isna(row["drillingRateOctavesPerMin"]), f"{label} missing drillingRateOctavesPerMin"
+            assert row["drillingRateOctavesPerMin"] >= 0, (label, row["drillingRateOctavesPerMin"])
+        assert pd.isna(row_s3["avgZoomLog2W"]), "schema/2 (no path) should have blank avgZoomLog2W"
+        assert pd.isna(row_s3["drillingRateOctavesPerMin"]), (
+            "schema/2 (no path) should have blank drillingRateOctavesPerMin"
+        )
+
+        # --- Tier 2 B4: magnificationSource -- "true" iff baseMagnification is present, else
+        # "proxy-downsample"; blank without a path at all ---
+        assert row_s1["magnificationSource"] == "true", row_s1["magnificationSource"]
+        assert row_s2["magnificationSource"] == "proxy-downsample", row_s2["magnificationSource"]
+        assert row_s4["magnificationSource"] == "proxy-downsample", row_s4["magnificationSource"]
+        assert pd.isna(row_s3["magnificationSource"]), "schema/2 (no path) should have blank magnificationSource"
 
         # --- Phase 2 annotation columns ---
         # nAnnotations/annotatedAreaPx/dwellInAnnotationPct are grid-only (no path needed) ->
@@ -1186,6 +1643,12 @@ def run():
 
         # --- Finding-1 regression: two sessions sharing a --labels display label on one slide ---
         check_label_collision_regression(tmp)
+
+        # --- Tier 2 (B1-B4): idle exclusion, Drew-fidelity zoom, canonical mag bands, mag-source ---
+        check_tier2_direct_unit_asserts()
+        check_tier2_idle_fixture(tmp)
+        check_tier2_zoom_fidelity_fixture(tmp)
+        check_tier2_magband_scheme_cli(tmp)
 
         print("OK: all selftest assertions passed")
     finally:

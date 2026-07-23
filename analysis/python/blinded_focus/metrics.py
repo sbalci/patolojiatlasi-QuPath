@@ -32,6 +32,22 @@ found by literature review (``coincidence_level``'s denominator; ``magnification
 tie-counting) -- see each function's docstring and
 ``docs/superpowers/navtrack-lit-review-improvements.md`` §0 for the exact before/after and the
 literature citations motivating each fix.
+
+Tier 2 additions (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md, B1-B4 --
+**some of these CHANGE existing numbers, intentionally and documented**): B1 idle/away-time
+exclusion (``IDLE_GAP_MS`` = 60s, Ghezloo's >60s-frozen-viewport rule) -- ``idle_step_mask``/
+``idle_ms``/``active_span_ms`` -- CHANGES ``scanning_rate_px_per_min``, ``drilling_rate_per_min``,
+``path_velocity_px_per_sec``, ``search_focus_ratio``, and ``raster_from_path``'s per-step weight
+for any path with a >60s gap (identical to before for a path with none, since the exclusion set is
+then empty); B2 Drew-fidelity zoom -- ``avg_zoom_log2_w``/``drilling_rate_octaves_per_min``, ADDED
+alongside the untouched ``avg_zoom``/``drilling_rate_per_min``; B3 canonical magnification bands --
+``true_magnification``/``canonical_mag_band_labels``/``magband_labels_for_scheme`` -- CHANGES
+``magbands_<slug>.csv``'s band scheme (tercile -> canonical, 3 -> 7 bands) for any session with a
+known ``baseMagnification`` *and* per-point ``dsMilli`` (auto-falls back to the existing tercile
+``zoom_band_labels`` scheme otherwise, unchanged); B4 magnification-source flag (additive,
+``analyze.py``'s ``magnificationSource`` column) -- disambiguates true-objective-power sessions
+from proxy/downsample-relative ones so pooled ``avgZoom``-family statistics are never silently
+mixed across the two.
 """
 import math
 from collections import Counter
@@ -42,6 +58,13 @@ from scipy.stats import rankdata
 
 #: Small constant added to denominators/logs to avoid division-by-zero / log(0).
 EPS = 1e-12
+
+#: Tier 2 B1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): a scanpath step
+#: whose Δt exceeds this threshold (ms) is "idle" -- the user stepped away from the slide/mouse for
+#: over a minute (Ghezloo's >60s-frozen-viewport idle-time-exclusion rule) -- and is excluded from
+#: every rate/weight computation listed in :func:`idle_step_mask`'s docstring. An R port must use
+#: the identical literal `60000`.
+IDLE_GAP_MS = 60_000
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +386,49 @@ def step_durations_ms(path):
     return out
 
 
+def idle_step_mask(path):
+    """Tier 2 B1: boolean list (length ``len(path)-1``), ``True`` iff step ``i``'s Δt (see
+    :func:`step_durations_ms`) exceeds :data:`IDLE_GAP_MS` -- a "step-away" gap (Ghezloo's >60s-
+    frozen-viewport idle-time-exclusion rule) the user was not actively looking at the slide
+    during. Every rate/weight metric below documented as "idle-excluded"
+    (:func:`scanning_rate_px_per_min`, :func:`drilling_rate_per_min`,
+    :func:`path_velocity_px_per_sec`, :func:`search_focus_ratio`, :func:`raster_from_path`'s step
+    weight, :func:`avg_zoom_log2_w`, :func:`drilling_rate_octaves_per_min`, and the
+    ``magbands_<slug>.csv`` ``bandTimeMs`` aggregation in ``analyze.py``) drops steps where this is
+    ``True`` entirely from its computation -- not just caps their contribution.
+
+    ``[]`` if the path has fewer than 2 points (no steps at all)."""
+    dts = step_durations_ms(path)
+    return [dt > IDLE_GAP_MS for dt in dts]
+
+
+def idle_ms(path):
+    """Tier 2 B1: Σ of step Δt (see :func:`step_durations_ms`) over steps flagged idle by
+    :func:`idle_step_mask` -- the ``idleMs`` ``metrics.csv`` transparency column. ``0.0`` if the
+    path has fewer than 2 points (no steps) or no step is idle -- a session with no >60s gap
+    therefore always reports ``idleMs == 0.0``, which is what keeps every idle-excluded rate metric
+    below numerically identical to its pre-B1 value for such sessions (the exclusion set is
+    empty)."""
+    dts = step_durations_ms(path)
+    idle = idle_step_mask(path)
+    return float(sum(dt for dt, is_idle in zip(dts, idle) if is_idle))
+
+
+def active_span_ms(path):
+    """Tier 2 B1: wall-clock span (``tRel_last - tRel_first``) minus :func:`idle_ms` -- the
+    ``activeSpanMs`` ``metrics.csv`` transparency column, and the denominator every idle-excluded
+    rate metric below (:func:`scanning_rate_px_per_min`, :func:`drilling_rate_per_min`,
+    :func:`drilling_rate_octaves_per_min`) divides by (in minutes) in place of the old
+    total-duration denominator. ``0.0`` if the path has fewer than 2 points (no span at all) --
+    matches the file's existing "0.0 for an insufficient path" convention for administrative/
+    passthrough-style fields (as opposed to the NaN-blank convention used for genuinely undefined
+    statistics like :func:`avg_zoom_log2_w`)."""
+    if not path or len(path) < 2:
+        return 0.0
+    span = float(path[-1][0]) - float(path[0][0])
+    return span - idle_ms(path)
+
+
 def raster_from_path(path, img_w, img_h, gw, gh, step_mask=None):
     """Rebuild a ``gh x gw`` dwell-ms grid directly from the scanpath, independent of the
     recorded ``grid`` resolution -- this is what makes a 40x+ (very zoomed-in) navigation
@@ -386,6 +452,12 @@ def raster_from_path(path, img_w, img_h, gw, gh, step_mask=None):
     ``False`` are skipped entirely (used by the magnification-band split to build one raster per
     zoom band from the same path). Default (``None``) includes every step.
 
+    **Tier 2 B1:** a step flagged idle by :func:`idle_step_mask` (Δt > :data:`IDLE_GAP_MS`) is
+    *always* skipped as well, regardless of ``step_mask`` -- the user was not looking at that
+    viewport, so it should contribute no dwell-weight to the raster at any resolution. For a path
+    with no idle step (``idle_step_mask`` all ``False``) this is a no-op, so the raster is
+    numerically identical to the pre-B1 behavior.
+
     Returns a flat ``(gw*gh,)`` float array (dwell-ms per cell), or **``None``** if ``path`` has
     fewer than 2 points (a Δt requires two points; single-point/empty paths carry no raster).
     """
@@ -395,9 +467,12 @@ def raster_from_path(path, img_w, img_h, gw, gh, step_mask=None):
     img_w = float(img_w) if img_w else 1.0
     img_h = float(img_h) if img_h else 1.0
     dts = step_durations_ms(path)
+    idle = idle_step_mask(path)
     grid = np.zeros((gh, gw), dtype=float)
     for i, dt in enumerate(dts):
         if dt <= 0:
+            continue
+        if idle[i]:
             continue
         if step_mask is not None and not step_mask[i]:
             continue
@@ -534,19 +609,29 @@ def scanning_rate_px_per_min(path, base_mag=None, img_w=None):
     """"Scanning" rate (px/min): total center pan-distance (Euclidean, consecutive points)
     accumulated over steps where zoom is unchanged (see :func:`_step_zoom_changed`) -- panning
     around at a held zoom level, as opposed to "drilling" (see :func:`drilling_rate_per_min`) --
-    **normalized by the path's total duration** (``t[-1] - t[0]``, in minutes; the design doc
-    does not pin this denominator, so this is documented as the deliberate choice: total session
-    time, not time-spent-scanning, so the rate is comparable across sessions with different
-    scanning/drilling mixes). ``0.0`` if the path has fewer than 2 points or non-positive total
-    duration."""
+    **normalized by the path's ACTIVE duration** (Tier 2 B1: :func:`active_span_ms`, in minutes,
+    replacing the pre-B1 total-duration denominator ``t[-1] - t[0]``; the design doc does not pin
+    this denominator, so this is documented as the deliberate choice: active session time, not
+    time-spent-scanning, so the rate is comparable across sessions with different scanning/
+    drilling mixes -- idle "stepped away" time is neither "scanning" nor "drilling" time and would
+    otherwise dilute the rate). ``0.0`` if the path has fewer than 2 points or non-positive active
+    duration.
+
+    **Tier 2 B1:** a step flagged idle by :func:`idle_step_mask` also contributes nothing to the
+    pan-distance numerator, even if its zoom is unchanged -- an idle "parked at this zoom level for
+    5 minutes" step is not scanning. For a path with no idle step this is numerically identical to
+    the pre-B1 formula (idle set empty, and ``active_span_ms`` reduces to the total duration)."""
     if not path or len(path) < 2:
         return 0.0
-    duration_min = (float(path[-1][0]) - float(path[0][0])) / 60000.0
+    duration_min = active_span_ms(path) / 60000.0
     if duration_min <= 0:
         return 0.0
     changed = _step_zoom_changed(path, base_mag, img_w)
+    idle = idle_step_mask(path)
     pan = 0.0
     for i in range(len(path) - 1):
+        if idle[i]:
+            continue
         if not changed[i]:
             x0, y0 = float(path[i][1]), float(path[i][2])
             x1, y1 = float(path[i + 1][1]), float(path[i + 1][2])
@@ -556,16 +641,83 @@ def scanning_rate_px_per_min(path, base_mag=None, img_w=None):
 
 def drilling_rate_per_min(path, base_mag=None, img_w=None):
     """"Drilling" rate (events/min): count of zoom-change steps (see :func:`_step_zoom_changed`)
-    per minute of the path's total duration (same denominator as
-    :func:`scanning_rate_px_per_min`). ``0.0`` if the path has fewer than 2 points or non-positive
-    total duration."""
+    per minute of the path's ACTIVE duration (Tier 2 B1: :func:`active_span_ms`, same denominator
+    as :func:`scanning_rate_px_per_min`). ``0.0`` if the path has fewer than 2 points or
+    non-positive active duration.
+
+    **Tier 2 B1:** a zoom-change step that is *also* idle (see :func:`idle_step_mask` -- e.g. the
+    user zoomed in right before stepping away for 5+ minutes, so the change is only discovered on
+    return) does not count as a "drilling event" -- it was not an active navigation action. For a
+    path with no idle step this is numerically identical to the pre-B1 formula."""
     if not path or len(path) < 2:
         return 0.0
-    duration_min = (float(path[-1][0]) - float(path[0][0])) / 60000.0
+    duration_min = active_span_ms(path) / 60000.0
     if duration_min <= 0:
         return 0.0
     changed = _step_zoom_changed(path, base_mag, img_w)
-    return float(np.count_nonzero(changed)) / duration_min
+    idle = idle_step_mask(path)
+    n_changed_active = sum(1 for i in range(len(changed)) if changed[i] and not idle[i])
+    return float(n_changed_active) / duration_min
+
+
+def avg_zoom_log2_w(path, base_mag=None, img_w=None):
+    """Tier 2 B2 (Drew-fidelity zoom, ADD-alongside :func:`avg_zoom` -- does not replace it): Δt-
+    weighted mean of ``log2(magnification)`` over ACTIVE (non-idle, see :func:`idle_step_mask`)
+    steps:
+
+    ``avgZoomLog2W = Σ_active Δt_i * log2(zoom_i) / Σ_active Δt_i``
+
+    where ``zoom_i = point_zoom(path[i], base_mag, img_w)`` (the step-i-owns-point-i convention
+    used throughout this module, e.g. :func:`raster_from_path`). ``log2`` via ``math.log2`` (not
+    ``numpy.log2``) so an R port's plain ``log2()`` reproduces the identical IEEE-754 primitive.
+
+    ``float("nan")`` (blank in ``metrics.csv``) if the path has fewer than 2 points, every step is
+    idle, or the total active Δt weight is otherwise 0 -- a 0/0 weighted mean has no defensible
+    value (unlike :func:`avg_zoom`'s unweighted ``0.0``-for-empty-path convention, ``0.0`` here
+    would misleadingly read as "1x magnification", a real, specific claim -- so this uses the same
+    NaN-for-genuinely-undefined convention as e.g. :func:`enrichment_ratio` instead)."""
+    if not path or len(path) < 2:
+        return float("nan")
+    dts = step_durations_ms(path)
+    idle = idle_step_mask(path)
+    total_w = 0.0
+    total_wl = 0.0
+    for i, dt in enumerate(dts):
+        if idle[i] or dt <= 0:
+            continue
+        z = point_zoom(path[i], base_mag, img_w)
+        total_w += dt
+        total_wl += dt * math.log2(z)
+    return (total_wl / total_w) if total_w > 0 else float("nan")
+
+
+def drilling_rate_octaves_per_min(path, base_mag=None, img_w=None):
+    """Tier 2 B2 (Drew-fidelity zoom, ADD-alongside :func:`drilling_rate_per_min` -- does not
+    replace it): Σ of the absolute per-step ``log2(zoom)`` change over ACTIVE (non-idle, see
+    :func:`idle_step_mask`) steps, per active minute (:func:`active_span_ms` / 60000, same
+    denominator as :func:`scanning_rate_px_per_min`/:func:`drilling_rate_per_min`) -- a continuous
+    zoom-change-magnitude complement to :func:`drilling_rate_per_min`'s discrete event count:
+
+    ``drillingRateOctavesPerMin = Σ_active |log2(zoom_{i+1}) - log2(zoom_i)| / activeDurationMin``
+
+    ``log2`` via ``math.log2`` for Python<->R parity. ``float("nan")`` (blank in ``metrics.csv``)
+    if the path has fewer than 2 points or the active duration is non-positive (all steps idle, or
+    a degenerate zero-span path) -- same NaN-for-undefined convention as :func:`avg_zoom_log2_w`
+    (as opposed to :func:`drilling_rate_per_min`'s ``0.0``-for-zero-duration convention: a 0/0 rate
+    of continuous change is undefined, not "no change happened over a real duration")."""
+    if not path or len(path) < 2:
+        return float("nan")
+    duration_min = active_span_ms(path) / 60000.0
+    if duration_min <= 0:
+        return float("nan")
+    idle = idle_step_mask(path)
+    zooms = _zoom_series(path, base_mag, img_w)
+    total = 0.0
+    for i in range(len(path) - 1):
+        if idle[i]:
+            continue
+        total += abs(math.log2(zooms[i + 1]) - math.log2(zooms[i]))
+    return total / duration_min
 
 
 def zoom_band_labels(path, base_mag=None, img_w=None, n_bands=3):
@@ -594,6 +746,92 @@ def zoom_band_labels(path, base_mag=None, img_w=None, n_bands=3):
     return bands.tolist()
 
 
+#: Tier 2 B3: canonical magnification-band cut points (objective power, x). 6 cuts -> 7 labeled
+#: bands. An R port must use the identical literal cut points.
+MAG_BAND_CUTS = [1.0, 2.0, 4.0, 10.0, 20.0, 40.0]
+#: Tier 2 B3: human-readable labels for the 7 canonical bands (index-aligned with the band index
+#: :func:`canonical_mag_band_labels` returns; not itself written to ``magbands_<slug>.csv`` -- kept
+#: here as the single documented source of what each integer band index means).
+MAG_BAND_LABELS = ["<1x", "1-2x", "2-4x", "4-10x", "10-20x", "20-40x", ">=40x"]
+
+
+def true_magnification(point, base_mag):
+    """Tier 2 B3: true objective magnification for one scanpath point -- ``base_mag /
+    (dsMilli / 1000.0)`` -- requiring BOTH a known, positive ``base_mag`` (fragment-level
+    ``baseMagnification``, schema/4+) and the point's own ``dsMilli`` (6th element, schema/4+).
+
+    Returns ``None`` (a plain sentinel for "not computable" -- checked via ``is None`` at every
+    call site, never participating in arithmetic) when either is absent/non-positive or the point
+    has no ``dsMilli`` at all (schema/3, 5-element points) -- callers fall back to the existing
+    tercile scheme (:func:`zoom_band_labels`) in that case, per B3's auto-fallback rule. ``dsMilli
+    <= 0`` is treated defensively as full-resolution (matches :func:`point_zoom`'s own guard)."""
+    if base_mag is None:
+        return None
+    try:
+        bm = float(base_mag)
+    except (TypeError, ValueError):
+        return None
+    if bm <= 0:
+        return None
+    if len(point) < 6:
+        return None
+    ds_milli = float(point[5])
+    if ds_milli <= 0:
+        ds_milli = 1000.0
+    return bm / (ds_milli / 1000.0)
+
+
+def canonical_mag_band_labels(path, base_mag):
+    """Tier 2 B3: assign each *step* (``path[i] -> path[i+1]``, the same point-i-owns-the-step
+    convention as :func:`zoom_band_labels`/:func:`raster_from_path`) a canonical magnification-band
+    index in ``[0, 6]`` via :data:`MAG_BAND_CUTS` (``np.searchsorted(cuts, tm, side="right")``,
+    same convention as :func:`zoom_band_labels`), using :func:`true_magnification` (path[i],
+    base_mag)`.
+
+    Returns ``None`` (not ``[]``) the moment any step's true magnification is not computable
+    (missing/non-positive ``base_mag``, or a point with no ``dsMilli`` at all) -- signalling "the
+    canonical scheme does not apply to this session at all; use the tercile fallback instead"
+    (checked via ``is None``, never truthiness, so a genuinely empty/too-short path -- which
+    returns ``[]`` -- is distinguished from "not computable"). ``[]`` for a <2-point path (no
+    steps; canonical is trivially inapplicable but not a fallback signal)."""
+    if not path or len(path) < 2:
+        return []
+    bands = []
+    for i in range(len(path) - 1):
+        tm = true_magnification(path[i], base_mag)
+        if tm is None:
+            return None
+        idx = int(np.searchsorted(MAG_BAND_CUTS, tm, side="right"))
+        bands.append(min(idx, len(MAG_BAND_LABELS) - 1))
+    return bands
+
+
+def magband_labels_for_scheme(path, base_mag, img_w, n_bands, scheme="canonical"):
+    """Tier 2 B3: returns ``(bands, band_scheme_used)`` for one session's path, honoring the
+    ``--magband-scheme`` CLI flag:
+
+    - ``scheme == "tercile"``: always use the existing within-path quantile bands
+      (:func:`zoom_band_labels`); ``band_scheme_used == "tercile"``.
+    - ``scheme == "canonical"`` (default, and the fallback for any other value): try
+      :func:`canonical_mag_band_labels` first; if it returns ``None`` (this session's
+      ``base_mag``/``dsMilli`` are not computable -- e.g. an Atlas DZI slide with a null
+      ``baseMagnification``, or a schema/3 5-element w-proxy path), fall back to
+      :func:`zoom_band_labels`, ``band_scheme_used == "tercile"``. Otherwise
+      ``band_scheme_used == "canonical"``.
+
+    Returns ``([], "tercile")`` for a <2-point path (matches :func:`zoom_band_labels`'s own
+    ``[]``-for-<2-points convention; the scheme label is unused in that case since no rows are
+    ever emitted for an empty band list)."""
+    if not path or len(path) < 2:
+        return [], "tercile"
+    if scheme == "tercile":
+        return zoom_band_labels(path, base_mag, img_w, n_bands), "tercile"
+    bands = canonical_mag_band_labels(path, base_mag)
+    if bands is None:
+        return zoom_band_labels(path, base_mag, img_w, n_bands), "tercile"
+    return bands, "canonical"
+
+
 # ---------------------------------------------------------------------------
 # Path descriptors (Roa-Peña)
 # ---------------------------------------------------------------------------
@@ -618,10 +856,16 @@ def _step_velocities_px_per_sec(path):
 
 
 def path_velocity_px_per_sec(path):
-    """Median of per-step velocities (see :func:`_step_velocities_px_per_sec`). ``0.0`` (not
-    NaN/NA) if the path has fewer than 2 points."""
+    """Median of per-step velocities (see :func:`_step_velocities_px_per_sec`), **Tier 2 B1:
+    excluding steps flagged idle** by :func:`idle_step_mask` (a step "traversed" during a >60s
+    away-gap is not a real navigation velocity -- it is dropped from the median entirely, not
+    counted as a near-zero speed). ``0.0`` (not NaN/NA) if the path has fewer than 2 points or
+    every step is idle. For a path with no idle step this is numerically identical to the pre-B1
+    formula (idle set empty)."""
     vels = _step_velocities_px_per_sec(path)
-    return float(np.median(vels)) if vels else 0.0
+    idle = idle_step_mask(path)
+    active_vels = [v for v, is_idle in zip(vels, idle) if not is_idle]
+    return float(np.median(active_vels)) if active_vels else 0.0
 
 
 def linearity(path):
@@ -640,24 +884,39 @@ def linearity(path):
 
 def search_focus_ratio(path, base_mag=None, img_w=None):
     """Fraction of dwell-time spent in "focused" steps, Δt-weighted (same
-    step-i-owns-point-i convention as :func:`raster_from_path`/:func:`step_durations_ms`).
+    step-i-owns-point-i convention as :func:`raster_from_path`/:func:`step_durations_ms`), **Tier 2
+    B1: computed entirely over ACTIVE (non-idle, see :func:`idle_step_mask`) steps** -- idle steps
+    are dropped before either the median thresholds or the Δt-weighted sum are computed, exactly as
+    if they never existed, rather than being included in ``total_dt`` (which would otherwise let a
+    single long away-gap dominate the denominator and dilute the ratio toward whatever its own
+    zoom/velocity happened to be) or in the threshold computation (which would otherwise let a
+    stale zoom/near-zero velocity from an away-gap skew the "focused" cutoff for every other step).
 
     A step (``path[i] -> path[i+1]``) counts as **focused** iff *either*:
 
-    - ``point_zoom(path[i]) >= median(per-step zooms for this path)`` (high zoom), **or**
-    - its velocity (:func:`_step_velocities_px_per_sec`) ``<= median(per-step velocities for this
-      path)`` (low velocity -- includes stationary/paused steps, which get velocity 0 and are
-      always <= the median).
+    - ``point_zoom(path[i]) >= median(per-step zooms over ACTIVE steps)`` (high zoom), **or**
+    - its velocity (:func:`_step_velocities_px_per_sec`) ``<= median(per-step velocities over
+      ACTIVE steps)`` (low velocity -- includes stationary/paused steps, which get velocity 0 and
+      are always <= the median).
 
-    Both thresholds are the path's own median (data-driven per session, not a fixed absolute
-    pixel/magnification cutoff -- documented here for an R port to reuse ``median()`` identically).
-    ``0.0`` if the path has fewer than 2 points or zero total Δt."""
+    Both thresholds are the path's own median over active steps only (data-driven per session, not
+    a fixed absolute pixel/magnification cutoff -- documented here for an R port to reuse
+    ``median()`` identically). ``0.0`` if the path has fewer than 2 points, every step is idle, or
+    zero total active Δt. For a path with no idle step this is numerically identical to the pre-B1
+    formula (idle set empty, active steps == all steps)."""
     if not path or len(path) < 2:
         return 0.0
     n = len(path) - 1
-    zooms = np.array([point_zoom(path[i], base_mag, img_w) for i in range(n)], dtype=float)
-    dts = np.array(step_durations_ms(path), dtype=float)
-    vels = np.array(_step_velocities_px_per_sec(path), dtype=float)
+    zooms_all = np.array([point_zoom(path[i], base_mag, img_w) for i in range(n)], dtype=float)
+    dts_all = np.array(step_durations_ms(path), dtype=float)
+    vels_all = np.array(_step_velocities_px_per_sec(path), dtype=float)
+    idle = np.array(idle_step_mask(path), dtype=bool)
+    active = ~idle
+    if not active.any():
+        return 0.0
+    zooms = zooms_all[active]
+    dts = dts_all[active]
+    vels = vels_all[active]
     zoom_thresh = float(np.median(zooms))
     vel_thresh = float(np.median(vels))
     focused = (zooms >= zoom_thresh) | (vels <= vel_thresh)

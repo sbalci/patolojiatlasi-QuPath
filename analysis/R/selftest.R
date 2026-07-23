@@ -391,6 +391,69 @@ build_graded_fragments <- function() {
   list(fragments = fragments, graded_rows = graded_rows, key_rows = key_rows)
 }
 
+IDLE_SLIDE_KEY <- "sha256:selftest-slide-idle-0001"
+#' Tier 2 B1/B2/B3/B4 fixture: a schema/4, 5-point/4-step path with ONE >60s idle gap (step1,
+#' p1->p2) that is deliberately ZOOM-UNCHANGED (exercises B1's pan-exclusion of an idle-but-
+#' unchanged step, distinct from a zoom-change step), plus a real non-idle zoom-change step (step2)
+#' so drillingRatePerMin/drillingRateOctavesPerMin are non-trivial post-exclusion, not just "goes
+#' to 0". Every number below is hand-derivable from these exact points -- mirrors the Python
+#' toolkit's `build_idle_fragment` exactly; see docs/superpowers/sdd/t2-report.md for the full
+#' derivation.
+#'
+#' steps (path[i] -> path[i+1]):
+#'   step0 (i=0): dt=1000 (active),  zoom 25->25  (unchanged), dist=100
+#'   step1 (i=1): dt=70000 (IDLE),   zoom 25->25  (unchanged), dist=50
+#'   step2 (i=2): dt=1000 (active),  zoom 25->100 (CHANGED),   dist=50
+#'   step3 (i=3): dt=1000 (active),  zoom 100->100 (unchanged), dist=60
+#' totalSpan=73000ms, idleMs=70000ms, activeSpanMs=3000ms (0.05 active-minutes).
+build_idle_fragment <- function() {
+  grid <- .n_nonzero_grid(10)
+  path <- matrix(
+    c(
+      0, 0, 0, 400, 300, 1600,
+      1000, 100, 0, 400, 300, 1600,
+      71000, 100, 50, 400, 300, 1600,
+      72000, 150, 50, 400, 300, 400,
+      73000, 210, 50, 400, 300, 400
+    ),
+    nrow = 5, ncol = 6, byrow = TRUE
+  )
+  .fragment(
+    "idle1", 4, grid, 73000, 5, path = path,
+    base_magnification = 40.0, path_truncated = FALSE,
+    slide_key = IDLE_SLIDE_KEY
+  )
+}
+
+ZOOMFID_SLIDE_KEY <- "sha256:selftest-slide-zoomfid-0001"
+#' Tier 2 B2 fixture, isolated from B1's idle complexity (no idle gap): a schema/4, 3-point/2-step
+#' path with NO `baseMagnification` (exercises `point_zoom`'s ds-only fallback -- B4
+#' "proxy-downsample" -- and B3's per-session tercile auto-fallback, since a canonical scheme needs
+#' baseMagnification too), and a clean doubling-each-step dsMilli schedule so
+#' avgZoomLog2W/drillingRateOctavesPerMin are simple, hand-derivable numbers -- mirrors the Python
+#' toolkit's `build_zoom_fidelity_fragment` exactly:
+#'
+#'   zoom (base_mag=NULL -> 1000/dsMilli): point0=1.0, point1=2.0, point2=4.0
+#'   step0 (i=0): dt=1000, zoom0=1.0 -> log2=0.0
+#'   step1 (i=1): dt=1000, zoom1=2.0 -> log2=1.0
+#'   avgZoomLog2W = (1000*0.0 + 1000*1.0) / 2000 = 0.5
+#'   drillingRateOctavesPerMin = (|1-0| + |2-1|) / (2000ms/60000) = 2.0 / (1/30) = 60.0
+build_zoom_fidelity_fragment <- function() {
+  grid <- .n_nonzero_grid(10)
+  path <- matrix(
+    c(
+      0, 0, 0, 400, 300, 1000,
+      1000, 0, 0, 400, 300, 500,
+      2000, 0, 0, 400, 300, 250
+    ),
+    nrow = 3, ncol = 6, byrow = TRUE
+  )
+  .fragment(
+    "zoomfid1", 4, grid, 2000, 3, path = path,
+    slide_key = ZOOMFID_SLIDE_KEY
+  )
+}
+
 write_fragments_to_dir <- function(fragments, d) {
   for (f in fragments) {
     writeLines(jsonlite::toJSON(f, auto_unbox = TRUE), file.path(d, paste0(f$sessionId, ".json")))
@@ -640,6 +703,319 @@ check_label_collision_regression <- function(tmp) {
   )
 }
 
+# ---------------------------------------------------------------------------
+# Tier 2 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md, B1-B4)
+# ---------------------------------------------------------------------------
+
+#' Direct, pipeline-independent unit checks for the new Tier 2 B1/B2/B3 metric functions -- TDD-
+#' style asserts on hand-built inputs, bypassing the full `analyze()` pipeline entirely. Mirrors
+#' the Python toolkit's `check_tier2_direct_unit_asserts` exactly.
+check_tier2_direct_unit_asserts <- function() {
+  # --- B1: idle_step_mask/idle_ms/active_span_ms on a minimal 3-point/2-step path with one
+  # >60s gap ---
+  idle_path <- matrix(
+    c(
+      0, 0, 0, 400, 300,
+      1000, 10, 0, 400, 300,
+      65000, 20, 0, 400, 300
+    ),
+    nrow = 3, ncol = 5, byrow = TRUE
+  )
+  stopifnot("idle_step_mask mismatch" = identical(idle_step_mask(idle_path), c(FALSE, TRUE)))
+  stopifnot("idle_ms mismatch" = idle_ms(idle_path) == 64000.0)
+  stopifnot("active_span_ms mismatch" = active_span_ms(idle_path) == 1000.0)
+  stopifnot(
+    "idle_step_mask should be logical(0) for an empty path" =
+      length(idle_step_mask(matrix(numeric(0), ncol = 5))) == 0
+  )
+  one_pt <- matrix(c(0, 0, 0, 400, 300), nrow = 1, ncol = 5, byrow = TRUE)
+  stopifnot("idle_ms should be 0.0 for a 1-point path" = idle_ms(one_pt) == 0.0)
+  stopifnot("active_span_ms should be 0.0 for a 1-point path" = active_span_ms(one_pt) == 0.0)
+  no_gap_path <- matrix(
+    c(0, 0, 0, 400, 300, 1000, 10, 0, 400, 300, 2000, 20, 0, 400, 300),
+    nrow = 3, ncol = 5, byrow = TRUE
+  )
+  stopifnot("idle_ms should be 0.0 with no idle gap" = idle_ms(no_gap_path) == 0.0)
+  stopifnot("active_span_ms should equal total span with no idle gap" = active_span_ms(no_gap_path) == 2000.0)
+
+  # --- B1 targeted assert: search_focus_ratio's idle-exclusion, via an INVARIANCE property
+  # rather than a hand-predicted numeric outcome (the "focused" rule is an OR of two
+  # median-split conditions, so hand-predicting its exact value for an arbitrary extra point is
+  # fragile -- an invariance check is not). Mirrors the Python toolkit's baseline/idle/active
+  # construction exactly, so the two toolkits' baseline_ratio must agree to 1e-6.
+  focus_baseline_path <- matrix(
+    c(
+      0, 0, 0, 400, 300, 1000,
+      1000, 1000, 0, 400, 300, 10,
+      2000, 1001, 0, 400, 300, 1000,
+      3000, 2001, 0, 400, 300, 10,
+      4000, 2002, 0, 400, 300, 10
+    ),
+    nrow = 5, ncol = 6, byrow = TRUE
+  )
+  baseline_ratio <- search_focus_ratio(focus_baseline_path, NULL, IMG_W)
+  stopifnot(
+    "expected a genuine partial focus split (not all-focused/all-unfocused) on the baseline path" =
+      baseline_ratio > 0.0 && baseline_ratio < 1.0
+  )
+
+  extreme_point <- c(999999999, -999999999, 400, 300, 1)
+
+  idle_extended_path <- rbind(focus_baseline_path, c(4000 + 70000, extreme_point))
+  ratio_with_idle_extra <- search_focus_ratio(idle_extended_path, NULL, IMG_W)
+  if (ratio_with_idle_extra != baseline_ratio) {
+    stop(sprintf(
+      "appending an IDLE step, however extreme, must leave search_focus_ratio unchanged from the baseline (%s) -- got %s",
+      baseline_ratio, ratio_with_idle_extra
+    ), call. = FALSE)
+  }
+
+  active_extended_path <- rbind(focus_baseline_path, c(4000 + 59999, extreme_point))
+  ratio_with_active_extra <- search_focus_ratio(active_extended_path, NULL, IMG_W)
+  if (ratio_with_active_extra == baseline_ratio) {
+    stop(sprintf(
+      "appending the SAME extreme point as a NON-idle step must change search_focus_ratio from the baseline (%s) -- got the same value, exclusion may not be taking effect",
+      baseline_ratio
+    ), call. = FALSE)
+  }
+
+  # --- B2 targeted assert: avg_zoom_log2_w / drilling_rate_octaves_per_min degenerate (all-idle)
+  # -> blank (NaN), not 0.0 (distinct from avg_zoom's/drilling_rate_per_min's 0.0-for-degenerate
+  # convention -- a 0/0 weighted mean/rate has no defensible value) ---
+  all_idle_path <- matrix(
+    c(
+      0, 0, 0, 400, 300, 1000,
+      70000, 10, 0, 400, 300, 1000,
+      140000, 20, 0, 400, 300, 1000
+    ),
+    nrow = 3, ncol = 6, byrow = TRUE
+  )
+  stopifnot(
+    "avg_zoom_log2_w should be blank (NaN) when every step is idle" =
+      is.nan(avg_zoom_log2_w(all_idle_path, NULL, IMG_W))
+  )
+  stopifnot(
+    "drilling_rate_octaves_per_min should be blank (NaN) when every step is idle" =
+      is.nan(drilling_rate_octaves_per_min(all_idle_path, NULL, IMG_W))
+  )
+  stopifnot("blank for an empty path" = is.nan(avg_zoom_log2_w(matrix(numeric(0), ncol = 6), NULL, IMG_W)))
+  stopifnot(
+    "blank for a 1-point path" =
+      is.nan(avg_zoom_log2_w(matrix(c(0, 0, 0, 400, 300, 1000), nrow = 1, ncol = 6), NULL, IMG_W))
+  )
+  # But scanning/drilling/velocity/searchFocus KEEP their existing 0.0-for-degenerate convention
+  # (unaffected by B2's NaN choice for the two new metrics).
+  stopifnot(scanning_rate_px_per_min(all_idle_path, NULL, IMG_W) == 0.0)
+  stopifnot(drilling_rate_per_min(all_idle_path, NULL, IMG_W) == 0.0)
+  stopifnot(path_velocity_px_per_sec(all_idle_path) == 0.0)
+  stopifnot(search_focus_ratio(all_idle_path, NULL, IMG_W) == 0.0)
+  raster_all_idle <- raster_from_path(all_idle_path, IMG_W, IMG_H, 4, 4)
+  stopifnot(
+    "raster_from_path should return an all-zero (not NULL) grid for an all-idle >=2-point path" =
+      !is.null(raster_all_idle) && sum(raster_all_idle) == 0.0
+  )
+
+  # --- B3 targeted assert: true_magnification / canonical_mag_band_labels / auto-fallback ---
+  stopifnot(true_magnification(c(0, 0, 0, 400, 300, 2000), 40.0) == 20.0)
+  stopifnot(
+    "true_magnification should be NULL for a 5-element (schema/3, no dsMilli) point" =
+      is.null(true_magnification(c(0, 0, 0, 400, 300), 40.0))
+  )
+  stopifnot(
+    "true_magnification should be NULL without a baseMagnification" =
+      is.null(true_magnification(c(0, 0, 0, 400, 300, 2000), NULL))
+  )
+  stopifnot("empty path -> integer(0)" = length(canonical_mag_band_labels(matrix(numeric(0), ncol = 5), 40.0)) == 0)
+  stopifnot(
+    "5-element (no dsMilli) points -> NULL (not computable, signal to fall back)" =
+      is.null(canonical_mag_band_labels(
+        matrix(c(0, 0, 0, 400, 300, 100, 10, 0, 400, 300), nrow = 2, ncol = 5, byrow = TRUE), 40.0
+      ))
+  )
+  bands_ok <- canonical_mag_band_labels(
+    matrix(c(0, 0, 0, 400, 300, 2000, 100, 0, 0, 400, 300, 1000, 200, 0, 0, 400, 300, 500),
+      nrow = 3, ncol = 6, byrow = TRUE
+    ),
+    40.0
+  )
+  stopifnot("canonical band labels mismatch" = identical(bands_ok, c(5L, 6L)))
+
+  tercile_result <- magband_labels_for_scheme(
+    matrix(c(0, 0, 0, 400, 300, 100, 10, 0, 400, 300, 200, 20, 0, 400, 300),
+      nrow = 3, ncol = 5, byrow = TRUE
+    ),
+    NULL, IMG_W, 3, scheme = "canonical"
+  )
+  stopifnot(
+    "5-element (no dsMilli) path should auto-fall back to tercile even under the canonical default" =
+      identical(tercile_result$scheme, "tercile")
+  )
+  stopifnot(length(tercile_result$bands) == 2)
+
+  canon_result <- magband_labels_for_scheme(
+    matrix(c(0, 0, 0, 400, 300, 2000, 100, 0, 0, 400, 300, 1000, 200, 0, 0, 400, 300, 500),
+      nrow = 3, ncol = 6, byrow = TRUE
+    ),
+    40.0, IMG_W, 3, scheme = "canonical"
+  )
+  stopifnot(identical(canon_result$scheme, "canonical"))
+  stopifnot(identical(canon_result$bands, c(5L, 6L)))
+
+  forced_result <- magband_labels_for_scheme(
+    matrix(c(0, 0, 0, 400, 300, 2000, 100, 0, 0, 400, 300, 1000, 200, 0, 0, 400, 300, 500),
+      nrow = 3, ncol = 6, byrow = TRUE
+    ),
+    40.0, IMG_W, 3, scheme = "tercile"
+  )
+  stopifnot(
+    "--magband-scheme tercile should force tercile even when canonical IS computable" =
+      identical(forced_result$scheme, "tercile")
+  )
+  stopifnot(length(forced_result$bands) == 2)
+}
+
+#' Tier 2 B1+B2+B3+B4 pipeline-level check: runs the hand-derivable idle fixture (see
+#' `build_idle_fragment`) through the full `analyze()` pipeline and asserts every documented number
+#' against its hand-derived expected value. Mirrors the Python toolkit's `check_tier2_idle_fixture`.
+check_tier2_idle_fixture <- function(tmp) {
+  frag <- build_idle_fragment()
+  in_dir <- file.path(tmp, "in_idle")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_idle")
+  metrics <- analyze(list(in_dir), out_dir)
+
+  stopifnot("expected 1 metrics row" = nrow(metrics) == 1)
+  row <- metrics[1, ]
+
+  # --- B1: idleMs/activeSpanMs ---
+  stopifnot("expected idleMs == 70000.0" = row$idleMs == 70000.0)
+  stopifnot("expected activeSpanMs == 3000.0" = row$activeSpanMs == 3000.0)
+
+  # --- B1: scanningRatePxPerMin/drillingRatePerMin/pathVelocityPxPerSec, hand-derived (see
+  # build_idle_fragment's docstring for the step-by-step derivation) ---
+  stopifnot(
+    "expected scanningRatePxPerMin == 3200.0" = abs(row$scanningRatePxPerMin - 3200.0) < 1e-6
+  )
+  stopifnot("expected drillingRatePerMin == 20.0" = abs(row$drillingRatePerMin - 20.0) < 1e-6)
+  stopifnot("expected pathVelocityPxPerSec == 60.0" = abs(row$pathVelocityPxPerSec - 60.0) < 1e-6)
+
+  # --- B2: avgZoomLog2W/drillingRateOctavesPerMin, hand-derived ---
+  zoom25 <- 40.0 / (1600 / 1000.0); zoom100 <- 40.0 / (400 / 1000.0)
+  stopifnot(abs(zoom25 - 25.0) < 1e-9 && abs(zoom100 - 100.0) < 1e-9)
+  expected_avg_zoom_log2_w <- (
+    1000.0 * log2(zoom25) + 1000.0 * log2(zoom25) + 1000.0 * log2(zoom100)
+  ) / 3000.0
+  stopifnot(
+    "avgZoomLog2W mismatch" = abs(row$avgZoomLog2W - expected_avg_zoom_log2_w) < 1e-6
+  )
+  # Only step2 (path[2]->path[3], the sole zoom-change step) contributes a non-zero |Δlog2| term
+  # among the 3 ACTIVE steps (step0/step3 are zoom-unchanged, each contributing 0); step1 (the
+  # idle step, also zoom-unchanged here) is excluded from the sum regardless.
+  expected_drilling_octaves <- abs(log2(zoom100) - log2(zoom25)) / 0.05
+  stopifnot(
+    "drillingRateOctavesPerMin mismatch" =
+      abs(row$drillingRateOctavesPerMin - expected_drilling_octaves) < 1e-6
+  )
+
+  # --- B4: magnificationSource ---
+  stopifnot("magnificationSource mismatch" = row$magnificationSource == "true")
+
+  # --- raster_from_path (direct): total dwell-weight sum equals the ACTIVE dt sum (3000), not
+  # the total span (73000) -- the idle step contributes zero weight to any cell ---
+  raster <- raster_from_path(frag$path, IMG_W, IMG_H, 16, 16)
+  stopifnot(!is.null(raster))
+  stopifnot(
+    "expected raster_from_path total weight == 3000.0 (active dt only)" =
+      abs(sum(raster) - 3000.0) < 1e-6
+  )
+
+  # --- B3: magbands_<slug>.csv -- canonical scheme (baseMagnification + dsMilli present), 7
+  # bands, band5/band6 dwell hand-derived, idle step excluded from the sum ---
+  out_files <- list.files(out_dir)
+  magband_files <- out_files[startsWith(out_files, "magbands_")]
+  stopifnot("expected exactly one magbands_ file" = length(magband_files) == 1)
+  magbands_df <- utils::read.csv(file.path(out_dir, magband_files[1]), stringsAsFactors = FALSE)
+  stopifnot(all(magbands_df$bandScheme == "canonical"))
+  stopifnot(nrow(magbands_df) == 7)
+  by_band <- setNames(magbands_df$bandTimeMs, magbands_df$band)
+  stopifnot(
+    "expected band5 (20-40x) bandTimeMs == 2000.0" = abs(by_band[["5"]] - 2000.0) < 1e-6
+  )
+  stopifnot(
+    "expected band6 (>=40x) bandTimeMs == 1000.0" = abs(by_band[["6"]] - 1000.0) < 1e-6
+  )
+  for (b in c("0", "1", "2", "3", "4")) {
+    stopifnot(abs(by_band[[b]]) < 1e-9)
+  }
+  by_band_pct <- setNames(magbands_df$bandTimePct, magbands_df$band)
+  stopifnot(abs(by_band_pct[["5"]] - (2000.0 / 3000.0 * 100.0)) < 1e-6)
+  stopifnot(abs(by_band_pct[["6"]] - (1000.0 / 3000.0 * 100.0)) < 1e-6)
+}
+
+#' Tier 2 B2 pipeline-level check (isolated from B1's idle complexity): runs the clean doubling-
+#' zoom fixture (see `build_zoom_fidelity_fragment`) through the full `analyze()` pipeline and
+#' asserts `avgZoomLog2W`/`drillingRateOctavesPerMin` against their hand-derived values, plus B3's
+#' tercile auto-fallback (no `baseMagnification`) and B4's "proxy-downsample" flag. Mirrors the
+#' Python toolkit's `check_tier2_zoom_fidelity_fixture`.
+check_tier2_zoom_fidelity_fixture <- function(tmp) {
+  frag <- build_zoom_fidelity_fragment()
+  in_dir <- file.path(tmp, "in_zoomfid")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_zoomfid")
+  metrics <- analyze(list(in_dir), out_dir)
+
+  stopifnot("expected 1 metrics row" = nrow(metrics) == 1)
+  row <- metrics[1, ]
+
+  stopifnot("expected avgZoomLog2W == 0.5" = abs(row$avgZoomLog2W - 0.5) < 1e-9)
+  stopifnot(
+    "expected drillingRateOctavesPerMin == 60.0" = abs(row$drillingRateOctavesPerMin - 60.0) < 1e-6
+  )
+  stopifnot("no idle gap in this fixture" = row$idleMs == 0.0)
+  stopifnot(abs(row$activeSpanMs - 2000.0) < 1e-9)
+  stopifnot(
+    "no baseMagnification on this fixture -> proxy-downsample" =
+      row$magnificationSource == "proxy-downsample"
+  )
+
+  out_files <- list.files(out_dir)
+  magband_files <- out_files[startsWith(out_files, "magbands_")]
+  stopifnot("expected exactly one magbands_ file" = length(magband_files) == 1)
+  magbands_df <- utils::read.csv(file.path(out_dir, magband_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "no baseMagnification -> canonical not computable -> auto-fallback to tercile" =
+      all(magbands_df$bandScheme == "tercile")
+  )
+  stopifnot(nrow(magbands_df) == 3)
+}
+
+#' Tier 2 B3 CLI check: `--magband-scheme tercile` (`magband_scheme="tercile"`) FORCES the tercile
+#' scheme even for the idle fixture, whose `baseMagnification`/`dsMilli` make the canonical scheme
+#' computable and therefore the DEFAULT choice (see `check_tier2_idle_fixture`). Mirrors the Python
+#' toolkit's `check_tier2_magband_scheme_cli`.
+check_tier2_magband_scheme_cli <- function(tmp) {
+  frag <- build_idle_fragment()
+  in_dir <- file.path(tmp, "in_idle_tercile")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_idle_tercile")
+  analyze(list(in_dir), out_dir, magband_scheme = "tercile")
+
+  out_files <- list.files(out_dir)
+  magband_files <- out_files[startsWith(out_files, "magbands_")]
+  stopifnot("expected exactly one magbands_ file" = length(magband_files) == 1)
+  magbands_df <- utils::read.csv(file.path(out_dir, magband_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "--magband-scheme tercile should force tercile even when canonical is computable" =
+      all(magbands_df$bandScheme == "tercile")
+  )
+  stopifnot(
+    "tercile scheme should emit the default 3 bands" = nrow(magbands_df) == 3
+  )
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -674,7 +1050,9 @@ run <- function() {
     "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
     "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
     "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx",
-    "mouseVelocityPxPerSec", "activeFractionPct"
+    "mouseVelocityPxPerSec", "activeFractionPct",
+    "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
+    "magnificationSource"
   )
   stopifnot("metrics.csv columns mismatch" = identical(colnames(metrics), expected_cols))
   stopifnot(
@@ -738,14 +1116,50 @@ run <- function() {
       setequal(unique(scan$sessionA), c("s1", "s2", "s4"))
   )
 
-  # --- magbands_<slug>.csv: written for the path-carrying sessions (s1, s2, s4) ---
+  # --- magbands_<slug>.csv: written for the path-carrying sessions (s1, s2, s4). Tier 2 B3
+  # (default --magband-scheme canonical): s1 has a known baseMagnification (40.0) AND every path
+  # point carries dsMilli -> true magnification is computable -> CANONICAL scheme, 7 bands (an
+  # intentional Tier-2 output change vs pre-T2, where s1 used tercile like every other session --
+  # see t2-report.md). s2 (schema/3, no dsMilli at all) and s4 (schema/4, baseMagnification
+  # deliberately NULL) cannot compute a true magnification -> auto-fallback to the pre-T2 TERCILE
+  # scheme, 3 bands each -- unchanged from before. ---
   magband_files <- out_files[startsWith(out_files, "magbands_")]
   stopifnot("expected exactly one magbands_ file" = length(magband_files) == 1)
   magbands_df <- utils::read.csv(file.path(out_dir, magband_files[1]), stringsAsFactors = FALSE)
   stopifnot(
+    "magbands.csv columns mismatch" =
+      identical(colnames(magbands_df), c("session", "band", "bandTimeMs", "bandTimePct", "bandScheme"))
+  )
+  stopifnot(
     "magbands sessions mismatch" =
       setequal(unique(magbands_df$session), c("s1", "s2", "s4"))
   )
+  s1_magbands <- magbands_df[magbands_df$session == "s1", ]
+  stopifnot("s1 should use the canonical scheme by default" = all(s1_magbands$bandScheme == "canonical"))
+  stopifnot("s1 canonical scheme should emit 7 fixed bands" = nrow(s1_magbands) == 7)
+  for (sess in c("s2", "s4")) {
+    sess_magbands <- magbands_df[magbands_df$session == sess, ]
+    if (!all(sess_magbands$bandScheme == "tercile")) {
+      stop(sprintf("%s should auto-fall back to tercile", sess), call. = FALSE)
+    }
+    if (nrow(sess_magbands) != 3) {
+      stop(sprintf("%s tercile scheme should emit the default 3 bands", sess), call. = FALSE)
+    }
+  }
+  # s2/s4's tercile bandTimeMs is unaffected by B1 (no idle gaps here) or B3 (they never used
+  # canonical) -- byte-identical to the pre-T2 baseline captured before this task's edits.
+  pre_t2_magbands <- list(
+    s2_0 = 0.0, s2_1 = 0.0, s2_2 = 8500.0,
+    s4_0 = 0.0, s4_1 = 4750.0, s4_2 = 5000.0
+  )
+  for (nm in names(pre_t2_magbands)) {
+    parts <- strsplit(nm, "_")[[1]]
+    sess <- parts[1]; band_i <- as.integer(parts[2])
+    val <- magbands_df$bandTimeMs[magbands_df$session == sess & magbands_df$band == band_i]
+    if (abs(val - pre_t2_magbands[[nm]]) >= 1e-6) {
+      stop(sprintf("REGRESSION: %s bandTimeMs drifted (expected %s, got %s)", nm, pre_t2_magbands[[nm]], val), call. = FALSE)
+    }
+  }
 
   # --- hotspots_<slug>.csv (Tier 1 A5): written for every session (grid always present), rank
   # ascending + dwellMs descending within each session ---
@@ -919,6 +1333,78 @@ run <- function() {
   stopifnot("schema/3 has no pathTruncated field" = is.na(row_s2$pathTruncated))
   stopifnot("schema/2 has no pathTruncated field" = is.na(row_s3$pathTruncated))
   stopifnot("schema/4 session (s4) should have pathTruncated set" = !is.na(row_s4$pathTruncated))
+
+  # --- Tier 2 B1: idleMs/activeSpanMs, and a HARDCODED-baseline no-drift check -------------------
+  # None of s1/s2/s4's synthetic ~250ms-step paths contain a >60s gap -> idleMs must be exactly
+  # 0.0 for every one of them, and activeSpanMs must equal the path's total wall-clock span --
+  # this IS the B1 invariant "a session with no idle gap is unaffected".
+  fragment_by_session <- list(s1 = fragments[[1]], s2 = fragments[[2]], s4 = fragments[[4]])
+  row_by_session <- list(s1 = row_s1, s2 = row_s2, s4 = row_s4)
+  for (sess in c("s1", "s2", "s4")) {
+    r <- row_by_session[[sess]]
+    pm_full <- as_path_matrix(fragment_by_session[[sess]]$path)
+    expected_span <- pm_full[nrow(pm_full), 1] - pm_full[1, 1]
+    if (r$idleMs != 0.0) stop(sprintf("%s: expected idleMs == 0.0 (no >60s gap), got %s", sess, r$idleMs))
+    if (abs(r$activeSpanMs - expected_span) >= 1e-9) {
+      stop(sprintf(
+        "%s: expected activeSpanMs == total span (%s) when idleMs==0, got %s",
+        sess, expected_span, r$activeSpanMs
+      ))
+    }
+  }
+  stopifnot("schema/2 (no path) should have blank idleMs" = is.na(row_s3$idleMs))
+  stopifnot("schema/2 (no path) should have blank activeSpanMs" = is.na(row_s3$activeSpanMs))
+
+  # Pre-T2 (pre-B1) hardcoded reference values captured from the unmodified R pipeline, before any
+  # of this task's edits -- proves the B1 refactor is a byte-identical no-op for these idle-free
+  # fixtures (rather than merely "close"), which is the core B1 regression the spec requires
+  # guarding: "sessions with NO >60s gap must produce IDENTICAL numbers to before".
+  pre_t2_rates <- list(
+    s1 = list(scanningRatePxPerMin = 24398.8811896941, drillingRatePerMin = 12.3076923076923,
+              pathVelocityPxPerSec = 432.666153055679, searchFocusRatio = 0.794871794871795),
+    s2 = list(scanningRatePxPerMin = 25938.0088737907, drillingRatePerMin = 0.0,
+              pathVelocityPxPerSec = 437.109269310815, searchFocusRatio = 1.0),
+    s4 = list(scanningRatePxPerMin = 49656.5707510415, drillingRatePerMin = 6.15384615384615,
+              pathVelocityPxPerSec = 84.0951841665146, searchFocusRatio = 0.769230769230769)
+  )
+  for (sess in c("s1", "s2", "s4")) {
+    r <- row_by_session[[sess]]
+    for (col in names(pre_t2_rates[[sess]])) {
+      expected <- pre_t2_rates[[sess]][[col]]
+      if (abs(r[[col]] - expected) >= 1e-6) {
+        stop(sprintf(
+          "REGRESSION (B1): %s.%s drifted for an idle-free path -- expected %s (pre-T2 value), got %s",
+          sess, col, expected, r[[col]]
+        ))
+      }
+    }
+  }
+
+  # --- Tier 2 B2: avgZoomLog2W/drillingRateOctavesPerMin -- populated for path sessions, blank
+  # for s3 (no path) ---
+  for (sess in c("s1", "s2", "s4")) {
+    r <- row_by_session[[sess]]
+    if (is.na(r$avgZoomLog2W)) stop(sprintf("%s missing avgZoomLog2W", sess))
+    if (is.na(r$drillingRateOctavesPerMin)) stop(sprintf("%s missing drillingRateOctavesPerMin", sess))
+    stopifnot("drillingRateOctavesPerMin should be non-negative" = r$drillingRateOctavesPerMin >= 0)
+  }
+  stopifnot("schema/2 (no path) should have blank avgZoomLog2W" = is.na(row_s3$avgZoomLog2W))
+  stopifnot(
+    "schema/2 (no path) should have blank drillingRateOctavesPerMin" =
+      is.na(row_s3$drillingRateOctavesPerMin)
+  )
+
+  # --- Tier 2 B4: magnificationSource -- "true" iff baseMagnification is present, else
+  # "proxy-downsample"; blank without a path at all ---
+  stopifnot("s1 magnificationSource mismatch" = row_s1$magnificationSource == "true")
+  stopifnot("s2 magnificationSource mismatch" = row_s2$magnificationSource == "proxy-downsample")
+  stopifnot("s4 magnificationSource mismatch" = row_s4$magnificationSource == "proxy-downsample")
+  stopifnot(
+    # A character column's blank cell round-trips through read.csv as "" (not NA) -- R's
+    # read.csv only maps "" -> NA for columns it coerces to numeric (see the diagnosis == ""
+    # convention in check_decisions above); mirrors that same convention here.
+    "schema/2 (no path) should have blank magnificationSource" = row_s3$magnificationSource == ""
+  )
 
   # --- Phase 2 annotation columns ---
   # nAnnotations/annotatedAreaPx/dwellInAnnotationPct are grid-only (no path needed) -> populated
@@ -1305,6 +1791,12 @@ run <- function() {
 
   # --- Finding-1 regression: two sessions sharing a --labels display label on one slide ---
   check_label_collision_regression(tmp)
+
+  # --- Tier 2 (B1-B4): idle exclusion, Drew-fidelity zoom, canonical mag bands, mag-source flag ---
+  check_tier2_direct_unit_asserts()
+  check_tier2_idle_fixture(tmp)
+  check_tier2_zoom_fidelity_fixture(tmp)
+  check_tier2_magband_scheme_cli(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }

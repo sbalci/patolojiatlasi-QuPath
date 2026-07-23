@@ -4,7 +4,7 @@ Usage::
 
     python -m blinded_focus.analyze <input...> --out DIR [--reference SESSIONID]
         [--roi geojson] [--labels csv] [--key csv] [--graded csv] [--figures]
-        [--res 512] [--magbands 3]
+        [--res 512] [--magbands 3] [--magband-scheme canonical|tercile]
 
 ``<input...>`` may be fragment JSON files, directories (recursed for ``*.json``), and/or
 ``.zip`` archives, in any mix. See ``../README.md`` for the full output-file contract.
@@ -24,14 +24,29 @@ Output files (written to ``--out DIR``):
   carries schema/5 8-element points with ``mouseX``/``mouseY``) plus (Tier 1, additive) turn-angle
   directionality ``meanAbsTurnAngleDeg``/``turnAngleEntropy`` (path-only, blank for <3 points),
   mouse kinematics ``mousePathLengthPx``/``mouseVelocityPxPerSec`` (schema/5 only), and
-  ``activeFractionPct`` (path-only, ``100*durationMs/(tRel_last-tRel_first)``, not clamped >100%).
+  ``activeFractionPct`` (path-only, ``100*durationMs/(tRel_last-tRel_first)``, not clamped >100%)
+  plus (Tier 2, docs/superpowers/specs/2026-07-23-...) B1 idle-exclusion transparency columns
+  ``idleMs``/``activeSpanMs`` (path-only; ``0.0`` when the path has no >60s gap -- see
+  :data:`blinded_focus.metrics.IDLE_GAP_MS`), B2 Drew-fidelity zoom ``avgZoomLog2W``/
+  ``drillingRateOctavesPerMin`` (ADD-alongside the untouched ``avgZoom``/``drillingRatePerMin``;
+  blank when the underlying weighted mean/rate is undefined, e.g. an all-idle path), and B4
+  ``magnificationSource`` (``"true"``/``"proxy-downsample"``, path-only). **B1 CHANGES**
+  ``scanningRatePxPerMin``/``drillingRatePerMin``/``pathVelocityPxPerSec``/``searchFocusRatio``
+  numbers for any session with a >60s idle gap (byte-identical to before for sessions without one).
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus).
 - per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``.
-- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv``, and (Phase 1)
-  ``magbands_<slug>.csv`` — per-session dwell time in each of ``--magbands`` (default 3)
-  within-path zoom bands (tidy long format; see :func:`blinded_focus.metrics.zoom_band_labels`).
+- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv``, and (Phase 1;
+  Tier 2 B1/B3) ``magbands_<slug>.csv`` — per-session dwell time (Tier 2 B1: idle-excluded) in
+  each zoom band, plus a ``bandScheme`` column (``"canonical"``/``"tercile"``, Tier 2 B3): by
+  default (``--magband-scheme canonical``) sessions with a computable true magnification
+  (``baseMagnification`` + per-point ``dsMilli``) get 7 fixed bands via
+  :data:`blinded_focus.metrics.MAG_BAND_CUTS`; every other session (or every session, under
+  ``--magband-scheme tercile``) falls back to the pre-B3 ``--magbands`` (default 3) within-path
+  quantile scheme (tidy long format; see :func:`blinded_focus.metrics.magband_labels_for_scheme`).
+  **B3 CHANGES** the scheme (and band count) for any session whose true magnification is
+  computable (unchanged for null-``baseMagnification`` sessions, which keep terciles).
 - per slide, when any session has at least one annotation: (Phase 2) ``annotations_<slug>.csv`` —
   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
   diagonal-reuse convention as ``compare_<slug>.csv``) plus a slide-level ``coincidenceLevel``
@@ -62,7 +77,8 @@ Output files (written to ``--out DIR``):
   top-:data:`TRANSITIONS_TOP_N` directed cell-to-cell transitions per session: ``session``,
   ``fromCell``, ``toCell``, ``count`` (ties broken deterministically — see
   :func:`blinded_focus.metrics.top_transitions`).
-- ``summary.md`` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers,
+- ``summary.md`` — counts, (Tier 2 B4, when any path-carrying session exists) a magnification-
+  source caveat line, per-slide agreement, reference ranking, headline zoom/scanning numbers,
   (Phase 2) headline annotation-coverage + cursor-coupling numbers, and (Phase 3, gated on
   ``--graded``) a "Navigation ↔ diagnostic accuracy" section — overall accuracy, per-metric r/n/
   group means, and a calibration summary (``calibrationGap``, ``brierScore``,
@@ -118,6 +134,14 @@ HOTSPOT_TOP_N = 5
 #: Tier 1 A5: number of top directed cell-transitions exported per session to
 #: ``transitions_<slug>.csv``.
 TRANSITIONS_TOP_N = 15
+#: Tier 2 B3: default ``--magband-scheme`` -- canonical (true-magnification) bands, auto-falling
+#: back to the tercile scheme per-session when a session's baseMagnification/dsMilli aren't
+#: computable (see :func:`blinded_focus.metrics.magband_labels_for_scheme`).
+DEFAULT_MAGBAND_SCHEME = "canonical"
+#: Tier 2 B3: number of canonical magnification bands (fixed by
+#: :data:`blinded_focus.metrics.MAG_BAND_CUTS`'s 6 cut points -- NOT overridable via
+#: ``--magbands``, which only sizes the tercile fallback scheme).
+CANONICAL_MAGBAND_COUNT = len(m.MAG_BAND_LABELS)
 
 
 def _res_grid_dims(img_w, img_h, res):
@@ -536,13 +560,15 @@ def _calibration_stats(decision_rows):
 def analyze(
     inputs, out_dir, reference=None, roi=None, labels_csv=None, make_figures=False,
     res=DEFAULT_RES, magbands=DEFAULT_MAGBANDS, key_csv=None, graded_csv=None,
+    magband_scheme=DEFAULT_MAGBAND_SCHEME,
 ):
     """Run the full pipeline over ``inputs`` (files/dirs/zips) into ``out_dir``. Returns the list
     of metrics-row dicts written to ``metrics.csv`` (for programmatic/test use).
 
     ``res`` sets the longest-side resolution of the scanpath-rasterized fine/magband heatmaps
     (see :func:`_res_grid_dims`); ``magbands`` sets the number of within-path zoom bands for the
-    magnification-split analysis (see :func:`blinded_focus.metrics.zoom_band_labels`).
+    tercile-fallback magnification-split analysis (see
+    :func:`blinded_focus.metrics.zoom_band_labels`).
 
     ``key_csv`` (``--key``) is a DISPLAY-ONLY ``slideKey,correctDx`` answer key -- it populates
     ``decisions.csv``'s ``correctDx`` column beside the reader's own ``diagnosis`` for a human to
@@ -550,6 +576,15 @@ def analyze(
     comes only from ``graded_csv`` (``--graded``, a ``slideKey,sessionId,correct`` hand-graded
     sheet); without it every ``correct`` cell is blank and no navigation-accuracy correlation is
     computed (see :func:`_nav_accuracy_rows`).
+
+    ``magband_scheme`` (Tier 2 B3, ``--magband-scheme``) is ``"canonical"`` (default) or
+    ``"tercile"``. ``"canonical"`` uses true-objective-magnification bands
+    (:func:`blinded_focus.metrics.MAG_BAND_CUTS`, 7 bands) for every session whose
+    ``baseMagnification``/``dsMilli`` are computable, auto-falling back to the tercile scheme
+    per-session otherwise (see :func:`blinded_focus.metrics.magband_labels_for_scheme`).
+    ``"tercile"`` forces the pre-B3 within-path quantile scheme for every session regardless of
+    ``baseMagnification`` availability. ``magbands_<slug>.csv`` gains a ``bandScheme`` column
+    recording which scheme was actually used for each session's rows.
     """
     os.makedirs(out_dir, exist_ok=True)
     fragments = bf_io.load_fragments(inputs)
@@ -685,6 +720,15 @@ def analyze(
                 "mousePathLengthPx": "",
                 "mouseVelocityPxPerSec": "",
                 "activeFractionPct": "",
+                # Tier 2 (docs/superpowers/specs/2026-07-23-...) additive columns: B1 transparency
+                # (idleMs/activeSpanMs), B2 Drew-fidelity zoom (avgZoomLog2W/
+                # drillingRateOctavesPerMin), B4 magnification-source flag. All path-only (blank
+                # without a path at all, like the Tier 1 block above).
+                "idleMs": "",
+                "activeSpanMs": "",
+                "avgZoomLog2W": "",
+                "drillingRateOctavesPerMin": "",
+                "magnificationSource": "",
             }
 
             path = f.get("path")
@@ -725,6 +769,13 @@ def analyze(
                     # metrics above).
                     row["mousePathLengthPx"] = m.mouse_path_length_px(path)
                     row["mouseVelocityPxPerSec"] = m.mouse_velocity_px_per_sec(path)
+                # Tier 2 B1 transparency columns + B2 Drew-fidelity zoom + B4 magnification-source
+                # flag: path-only (like the Tier 1 block above), populated regardless of mouse data.
+                row["idleMs"] = m.idle_ms(path)
+                row["activeSpanMs"] = m.active_span_ms(path)
+                row["avgZoomLog2W"] = m.avg_zoom_log2_w(path, base_mag, img_w)
+                row["drillingRateOctavesPerMin"] = m.drilling_rate_octaves_per_min(path, base_mag, img_w)
+                row["magnificationSource"] = "true" if base_mag is not None else "proxy-downsample"
 
             metrics_rows.append(row)
 
@@ -1026,33 +1077,46 @@ def analyze(
                 )
 
         # ------------------------------------------------------------------
-        # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
+        # magnification-split (Phase 1; Tier 2 B1 idle-exclusion + B3 canonical-band scheme):
+        # per-session dwell time in each zoom band -- band ASSIGNMENT is unaffected by idle
+        # exclusion (matches the tercile scheme's pre-existing behavior: quantile cuts, or the
+        # canonical MAG_BAND_CUTS, are computed/applied over every step regardless of idle), only
+        # the per-band bandTimeMs/bandTimePct SUM excludes idle steps' dt (B1).
         # ------------------------------------------------------------------
         if scan_sids:
             magband_rows = []
             for sid in scan_sids:
                 f = frag_by_sid[sid]
                 path = f["path"]
-                bands = m.zoom_band_labels(path, f.get("baseMagnification"), f.get("imageWidth", 1), magbands)
+                base_mag = f.get("baseMagnification")
+                bands, scheme_used = m.magband_labels_for_scheme(
+                    path, base_mag, f.get("imageWidth", 1), magbands, magband_scheme,
+                )
                 if not bands:
                     continue
                 dts = m.step_durations_ms(path)
+                idle = m.idle_step_mask(path)
                 bands_arr = np.asarray(bands)
-                total_dt = float(sum(dts)) if dts else 0.0
+                n_bands_used = CANONICAL_MAGBAND_COUNT if scheme_used == "canonical" else magbands
+                total_dt = float(sum(dt for dt, is_idle in zip(dts, idle) if not is_idle))
                 label = labels.get(sid, sid)
-                for band in range(magbands):
-                    band_dt = float(sum(dt for dt, b in zip(dts, bands_arr) if b == band))
+                for band in range(n_bands_used):
+                    band_dt = float(sum(
+                        dt for dt, b, is_idle in zip(dts, bands_arr, idle)
+                        if b == band and not is_idle
+                    ))
                     magband_rows.append({
                         "session": label,
                         "band": band,
                         "bandTimeMs": band_dt,
                         "bandTimePct": (band_dt / total_dt * 100.0) if total_dt > 0 else 0.0,
+                        "bandScheme": scheme_used,
                     })
             if magband_rows:
                 _write_csv(
                     os.path.join(out_dir, f"magbands_{slide_slug}.csv"),
                     magband_rows,
-                    ["session", "band", "bandTimeMs", "bandTimePct"],
+                    ["session", "band", "bandTimeMs", "bandTimePct", "bandScheme"],
                 )
 
         # ------------------------------------------------------------------
@@ -1092,12 +1156,17 @@ def analyze(
                             os.path.join(slide_out, f"{sess_slug}_scanpath_raster.png"),
                         )
 
-                    # Phase 1: magnification-split heatmaps, one per within-path zoom band.
+                    # Phase 1 (Tier 2 B3: canonical-scheme-aware): magnification-split heatmaps,
+                    # one per zoom band. raster_from_path itself excludes idle steps (Tier 2 B1),
+                    # so an idle step contributes no heat to any band's figure either.
                     base_mag = f.get("baseMagnification")
-                    bands = m.zoom_band_labels(path, base_mag, img_w, magbands)
+                    bands, scheme_used = m.magband_labels_for_scheme(
+                        path, base_mag, img_w, magbands, magband_scheme,
+                    )
                     if bands:
                         bands_arr = np.asarray(bands)
-                        for band in range(magbands):
+                        n_bands_used = CANONICAL_MAGBAND_COUNT if scheme_used == "canonical" else magbands
+                        for band in range(n_bands_used):
                             step_mask = (bands_arr == band)
                             if not step_mask.any():
                                 continue
@@ -1135,7 +1204,12 @@ def analyze(
          # Tier 1 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
          # column order above is unchanged.
          "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx", "mouseVelocityPxPerSec",
-         "activeFractionPct"],
+         "activeFractionPct",
+         # Tier 2 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1) is unchanged. B1: idleMs/activeSpanMs. B2:
+         # avgZoomLog2W/drillingRateOctavesPerMin. B4: magnificationSource.
+         "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
+         "magnificationSource"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):
@@ -1160,15 +1234,32 @@ def analyze(
 
     _write_summary(
         out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded,
+        metrics_rows,
     )
     return metrics_rows
 
 
 def _write_summary(
     out_dir, groups, slide_summaries, reference_summaries,
-    decision_rows=None, nav_rows=None, had_graded=False,
+    decision_rows=None, nav_rows=None, had_graded=False, metrics_rows=None,
 ):
     lines = ["# Blinded-focus analysis summary", "", f"- Slides analyzed: {len(groups)}", ""]
+    # Tier 2 B4: magnification-source caveat -- how many path-carrying sessions used a proxy
+    # (downsample-relative or w-proxy) magnification rather than the true objective power, so a
+    # reader knows pooled avgZoom-family numbers may mix the two. Only emitted when at least one
+    # path-carrying session exists at all (nothing to caveat otherwise).
+    magsrc = [r["magnificationSource"] for r in (metrics_rows or []) if r.get("magnificationSource")]
+    if magsrc:
+        n_true = sum(1 for v in magsrc if v == "true")
+        n_proxy = sum(1 for v in magsrc if v == "proxy-downsample")
+        lines.append(
+            f"> Magnification source: {n_true}/{len(magsrc)} path-carrying sessions use true "
+            f"objective magnification (baseMagnification present); {n_proxy}/{len(magsrc)} use a "
+            f"proxy (downsample- or window-width-relative) value -- see `magnificationSource` in "
+            f"metrics.csv. Proxy-magnification rows are not directly comparable to true-"
+            f"magnification rows for avgZoom/zoomVariance/zoomRange/avgZoomLog2W."
+        )
+        lines.append("")
     lines.append("## Per-slide agreement")
     lines.append("")
     for s in slide_summaries:
@@ -1298,8 +1389,17 @@ def main(argv=None):
     )
     ap.add_argument(
         "--magbands", type=int, default=DEFAULT_MAGBANDS,
-        help=f"number of within-path zoom bands (terciles by default) for the "
-             f"magnification-split analysis (default {DEFAULT_MAGBANDS})",
+        help=f"number of within-path zoom bands for the tercile-fallback magnification-split "
+             f"analysis (default {DEFAULT_MAGBANDS}) -- canonical-scheme sessions always use "
+             f"{CANONICAL_MAGBAND_COUNT} fixed bands regardless of this value",
+    )
+    ap.add_argument(
+        "--magband-scheme", choices=["canonical", "tercile"], default=DEFAULT_MAGBAND_SCHEME,
+        help="magnification-band scheme for magbands_<slug>.csv (Tier 2 B3): 'canonical' "
+             f"(default) uses true-objective-magnification bands "
+             f"({CANONICAL_MAGBAND_COUNT} fixed bands) for sessions whose baseMagnification/"
+             "dsMilli are computable, auto-falling back to the tercile scheme per-session "
+             "otherwise; 'tercile' forces the within-path quantile scheme for every session",
     )
     args = ap.parse_args(argv)
     analyze(
@@ -1307,6 +1407,7 @@ def main(argv=None):
         labels_csv=args.labels, make_figures=args.figures,
         res=args.res, magbands=args.magbands,
         key_csv=args.key, graded_csv=args.graded,
+        magband_scheme=args.magband_scheme,
     )
 
 

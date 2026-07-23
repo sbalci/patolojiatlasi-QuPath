@@ -39,6 +39,13 @@ suppressPackageStartupMessages({
 #: `blinded_focus.metrics.EPS` in the Python toolkit exactly.
 EPS <- 1e-12
 
+#: Tier 2 B1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): a scanpath step
+#: whose dt exceeds this threshold (ms) is "idle" -- the user stepped away from the slide/mouse for
+#: over a minute (Ghezloo's >60s-frozen-viewport idle-time-exclusion rule) -- and is excluded from
+#: every rate/weight computation listed in `idle_step_mask`'s docs. Matches the Python toolkit's
+#: `IDLE_GAP_MS` literal exactly.
+IDLE_GAP_MS <- 60000
+
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
 #: /2, /3, /4, /5 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ additionally have
 #: "path" (/3 points are 5-element `[tRelMs,cx,cy,w,h]`; /4 points are 6-element
@@ -745,6 +752,50 @@ step_durations_ms <- function(path) {
   pmax(diff(pm[, 1]), 0)
 }
 
+#' Tier 2 B1: logical vector (length `nrow(as_path_matrix(path))-1`), TRUE iff step i's dt (see
+#' `step_durations_ms`) exceeds `IDLE_GAP_MS` -- a "step-away" gap (Ghezloo's >60s-frozen-viewport
+#' idle-time-exclusion rule) the user was not actively looking at the slide during. Every rate/
+#' weight metric documented as "idle-excluded" (`scanning_rate_px_per_min`,
+#' `drilling_rate_per_min`, `path_velocity_px_per_sec`, `search_focus_ratio`,
+#' `raster_from_path`'s step weight, `avg_zoom_log2_w`, `drilling_rate_octaves_per_min`, and the
+#' `magbands_<slug>.csv` `bandTimeMs` aggregation in `analyze()`) drops steps where this is TRUE
+#' entirely -- not just caps their contribution. `logical(0)` if the path has fewer than 2 points.
+idle_step_mask <- function(path) {
+  dts <- step_durations_ms(path)
+  dts > IDLE_GAP_MS
+}
+
+#' Tier 2 B1: sum of step dt (see `step_durations_ms`) over steps flagged idle by
+#' `idle_step_mask` -- the `idleMs` `metrics.csv` transparency column. `0.0` if the path has fewer
+#' than 2 points (no steps) or no step is idle -- a session with no >60s gap therefore always
+#' reports `idleMs == 0.0`, which is what keeps every idle-excluded rate metric below numerically
+#' identical to its pre-B1 value for such sessions (the exclusion set is empty).
+idle_ms <- function(path) {
+  dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
+  if (length(dts) == 0) {
+    return(0.0)
+  }
+  sum(dts[idle])
+}
+
+#' Tier 2 B1: wall-clock span (`tRel_last - tRel_first`) minus `idle_ms` -- the `activeSpanMs`
+#' `metrics.csv` transparency column, and the denominator every idle-excluded rate metric below
+#' (`scanning_rate_px_per_min`, `drilling_rate_per_min`, `drilling_rate_octaves_per_min`) divides by
+#' (in minutes) in place of the old total-duration denominator. `0.0` if the path has fewer than 2
+#' points (no span at all) -- matches the file's existing "0.0 for an insufficient path" convention
+#' for administrative/passthrough-style fields (as opposed to the NaN-blank convention used for
+#' genuinely undefined statistics like `avg_zoom_log2_w`).
+active_span_ms <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  span <- pm[n, 1] - pm[1, 1]
+  span - idle_ms(path)
+}
+
 #' Rebuild a `gh x gw` dwell-ms grid (flat, row-major) directly from the scanpath, independent of
 #' the recorded `grid` resolution. For each step, `dt` (see `step_durations_ms`) is attributed to
 #' the viewport rectangle of point i (`cx +/- w/2, cy +/- h/2`), clamped to `[0,img_w] x
@@ -754,6 +805,13 @@ step_durations_ms <- function(path) {
 #' the single cell containing the clamped center. Steps with `dt<=0` contribute nothing.
 #' `step_mask`, if given, is a logical vector of length `nrow(pm)-1` (steps where it is FALSE are
 #' skipped — used by the magnification-band split to reuse this same raster math per band).
+#'
+#' **Tier 2 B1:** a step flagged idle by `idle_step_mask` (dt > `IDLE_GAP_MS`) is *always* skipped
+#' as well, regardless of `step_mask` -- the user was not looking at that viewport, so it should
+#' contribute no dwell-weight to the raster at any resolution. For a path with no idle step
+#' (`idle_step_mask` all FALSE) this is a no-op, so the raster is numerically identical to the
+#' pre-B1 behavior.
+#'
 #' Returns `NULL` for a 0/1-point path (a `dt` requires two points). Exact port of
 #' `blinded_focus.metrics.raster_from_path`.
 raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
@@ -766,10 +824,12 @@ raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
   img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
   img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
   dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
   grid <- matrix(0.0, nrow = gh, ncol = gw)
   for (i in seq_len(n - 1)) {
     dt <- dts[i]
     if (dt <= 0) next
+    if (idle[i]) next
     if (!is.null(step_mask) && !step_mask[i]) next
     cx <- pm[i, 2]; cy <- pm[i, 3]
     w <- if (pm[i, 4] > 0) pm[i, 4] else 1.0
@@ -907,24 +967,33 @@ magnification_percentage <- function(path, base_mag = NULL, img_w = NULL) {
 }
 
 #' "Scanning" rate (px/min): total center pan-distance accumulated over steps where zoom is
-#' unchanged (see `.step_zoom_changed`), normalized by the path's **total duration**
-#' (`(t[last]-t[first])/60000`, minutes -- the deliberate denominator choice documented in the
-#' Python `scanning_rate_px_per_min` docstring: total session time, not time-spent-scanning, so the
-#' rate is comparable across sessions with different scanning/drilling mixes). `0.0` if the path
-#' has fewer than 2 points or non-positive total duration.
+#' unchanged (see `.step_zoom_changed`), normalized by the path's **ACTIVE duration** (Tier 2 B1:
+#' `active_span_ms`, minutes, replacing the pre-B1 total-duration denominator
+#' `(t[last]-t[first])/60000` -- the deliberate denominator choice documented in the Python
+#' `scanning_rate_px_per_min` docstring: active session time, not time-spent-scanning, so the rate
+#' is comparable across sessions with different scanning/drilling mixes -- idle "stepped away" time
+#' is neither "scanning" nor "drilling" time and would otherwise dilute the rate). `0.0` if the path
+#' has fewer than 2 points or non-positive active duration.
+#'
+#' **Tier 2 B1:** a step flagged idle by `idle_step_mask` also contributes nothing to the
+#' pan-distance numerator, even if its zoom is unchanged -- an idle "parked at this zoom level for
+#' 5 minutes" step is not scanning. For a path with no idle step this is numerically identical to
+#' the pre-B1 formula (idle set empty, and `active_span_ms` reduces to the total duration).
 scanning_rate_px_per_min <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
     return(0.0)
   }
-  duration_min <- (pm[n, 1] - pm[1, 1]) / 60000.0
+  duration_min <- active_span_ms(path) / 60000.0
   if (duration_min <= 0) {
     return(0.0)
   }
   changed <- .step_zoom_changed(path, base_mag, img_w)
+  idle <- idle_step_mask(path)
   pan <- 0.0
   for (i in seq_len(n - 1)) {
+    if (idle[i]) next
     if (!changed[i]) {
       x0 <- pm[i, 2]; y0 <- pm[i, 3]
       x1 <- pm[i + 1, 2]; y1 <- pm[i + 1, 3]
@@ -935,20 +1004,93 @@ scanning_rate_px_per_min <- function(path, base_mag = NULL, img_w = NULL) {
 }
 
 #' "Drilling" rate (events/min): count of zoom-change steps (see `.step_zoom_changed`) per minute
-#' of the path's total duration (same denominator as `scanning_rate_px_per_min`). `0.0` if the path
-#' has fewer than 2 points or non-positive total duration.
+#' of the path's ACTIVE duration (Tier 2 B1: `active_span_ms`, same denominator as
+#' `scanning_rate_px_per_min`). `0.0` if the path has fewer than 2 points or non-positive active
+#' duration.
+#'
+#' **Tier 2 B1:** a zoom-change step that is *also* idle (see `idle_step_mask` -- e.g. the user
+#' zoomed in right before stepping away for 5+ minutes, so the change is only discovered on
+#' return) does not count as a "drilling event" -- it was not an active navigation action. For a
+#' path with no idle step this is numerically identical to the pre-B1 formula.
 drilling_rate_per_min <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
     return(0.0)
   }
-  duration_min <- (pm[n, 1] - pm[1, 1]) / 60000.0
+  duration_min <- active_span_ms(path) / 60000.0
   if (duration_min <= 0) {
     return(0.0)
   }
   changed <- .step_zoom_changed(path, base_mag, img_w)
-  sum(changed) / duration_min
+  idle <- idle_step_mask(path)
+  sum(changed & !idle) / duration_min
+}
+
+#' Tier 2 B2 (Drew-fidelity zoom, ADD-alongside `avg_zoom` -- does not replace it): dt-weighted
+#' mean of `log2(magnification)` over ACTIVE (non-idle, see `idle_step_mask`) steps:
+#'
+#' `avgZoomLog2W = sum_active(dt_i * log2(zoom_i)) / sum_active(dt_i)`
+#'
+#' where `zoom_i = point_zoom(path[i], base_mag, img_w)` (the step-i-owns-point-i convention used
+#' throughout this file, e.g. `raster_from_path`). `log2()` for Python<->R parity.
+#'
+#' `NaN` (blank in `metrics.csv`) if the path has fewer than 2 points, every step is idle, or the
+#' total active dt weight is otherwise 0 -- a 0/0 weighted mean has no defensible value (unlike
+#' `avg_zoom`'s unweighted `0.0`-for-empty-path convention, `0.0` here would misleadingly read as
+#' "1x magnification", a real, specific claim -- so this uses the same NaN-for-genuinely-undefined
+#' convention as e.g. `enrichment_ratio` instead).
+avg_zoom_log2_w <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
+  total_w <- 0.0
+  total_wl <- 0.0
+  for (i in seq_len(n - 1)) {
+    dt <- dts[i]
+    if (idle[i] || dt <= 0) next
+    z <- point_zoom(pm[i, ], base_mag, img_w)
+    total_w <- total_w + dt
+    total_wl <- total_wl + dt * log2(z)
+  }
+  if (total_w > 0) total_wl / total_w else NaN
+}
+
+#' Tier 2 B2 (Drew-fidelity zoom, ADD-alongside `drilling_rate_per_min` -- does not replace it):
+#' sum of the absolute per-step `log2(zoom)` change over ACTIVE (non-idle, see `idle_step_mask`)
+#' steps, per active minute (`active_span_ms` / 60000, same denominator as
+#' `scanning_rate_px_per_min`/`drilling_rate_per_min`) -- a continuous zoom-change-magnitude
+#' complement to `drilling_rate_per_min`'s discrete event count:
+#'
+#' `drillingRateOctavesPerMin = sum_active(|log2(zoom_{i+1}) - log2(zoom_i)|) / activeDurationMin`
+#'
+#' `log2()` for Python<->R parity. `NaN` (blank in `metrics.csv`) if the path has fewer than 2
+#' points or the active duration is non-positive (all steps idle, or a degenerate zero-span path)
+#' -- same NaN-for-undefined convention as `avg_zoom_log2_w` (as opposed to
+#' `drilling_rate_per_min`'s `0.0`-for-zero-duration convention: a 0/0 rate of continuous change is
+#' undefined, not "no change happened over a real duration").
+drilling_rate_octaves_per_min <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  duration_min <- active_span_ms(path) / 60000.0
+  if (duration_min <= 0) {
+    return(NaN)
+  }
+  idle <- idle_step_mask(path)
+  zooms <- .zoom_series(path, base_mag, img_w)
+  total <- 0.0
+  for (i in seq_len(n - 1)) {
+    if (idle[i]) next
+    total <- total + abs(log2(zooms[i + 1]) - log2(zooms[i]))
+  }
+  total / duration_min
 }
 
 #' Assign each *step* (`path[i] -> path[i+1]`) to one of `n_bands` zoom bands (band `0` = lowest
@@ -971,6 +1113,98 @@ zoom_band_labels <- function(path, base_mag = NULL, img_w = NULL, n_bands = 3) {
   qs <- (1:(n_bands - 1)) / n_bands
   cuts <- stats::quantile(zooms, probs = qs, names = FALSE, type = 7)
   findInterval(zooms, cuts)
+}
+
+#: Tier 2 B3: canonical magnification-band cut points (objective power, x). 6 cuts -> 7 labeled
+#: bands. Matches the Python toolkit's `MAG_BAND_CUTS` literal exactly.
+MAG_BAND_CUTS <- c(1.0, 2.0, 4.0, 10.0, 20.0, 40.0)
+#: Tier 2 B3: human-readable labels for the 7 canonical bands (index-aligned, 0-based, with the
+#: band index `canonical_mag_band_labels` returns -- not itself written to `magbands_<slug>.csv`).
+MAG_BAND_LABELS <- c("<1x", "1-2x", "2-4x", "4-10x", "10-20x", "20-40x", ">=40x")
+
+#' Tier 2 B3: true objective magnification for one scanpath point vector (`point`, one row of
+#' `as_path_matrix`'s output) -- `base_mag / (dsMilli / 1000.0)` -- requiring BOTH a known, positive
+#' `base_mag` (fragment-level `baseMagnification`, schema/4+) and the point's own `dsMilli` (6th
+#' element, schema/4+).
+#'
+#' Returns `NULL` (a plain sentinel for "not computable" -- checked via `is.null()` at every call
+#' site, never participating in arithmetic) when either is absent/non-positive or the point has no
+#' `dsMilli` at all (schema/3, 5-element points) -- callers fall back to the existing tercile
+#' scheme (`zoom_band_labels`) in that case, per B3's auto-fallback rule. `dsMilli <= 0` is treated
+#' defensively as full-resolution (matches `point_zoom`'s own guard).
+true_magnification <- function(point, base_mag) {
+  if (is.null(base_mag) || length(base_mag) == 0 || is.na(base_mag)) {
+    return(NULL)
+  }
+  bm <- as.numeric(base_mag)
+  if (bm <= 0) {
+    return(NULL)
+  }
+  if (length(point) < 6) {
+    return(NULL)
+  }
+  ds_milli <- as.numeric(point[6])
+  if (is.na(ds_milli) || ds_milli <= 0) ds_milli <- 1000.0
+  bm / (ds_milli / 1000.0)
+}
+
+#' Tier 2 B3: assign each *step* (`path[i] -> path[i+1]`, the same point-i-owns-the-step convention
+#' as `zoom_band_labels`/`raster_from_path`) a canonical magnification-band index in `[0, 6]` via
+#' `MAG_BAND_CUTS` (`findInterval(tm, cuts)`, same convention as `zoom_band_labels`), using
+#' `true_magnification(path[i], base_mag)`.
+#'
+#' Returns `NULL` (not `integer(0)`) the moment any step's true magnification is not computable
+#' (missing/non-positive `base_mag`, or a point with no `dsMilli` at all) -- signalling "the
+#' canonical scheme does not apply to this session at all; use the tercile fallback instead"
+#' (checked via `is.null()`, never truthiness, so a genuinely empty/too-short path -- which returns
+#' `integer(0)` -- is distinguished from "not computable"). `integer(0)` for a <2-point path (no
+#' steps; canonical is trivially inapplicable but not a fallback signal).
+canonical_mag_band_labels <- function(path, base_mag) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(integer(0))
+  }
+  bands <- integer(n - 1)
+  for (i in seq_len(n - 1)) {
+    tm <- true_magnification(pm[i, ], base_mag)
+    if (is.null(tm)) {
+      return(NULL)
+    }
+    idx <- as.integer(findInterval(tm, MAG_BAND_CUTS))
+    bands[i] <- min(idx, length(MAG_BAND_LABELS) - 1L)
+  }
+  bands
+}
+
+#' Tier 2 B3: returns `list(bands=, scheme=)` for one session's path, honoring the
+#' `--magband-scheme` CLI flag:
+#'
+#' - `scheme == "tercile"`: always use the existing within-path quantile bands
+#'   (`zoom_band_labels`); `scheme == "tercile"` in the result.
+#' - `scheme == "canonical"` (default, and the fallback for any other value): try
+#'   `canonical_mag_band_labels` first; if it returns `NULL` (this session's
+#'   `base_mag`/`dsMilli` are not computable -- e.g. an Atlas DZI slide with a null
+#'   `baseMagnification`, or a schema/3 5-element w-proxy path), fall back to
+#'   `zoom_band_labels`, result `scheme == "tercile"`. Otherwise result `scheme == "canonical"`.
+#'
+#' Returns `list(bands=integer(0), scheme="tercile")` for a <2-point path (matches
+#' `zoom_band_labels`'s own `integer(0)`-for-<2-points convention; the scheme label is unused in
+#' that case since no rows are ever emitted for an empty band list).
+magband_labels_for_scheme <- function(path, base_mag, img_w, n_bands, scheme = "canonical") {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(list(bands = integer(0), scheme = "tercile"))
+  }
+  if (identical(scheme, "tercile")) {
+    return(list(bands = zoom_band_labels(path, base_mag, img_w, n_bands), scheme = "tercile"))
+  }
+  bands <- canonical_mag_band_labels(path, base_mag)
+  if (is.null(bands)) {
+    return(list(bands = zoom_band_labels(path, base_mag, img_w, n_bands), scheme = "tercile"))
+  }
+  list(bands = bands, scheme = "canonical")
 }
 
 # ---------------------------------------------------------------------------
@@ -1001,14 +1235,19 @@ zoom_band_labels <- function(path, base_mag = NULL, img_w = NULL, n_bands = 3) {
   out
 }
 
-#' Median of per-step velocities (see `.step_velocities_px_per_sec`). `0.0` if the path has fewer
-#' than 2 points.
+#' Median of per-step velocities (see `.step_velocities_px_per_sec`), **Tier 2 B1: excluding steps
+#' flagged idle** by `idle_step_mask` (a step "traversed" during a >60s away-gap is not a real
+#' navigation velocity -- it is dropped from the median entirely, not counted as a near-zero
+#' speed). `0.0` if the path has fewer than 2 points or every step is idle. For a path with no idle
+#' step this is numerically identical to the pre-B1 formula (idle set empty).
 path_velocity_px_per_sec <- function(path) {
   vels <- .step_velocities_px_per_sec(path)
-  if (length(vels) == 0) {
+  idle <- idle_step_mask(path)
+  active_vels <- vels[!idle]
+  if (length(active_vels) == 0) {
     return(0.0)
   }
-  stats::median(vels)
+  stats::median(active_vels)
 }
 
 #' Net displacement (first->last point, straight-line) divided by the total scanpath length
@@ -1029,17 +1268,32 @@ linearity <- function(path) {
 
 #' Fraction of dt-weighted steps that are "focused": zoom(i) >= median(per-step zooms) OR
 #' velocity(i) <= median(per-step velocities) -- both thresholds are the path's own median
-#' (session-relative, not a fixed absolute cutoff). `0.0` if the path has fewer than 2 points or
-#' zero total dt.
+#' (session-relative, not a fixed absolute cutoff), **Tier 2 B1: computed entirely over ACTIVE
+#' (non-idle, see `idle_step_mask`) steps** -- idle steps are dropped before either the median
+#' thresholds or the dt-weighted sum are computed, exactly as if they never existed, rather than
+#' being included in `total_dt` (which would otherwise let a single long away-gap dominate the
+#' denominator and dilute the ratio toward whatever its own zoom/velocity happened to be) or in the
+#' threshold computation (which would otherwise let a stale zoom/near-zero velocity from an
+#' away-gap skew the "focused" cutoff for every other step). `0.0` if the path has fewer than 2
+#' points, every step is idle, or zero total active dt. For a path with no idle step this is
+#' numerically identical to the pre-B1 formula (idle set empty, active steps == all steps).
 search_focus_ratio <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
     return(0.0)
   }
-  zooms <- vapply(seq_len(n - 1), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
-  dts <- step_durations_ms(path)
-  vels <- .step_velocities_px_per_sec(path)
+  zooms_all <- vapply(seq_len(n - 1), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
+  dts_all <- step_durations_ms(path)
+  vels_all <- .step_velocities_px_per_sec(path)
+  idle <- idle_step_mask(path)
+  active <- !idle
+  if (!any(active)) {
+    return(0.0)
+  }
+  zooms <- zooms_all[active]
+  dts <- dts_all[active]
+  vels <- vels_all[active]
   zoom_thresh <- stats::median(zooms)
   vel_thresh <- stats::median(vels)
   focused <- (zooms >= zoom_thresh) | (vels <= vel_thresh)
@@ -1980,6 +2234,13 @@ HOTSPOT_TOP_N <- 5L
 #: Tier 1 A5: number of top directed cell-transitions exported per session to
 #: `transitions_<slug>.csv`.
 TRANSITIONS_TOP_N <- 15L
+#: Tier 2 B3: default `--magband-scheme` -- canonical (true-magnification) bands, auto-falling
+#: back to the tercile scheme per-session when a session's baseMagnification/dsMilli aren't
+#: computable (see `magband_labels_for_scheme`).
+DEFAULT_MAGBAND_SCHEME <- "canonical"
+#: Tier 2 B3: number of canonical magnification bands (fixed by `MAG_BAND_CUTS`'s 6 cut points --
+#: NOT overridable via `magbands=`, which only sizes the tercile fallback scheme).
+CANONICAL_MAGBAND_COUNT <- length(MAG_BAND_LABELS)
 
 #' Aspect-preserving grid dims with the longest side capped at `res` (mirrors the QuPath
 #' extension's own `GRID_MAX`-style longest-side cap, and `blinded_focus.analyze._res_grid_dims`
@@ -2182,10 +2443,18 @@ MIN_CORRELATION_N <- 5
 #'
 #' `res` sets the longest-side resolution of the scanpath-rasterized fine/magband heatmaps (see
 #' `.res_grid_dims`); `magbands` sets the number of within-path zoom bands for the
-#' magnification-split analysis (see `zoom_band_labels`).
+#' tercile-fallback magnification-split analysis (see `zoom_band_labels`).
+#'
+#' `magband_scheme` (Tier 2 B3, `--magband-scheme`) is `"canonical"` (default) or `"tercile"`.
+#' `"canonical"` uses true-objective-magnification bands (`MAG_BAND_CUTS`, 7 bands) for every
+#' session whose `baseMagnification`/`dsMilli` are computable, auto-falling back to the tercile
+#' scheme per-session otherwise (see `magband_labels_for_scheme`). `"tercile"` forces the pre-B3
+#' within-path quantile scheme for every session regardless of `baseMagnification` availability.
+#' `magbands_<slug>.csv` gains a `bandScheme` column recording which scheme was actually used.
 analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = NULL,
                      make_figures = FALSE, res = DEFAULT_RES, magbands = DEFAULT_MAGBANDS,
-                     key_csv = NULL, graded_csv = NULL) {
+                     key_csv = NULL, graded_csv = NULL,
+                     magband_scheme = DEFAULT_MAGBAND_SCHEME) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   fragments <- load_fragments(inputs)
   if (length(fragments) == 0) {
@@ -2334,7 +2603,16 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         turnAngleEntropy = NA,
         mousePathLengthPx = NA,
         mouseVelocityPxPerSec = NA,
-        activeFractionPct = NA
+        activeFractionPct = NA,
+        # Tier 2 (docs/superpowers/specs/2026-07-23-...) additive columns: B1 transparency
+        # (idleMs/activeSpanMs), B2 Drew-fidelity zoom (avgZoomLog2W/drillingRateOctavesPerMin),
+        # B4 magnification-source flag. All path-only (NA without a path at all, like the Tier 1
+        # block above).
+        idleMs = NA,
+        activeSpanMs = NA,
+        avgZoomLog2W = NA,
+        drillingRateOctavesPerMin = NA,
+        magnificationSource = NA_character_
       )
 
       path <- f$path
@@ -2374,6 +2652,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           row$mousePathLengthPx <- mouse_path_length_px(path)
           row$mouseVelocityPxPerSec <- mouse_velocity_px_per_sec(path)
         }
+        # Tier 2 B1 transparency columns + B2 Drew-fidelity zoom + B4 magnification-source flag:
+        # path-only (like the Tier 1 block above), populated regardless of mouse data.
+        row$idleMs <- idle_ms(path)
+        row$activeSpanMs <- active_span_ms(path)
+        row$avgZoomLog2W <- avg_zoom_log2_w(path, base_mag, img_w)
+        row$drillingRateOctavesPerMin <- drilling_rate_octaves_per_min(path, base_mag, img_w)
+        row$magnificationSource <- if (!is.null(base_mag)) "true" else "proxy-downsample"
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
 
@@ -2682,7 +2967,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
-    # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
+    # magnification-split (Phase 1; Tier 2 B1 idle-exclusion + B3 canonical-band scheme):
+    # per-session dwell time in each zoom band -- band ASSIGNMENT is unaffected by idle exclusion
+    # (matches the tercile scheme's pre-existing behavior: quantile cuts, or the canonical
+    # MAG_BAND_CUTS, are computed/applied over every step regardless of idle), only the per-band
+    # bandTimeMs/bandTimePct SUM excludes idle steps' dt (B1).
     # ------------------------------------------------------------------
     if (length(scan_sids) > 0) {
       magband_rows <- list()
@@ -2691,25 +2980,31 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         path <- f$path
         base_mag <- f$baseMagnification
         img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
-        bands <- zoom_band_labels(path, base_mag, img_w, magbands)
+        result <- magband_labels_for_scheme(path, base_mag, img_w, magbands, magband_scheme)
+        bands <- result$bands
+        scheme_used <- result$scheme
         if (length(bands) == 0) next
         dts <- step_durations_ms(path)
-        total_dt <- sum(dts)
+        idle <- idle_step_mask(path)
+        active_dts <- dts[!idle]
+        total_dt <- sum(active_dts)
+        n_bands_used <- if (identical(scheme_used, "canonical")) CANONICAL_MAGBAND_COUNT else magbands
         label <- label_for(sid, labels)
-        for (band in 0:(magbands - 1)) {
-          band_dt <- sum(dts[bands == band])
+        for (band in 0:(n_bands_used - 1)) {
+          band_dt <- sum(dts[bands == band & !idle])
           magband_rows[[length(magband_rows) + 1]] <- list(
             session = label,
             band = band,
             bandTimeMs = band_dt,
-            bandTimePct = if (total_dt > 0) band_dt / total_dt * 100.0 else 0.0
+            bandTimePct = if (total_dt > 0) band_dt / total_dt * 100.0 else 0.0,
+            bandScheme = scheme_used
           )
         }
       }
       if (length(magband_rows) > 0) {
         write_csv_tidy(
           magband_rows, file.path(out_dir, paste0("magbands_", slide_slug, ".csv")),
-          c("session", "band", "bandTimeMs", "bandTimePct")
+          c("session", "band", "bandTimeMs", "bandTimePct", "bandScheme")
         )
       }
     }
@@ -2754,11 +3049,16 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             )
           }
 
-          # Phase 1: magnification-split heatmaps, one per within-path zoom band.
+          # Phase 1 (Tier 2 B3: canonical-scheme-aware): magnification-split heatmaps, one per zoom
+          # band. raster_from_path itself excludes idle steps (Tier 2 B1), so an idle step
+          # contributes no heat to any band's figure either.
           base_mag <- f$baseMagnification
-          bands <- zoom_band_labels(path, base_mag, img_w, magbands)
+          band_result <- magband_labels_for_scheme(path, base_mag, img_w, magbands, magband_scheme)
+          bands <- band_result$bands
+          scheme_used_fig <- band_result$scheme
           if (length(bands) > 0) {
-            for (band in 0:(magbands - 1)) {
+            n_bands_used_fig <- if (identical(scheme_used_fig, "canonical")) CANONICAL_MAGBAND_COUNT else magbands
+            for (band in 0:(n_bands_used_fig - 1)) {
               step_mask <- (bands == band)
               if (!any(step_mask)) next
               raster_b <- raster_from_path(path, img_w, img_h, res_gw, res_gh, step_mask = step_mask)
@@ -2802,7 +3102,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       # Tier 1 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
       # order above is unchanged.
       "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx", "mouseVelocityPxPerSec",
-      "activeFractionPct"
+      "activeFractionPct",
+      # Tier 2 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
+      # order above (incl. Tier 1) is unchanged. B1: idleMs/activeSpanMs. B2:
+      # avgZoomLog2W/drillingRateOctavesPerMin. B4: magnificationSource.
+      "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
+      "magnificationSource"
     )
   )
 
@@ -2827,17 +3132,43 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     )
   }
 
-  write_summary(out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded)
+  write_summary(
+    out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded,
+    metrics_rows
+  )
   utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
 }
 
-#' Write `summary.md`: slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/
-#' duration spread, the reference ranking when applicable, and (Phase 3, gated on `had_graded`) a
+#' Write `summary.md`: slide/session counts, (Tier 2 B4, when any path-carrying session exists) a
+#' magnification-source caveat line, per-slide mean pairwise CC + ICC(2,1) + coverage/duration
+#' spread, the reference ranking when applicable, and (Phase 3, gated on `had_graded`) a
 #' "Navigation <-> diagnostic accuracy" section. Matches the Python toolkit's `_write_summary`
 #' structure/section headers exactly.
 write_summary <- function(out_dir, groups, slide_summaries, reference_summaries,
-                           decision_rows = NULL, nav_rows = NULL, had_graded = FALSE) {
+                           decision_rows = NULL, nav_rows = NULL, had_graded = FALSE,
+                           metrics_rows = NULL) {
   lines <- c("# Blinded-focus analysis summary", "", paste0("- Slides analyzed: ", length(groups)), "")
+  # Tier 2 B4: magnification-source caveat -- how many path-carrying sessions used a proxy
+  # (downsample-relative or w-proxy) magnification rather than the true objective power, so a
+  # reader knows pooled avgZoom-family numbers may mix the two. Only emitted when at least one
+  # path-carrying session exists at all (nothing to caveat otherwise).
+  magsrc <- Filter(
+    function(v) !is.null(v) && !is.na(v) && nzchar(v),
+    lapply(if (is.null(metrics_rows)) list() else metrics_rows, function(r) r$magnificationSource)
+  )
+  if (length(magsrc) > 0) {
+    magsrc_vec <- vapply(magsrc, as.character, character(1))
+    n_true <- sum(magsrc_vec == "true")
+    n_proxy <- sum(magsrc_vec == "proxy-downsample")
+    lines <- c(lines, paste0(
+      "> Magnification source: ", n_true, "/", length(magsrc_vec), " path-carrying sessions use ",
+      "true objective magnification (baseMagnification present); ", n_proxy, "/", length(magsrc_vec),
+      " use a proxy (downsample- or window-width-relative) value -- see `magnificationSource` in ",
+      "metrics.csv. Proxy-magnification rows are not directly comparable to true-magnification ",
+      "rows for avgZoom/zoomVariance/zoomRange/avgZoomLog2W."
+    ))
+    lines <- c(lines, "")
+  }
   lines <- c(lines, "## Per-slide agreement", "")
   for (s in slide_summaries) {
     lines <- c(lines, paste0("### ", s$slide))
