@@ -242,6 +242,10 @@ public class AtlasExtension implements QuPathExtension {
         if (choice.isPresent() && choice.get() == ButtonType.OK) {
             BlindedResearch.writeFlag(dir, true);
             BlindedResearch.markConsented(p);
+            // decisionPromptOnLeave isn't reset in stopBlinded(), so it can carry a stale value
+            // from whatever project was last blinded -- set it explicitly here too (not just in
+            // onProjectChanged) so every startBlinded() call site reflects THIS project's sidecar.
+            focusHeatmap.setDecisionPromptOnLeave(BlindedResearch.decisionPromptOnLeave(dir));
             focusHeatmap.startBlinded();
             Alert done = new Alert(Alert.AlertType.INFORMATION,
                     "Proje işaretlendi; gezinme kaydı başladı ve her açılışta sürecek.");
