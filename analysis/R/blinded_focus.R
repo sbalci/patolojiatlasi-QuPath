@@ -650,6 +650,15 @@ iou <- function(a, b, thresh = 0.1) {
 #' regardless of a sort's tie-break, since the final mask only depends on the cutoff VALUE, not on
 #' which index a sort happened to rank `k`-th among ties.
 #'
+#' **Strictly-positive guard (final-review fix):** for a sparse/focused grid where fewer than `k`
+#' cells have nonzero dwell (the ORDINARY case for a focused reader on a fine grid), `cutoff` is
+#' `0.0` -- the plain `grid >= cutoff` mask would then select EVERY cell (including every
+#' untouched one), silently degrading "top-K" to "the whole grid" and making downstream recall
+#' report `1.0` for a reader who never touched the reference region at all. The extra `& (grid >
+#' 0)` restricts the tie-inclusive `>=cutoff` set to cells the reader actually dwelled in -- a
+#' no-op whenever `cutoff > 0` (`grid >= cutoff` already implies `grid > 0`), so every
+#' non-degenerate/dense case is numerically unchanged.
+#'
 #' Returns an all-`FALSE` (length-0) mask for an empty (0-length) grid (no cutoff to compute).
 top_k_frac_mask <- function(grid, frac = PRECISION_K_FRAC) {
   g <- as.numeric(grid)
@@ -659,7 +668,7 @@ top_k_frac_mask <- function(grid, frac = PRECISION_K_FRAC) {
   }
   k <- max(1L, as.integer(ceiling(frac * n)))
   cutoff <- sort(g, decreasing = TRUE)[k]
-  g >= cutoff
+  (g >= cutoff) & (g > 0)
 }
 
 #' Tier 3 C6: `precisionAtTopK`/`recall` of a reader's top-`frac` highest-dwell cells
@@ -834,8 +843,19 @@ n_revisits <- function(seq) {
 #' entry, not one count per sample. `seq` is 0-based (as returned by `visited_sequence`; offset by
 #' +1 for R's 1-based vector indexing here). Returns a flat `(gw*gh,)` numeric vector (every value
 #' is a whole number of dwell-run entries, matching the Python toolkit's float-dtype convention).
+#'
+#' **Zero-size-grid guard (final-review fix):** `gw<=0` or `gh<=0` (a schema-valid fragment with
+#' `gridWidth`/`gridHeight` of `0`, `grid=list()`) returns an EMPTY `numeric(0)` without touching
+#' `seq` at all -- mirrors `visit_count_jaccard`'s own documented "blank for a degenerate zero-size
+#' grid" convention. (Unlike the Python port, R does not actually crash on this input without the
+#' guard -- `seq`'s entries all clamp to index `-1` via `visited_sequence`, so `counts[idx + 1L]`
+#' becomes `counts[0]`, and assigning to R's index `0` is a documented silent no-op, not an error
+#' -- but the guard is added anyway for explicitness and Python<->R parity.)
 visit_count_grid <- function(seq, gw, gh) {
   gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(numeric(0))
+  }
   counts <- rep(0.0, gw * gh)
   for (idx in seq) {
     counts[idx + 1L] <- counts[idx + 1L] + 1.0
@@ -1890,22 +1910,19 @@ DISPERSION_FRAC <- 0.25
   (max(cxs) - min(cxs)) + (max(cys) - min(cys))
 }
 
-#' Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector -- exact port
-#' of `blinded_focus.metrics.fixations_idt` (Python); see its docstring for the full algorithm
-#' description (deterministic, index-based, NOT a clustering library). Per-point data
-#' `(t=pm[i,1], cx=pm[i,2], cy=pm[i,3], w=pm[i,4])`, 1-based R row indices throughout.
+#' Tier 3 C1: the exact original I-DT window-growing loop (Salvucci & Goldberg 2000), factored out
+#' of `fixations_idt` so it can be run independently over each of a path's IDLE-FREE "runs" (see
+#' that function's idle-boundary-splitting docs for why). `pm` is an `as_path_matrix()`-shaped
+#' matrix for THIS run only -- row 1 is this run's own first point, not the original, un-split
+#' path's -- otherwise byte-for-byte the same algorithm as before the final-review idle fix.
 #'
-#' Returns `NULL` if `path` has fewer than 2 points -- fixation extraction is not computable at
-#' all, distinct from an empty list (see below); every metrics.csv column below (`n_fixations`
-#' etc.) maps this to a blank cell. Returns `list()` (a real, well-defined "zero fixations found" --
-#' NOT blank) if the path has >=2 points but no window ever qualifies. Otherwise a list of
-#' `list(startMs=, durationMs=, centerImageX=, centerImageY=, nPoints=)`, one per fixation, in
-#' start-index/time order.
-fixations_idt <- function(path) {
-  pm <- as_path_matrix(path)
+#' Returns `list()` (never `NULL`) if the run has fewer than 2 points -- a run boundary is not the
+#' same "insufficient path" case `fixations_idt` itself guards with `NULL`; that `NULL`-vs-`list()`
+#' sentinel distinction stays owned entirely by that caller.
+.fixations_idt_run <- function(pm) {
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
-    return(NULL)
+    return(list())
   }
   out <- list()
   start <- 1L
@@ -1944,6 +1961,51 @@ fixations_idt <- function(path) {
       start <- start + 1L
     }
   }
+  out
+}
+
+#' Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector -- exact port
+#' of `blinded_focus.metrics.fixations_idt` (Python); see its docstring for the full algorithm
+#' description (deterministic, index-based, NOT a clustering library, via `.fixations_idt_run`).
+#' Per-point data `(t=pm[i,1], cx=pm[i,2], cy=pm[i,3], w=pm[i,4])`, 1-based R row indices
+#' throughout.
+#'
+#' **Idle-gap hard boundary (final-review fix):** a step flagged idle by `idle_step_mask` (`dt >
+#' IDLE_GAP_MS` -- Tier 2 B1's "reader stepped away, viewport didn't move" gap) is a HARD window
+#' boundary a fixation may never bridge -- before this fix, `.fixations_idt_run`'s loop ran over
+#' the WHOLE path with no idle awareness, so a >60s away-gap (with an otherwise near-stationary
+#' viewport either side of it) got silently bridged into ONE giant fixation spanning the entire
+#' gap. The fix splits `path` at every idle step into maximal idle-free "runs" and calls the
+#' unmodified `.fixations_idt_run` independently on each run in order, concatenating the results --
+#' a window can then never grow across a run boundary, and each run's own "path runs out of
+#' points" termination (already in `.fixations_idt_run`, unchanged) does double duty as "close the
+#' window at the idle boundary: emit it if it already qualified, else discard the never-yet-
+#' qualified partial window" -- exactly the required idle-boundary semantics, with no new
+#' termination logic needed. For a path with NO idle step at all (the common case), this is a
+#' no-op -- the single "run" is the whole path, identical to the pre-fix behavior.
+#'
+#' Returns `NULL` if `path` has fewer than 2 points -- fixation extraction is not computable at
+#' all, distinct from an empty list (see below); every metrics.csv column below (`n_fixations`
+#' etc.) maps this to a blank cell. Returns `list()` (a real, well-defined "zero fixations found" --
+#' NOT blank) if the path has >=2 points but no window ever qualifies. Otherwise a list of
+#' `list(startMs=, durationMs=, centerImageX=, centerImageY=, nPoints=)`, one per fixation, in
+#' start-index/time order.
+fixations_idt <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NULL)
+  }
+  idle <- idle_step_mask(path)
+  out <- list()
+  run_start <- 1L
+  for (i in seq_len(n - 1L)) {
+    if (idle[i]) {
+      out <- c(out, .fixations_idt_run(pm[run_start:i, , drop = FALSE]))
+      run_start <- i + 1L
+    }
+  }
+  out <- c(out, .fixations_idt_run(pm[run_start:n, , drop = FALSE]))
   out
 }
 
@@ -2029,9 +2091,16 @@ fixations_per_min <- function(fixations, path) {
 #' `mouse_velocity_px_per_sec` use: a segment touching the sentinel at either point is dropped
 #' whole, never bridged across).
 #'
-#' Returns `NULL` (blank `mouseCoveragePct`/`mouseEntropy` in `metrics.csv`) in two cases: `path`
-#' doesn't carry schema/5 mouse data at all (`has_mouse_data`); or `path` carries mouse data but
-#' has **zero on-slide points** anywhere (every sample is the off-viewer sentinel). Otherwise
+#' Returns `NULL` (blank `mouseCoveragePct`/`mouseEntropy` in `metrics.csv`) in three cases: `path`
+#' doesn't carry schema/5 mouse data at all (`has_mouse_data`); `path` carries mouse data but has
+#' **zero on-slide points** anywhere (every sample is the off-viewer sentinel); or `gw<=0`/`gh<=0`
+#' (a schema-valid fragment recording `gridWidth`/`gridHeight` of `0` -- **final-review fix,
+#' Python<->R parity**: the Python port crashes on this input -- its zero-size grid's column clamp
+#' always resolves to `-1`, and `grid[row, -1] += dt` on a genuinely size-`(gh, 0)` numpy array
+#' raises `IndexError`, aborting the whole batch run. R's own `grid[row+1, col+1]` (`col+1L == 0L`
+#' after the same clamp) does NOT crash on this input -- assigning to R's matrix index `0` is a
+#' documented silent no-op -- but the guard is added here anyway so both languages share the same
+#' explicit "nothing measurable" contract rather than relying on an R indexing accident). Otherwise
 #' returns a flat `(gw*gh,)` numeric vector -- all-zero is a legitimate result (not blank) whenever
 #' there is at least one on-slide point but zero valid on-slide *consecutive pairs* to deposit a
 #' step's dt into.
@@ -2049,6 +2118,9 @@ mouse_raster_from_path <- function(path, img_w, img_h, gw, gh) {
     return(NULL)
   }
   gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(NULL)
+  }
   img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
   img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
   grid <- matrix(0.0, nrow = gh, ncol = gw)
@@ -2500,11 +2572,23 @@ annotations_area_px <- function(fc) {
 
 #' Long-format (row, col, value) data frame for a row-major flat `grid`, used by all the raster
 #' plots below. `row`/`col` are 0-based grid indices (as in the Python `_grid2d` reshape).
+#'
+#' **Zero-size-grid fix (incidental, surfaced by the final-review F1 fixture):** built with
+#' `seq_len(...) - 1L` rather than the `0:(n - 1)` idiom -- for `gw` or `gh` equal to `0` (a
+#' schema-valid degenerate grid, the same fragment shape Finding 1/2's zero-grid guards handle),
+#' `0:(0 - 1)` is R's colon operator counting DOWN (`0:-1` == `c(0, -1)`, length 2), producing a
+#' bogus 2-row axis instead of the intended empty one -- `data.frame()` then errors on the
+#' mismatched row count against `value`'s genuinely-empty `numeric(0)`. `seq_len(n) - 1L` is
+#' `integer(0)` for `n <= 0` (never counts down), and `rep(x, each = 0)` / `rep(x, times = 0)` are
+#' always empty regardless of `x` -- so `row`/`col` both come out length-0 whenever either
+#' dimension is `<= 0`, matching `value`'s length and producing a valid, empty (0-row) data frame
+#' instead of an error. A crash-prevention fix, not a plotted-value change, for any non-degenerate
+#' `(gw, gh)`.
 .grid_long_df <- function(grid, gw, gh) {
   gw <- as.integer(gw); gh <- as.integer(gh)
   data.frame(
-    row = rep(0:(gh - 1), each = gw),
-    col = rep(0:(gw - 1), times = gh),
+    row = rep(seq_len(gh) - 1L, each = gw),
+    col = rep(seq_len(gw) - 1L, times = gh),
     value = as.numeric(grid)
   )
 }

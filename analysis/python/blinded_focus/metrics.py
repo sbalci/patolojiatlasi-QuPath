@@ -57,7 +57,12 @@ threshold, Salvucci & Goldberg 2000) fixation detector over the scanpath's viewp
 DBSCAN), whose cluster assignment is not guaranteed identical across languages/library versions --
 see :func:`fixations_idt`'s docstring for the full, index-based, parity-pinned algorithm.
 Directional metrics (turn-angle, transitions, etc.) stay tick-based and are untouched; fixations
-are an added lens, not a rebase.
+are an added lens, not a rebase. **Final-review fix (2026-07):** an idle-flagged step (Tier 2 B1's
+``idle_step_mask``, ``dt > IDLE_GAP_MS``) is now a HARD fixation-window boundary a window may
+never bridge, rather than being silently bridged into one giant cross-gap fixation -- CHANGES
+``nFixations``/``meanFixationMs``/``medianFixationMs``/``sdFixationMs``/``fixationsPerMin`` for any
+session with a >60s idle gap in its path (identical to before for a session with none, the common
+case).
 
 Tier 3 C2/C3/C4 (same spec doc, additive): ``mouse_raster_from_path`` -- a point-based dwell-ms
 grid over schema/5 cursor positions, analogous to ``raster_from_path`` but depositing a step's dt
@@ -237,10 +242,20 @@ def cc(a, b):
 
     Returns 0.0 if either grid is constant (correlation undefined; matplotlib/numpy would emit a
     NaN + RuntimeWarning otherwise).
-    """
+
+    **Incidental parity fix (surfaced by the final-review Finding 1/2 zero-size-grid guards,
+    previously unreachable behind their crash):** also returns 0.0 for a zero-length grid (``a.size
+    < 2`` / ``b.size < 2``), checked BEFORE ``.std()`` is ever called -- ``numpy``'s ``.std()`` on
+    a size-0 array is ``nan`` (not exactly ``0.0``), so the ``a.std() == 0`` guard alone silently
+    missed this one degenerate case (``nan == 0`` is ``False``), falling through to
+    ``np.corrcoef`` on two empty arrays and returning ``nan`` -- out of contract with this
+    docstring's own "0.0 if ... correlation undefined" promise, and a cross-language parity gap
+    (the R port's ``length(a) < 2`` guard already covered it). A size-1 grid was already handled
+    correctly (``.std()`` of a single point is exactly ``0.0``, no warning) -- only size-0 was
+    affected."""
     a = np.asarray(a, dtype=float).flatten()
     b = np.asarray(b, dtype=float).flatten()
-    if a.std() == 0 or b.std() == 0:
+    if a.size < 2 or b.size < 2 or a.std() == 0 or b.std() == 0:
         return 0.0
     return float(np.corrcoef(a, b)[0, 1])
 
@@ -357,8 +372,8 @@ def iou(a, b, thresh=0.1):
 def top_k_frac_mask(grid, frac=PRECISION_K_FRAC):
     """Tier 3 C6: boolean mask of the top ``frac`` (fraction, e.g. ``0.10`` = top 10%)
     highest-dwell cells in ``grid``: ``k = ceil(frac * n)`` (at least 1 for a non-empty grid),
-    ``cutoff`` = the value of the ``k``-th largest cell (descending order), mask = ``grid >=
-    cutoff``.
+    ``cutoff`` = the value of the ``k``-th largest cell (descending order), mask = ``(grid >=
+    cutoff) & (grid > 0)``.
 
     Tie-inclusive **by construction**: this returns the full ``>= cutoff`` set, not a fixed-size
     top-``k`` slice, so every cell sharing the exact cutoff value is included even when that pushes
@@ -368,6 +383,18 @@ def top_k_frac_mask(grid, frac=PRECISION_K_FRAC):
     among ties. ``k``-th-largest is computed via a full descending sort (``n`` is small --
     grid-cell counts, not path lengths -- so this is not a performance concern).
 
+    **Strictly-positive guard (final-review fix):** for a sparse/focused grid where fewer than
+    ``k`` cells have nonzero dwell (the ORDINARY case for a focused reader on a fine grid),
+    ``cutoff`` is ``0.0`` -- the plain ``grid >= cutoff`` mask would then select *every* cell
+    (including every untouched one), silently degrading "top-K" to "the whole grid" and making
+    downstream recall report ``1.0`` for a reader who never touched the reference region at all
+    (the opposite of reality). The extra ``& (grid > 0)`` restricts the tie-inclusive ``>=cutoff``
+    set to cells the reader actually dwelled in. This is a no-op whenever ``cutoff > 0`` (``grid >=
+    cutoff`` already implies ``grid > 0`` in that case), so every non-degenerate/dense case is
+    numerically unchanged -- only the ``cutoff == 0`` case's mask shrinks from "every cell" to "the
+    strictly-positive cells" (possibly zero of them, then handled by
+    :func:`precision_recall_at_topk`'s own ``topk_n == 0 -> NaN`` guard).
+
     Returns an all-``False`` mask for an empty (0-length) grid (no cutoff to compute)."""
     g = np.asarray(grid, dtype=float).flatten()
     n = g.size
@@ -375,7 +402,7 @@ def top_k_frac_mask(grid, frac=PRECISION_K_FRAC):
         return np.zeros(0, dtype=bool)
     k = max(1, int(math.ceil(frac * n)))
     cutoff = float(np.sort(g)[::-1][k - 1])
-    return g >= cutoff
+    return (g >= cutoff) & (g > 0)
 
 
 def precision_recall_at_topk(dwell, roi_mask, frac=PRECISION_K_FRAC):
@@ -514,8 +541,21 @@ def visit_count_grid(seq, gw, gh):
     :func:`visited_sequence`) -- NOT per raw path tick, so a long dwell in one cell counts as a
     single entry, not one count per sample. Returns a flat ``(gw*gh,)`` float array (float, not
     int, to match :func:`top_hotspots`'s expected grid dtype; every value is still a whole number
-    of dwell-run entries)."""
+    of dwell-run entries).
+
+    **Zero-size-grid guard (final-review fix):** ``gw<=0`` or ``gh<=0`` (a schema-valid fragment
+    with ``gridWidth``/``gridHeight`` of ``0``, ``grid=[]``) returns an EMPTY ``(0,)`` array
+    without touching ``seq`` at all. Without this guard, ``seq`` here is
+    :func:`visited_sequence`'s output at this SAME degenerate ``(gw, gh)`` -- every one of its
+    entries clamps to index ``-1`` (see that function's clamp), so ``counts[-1]`` on a genuinely
+    size-``0`` array raises ``IndexError`` and aborts the whole batch run the moment any session
+    on a zero-size grid has a non-empty path. This mirrors :func:`visit_count_jaccard`'s own
+    documented "blank for a degenerate zero-size grid" convention -- the empty array here makes
+    that function's ``top_hotspots`` calls return empty hotspot sets, so the blank propagates
+    cleanly instead of crashing."""
     gw, gh = int(gw), int(gh)
+    if gw <= 0 or gh <= 0:
+        return np.zeros(0, dtype=float)
     counts = np.zeros(gw * gh, dtype=float)
     for idx in seq:
         counts[idx] += 1.0
@@ -1517,53 +1557,20 @@ def _window_dispersion(path, start, end):
     return (max(cxs) - min(cxs)) + (max(cys) - min(cys))
 
 
-def fixations_idt(path):
-    """Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector over the
-    scanpath's ordered viewport centers -- per-point data ``(t=path[i][0], cx=path[i][1],
-    cy=path[i][2], w=path[i][3])``. Deterministic and index-based (see the module-section note
-    above for why this is NOT DBSCAN).
+def _fixations_idt_run(path):
+    """Tier 3 C1: the exact original I-DT window-growing loop (Salvucci & Goldberg 2000), factored
+    out of :func:`fixations_idt` so it can be run independently over each of a path's IDLE-FREE
+    "runs" (see that function's idle-boundary-splitting docstring for why). Operates on ``path``'s
+    own 0-based index order -- ``start = 0`` is THIS run's own first point, not the original,
+    un-split path's -- otherwise byte-for-byte the same algorithm as before the final-review idle
+    fix (see :func:`fixations_idt`'s docstring for the full step-by-step description).
 
-    Algorithm, operating on ``path``'s existing point order (no sorting/resampling), starting with
-    ``start = 0``:
-
-    1. Grow the window ``[start, end]`` one point at a time until its time span (``t[end] -
-       t[start]``) first reaches :data:`MIN_FIXATION_MS` -- the smallest possible window that could
-       qualify as a fixation. If the path runs out of points before the span is reached (``end``
-       would run past the last index), STOP -- no more fixations.
-    2. The window's dispersion threshold is fixed **once**, from the ``w`` of the window's first
-       point (``path[start][3]``) at the moment this minimal window is found:
-       ``threshold = DISPERSION_FRAC * w_at_window_start``. It is never recomputed as the window
-       later expands (see :data:`DISPERSION_FRAC`'s docstring).
-    3. If the minimal window's dispersion (:func:`_window_dispersion`) is ``<= threshold``: expand
-       the window one point at a time for as long as the NEXT point keeps the (whole, from
-       ``start``) window's dispersion ``<= threshold``; the moment adding the next point would
-       exceed the threshold (or the path runs out of points), STOP expanding and emit one fixation
-       over the final window: ``startMs = t[start]``, ``durationMs = t[final_end] - t[start]``,
-       ``centerImageX = mean(cx over the window)``, ``centerImageY = mean(cy over the window)``,
-       ``nPoints = final_end - start + 1``. Advance ``start`` to ``final_end + 1`` (past the whole
-       emitted window, so its points are never reused by a later fixation) and go to step 1.
-    4. Else (the minimal window is already over threshold -- no fixation starts here): advance
-       ``start`` by exactly ONE point (not past the whole rejected window) and go to step 1 -- this
-       lets a fixation start at ``start + 1`` even though it was itself part of the rejected window.
-
-    Returns ``None`` if ``path`` has fewer than 2 points -- fixation extraction is not computable at
-    all, distinct from an empty list (see below); this is the sentinel every metrics.csv column
-    below (:func:`n_fixations` etc.) maps to a blank cell. Returns ``[]`` (a real, well-defined
-    "zero fixations found" -- NOT blank) if the path has >=2 points but no window ever qualifies,
-    e.g. a path shorter than :data:`MIN_FIXATION_MS` in total span, or one whose dispersion never
-    drops to or below its own threshold. Otherwise returns a list of dicts (in start-index/time
-    order): ``{"startMs", "durationMs", "centerImageX", "centerImageY", "nPoints"}``.
-
-    Every arithmetic step here (max/min, sum/len mean, ``<``/``<=`` comparisons) is plain, order-
-    independent float arithmetic over already-float-coerced inputs -- ``durationMs`` is an exact
-    integer difference of integer millisecond timestamps (so mean/median/sd of durations are exact
-    across languages), and an R port using the same step-by-step index loop (not a vectorized/
-    library shortcut) reproduces the identical fixation sequence to 1e-6 (only the
-    ``centerImageX``/``centerImageY`` mean of non-integer real coordinates carries the sub-1e-6
-    long-double-vs-double summation wobble a mean over few, small-magnitude values can show)."""
-    if not path or len(path) < 2:
-        return None
+    Returns ``[]`` (never ``None``) if the run has fewer than 2 points -- a run boundary is not
+    the same "insufficient path" case :func:`fixations_idt` itself guards with ``None``; the
+    ``None``-vs-``[]`` sentinel distinction stays owned entirely by that caller."""
     n = len(path)
+    if n < 2:
+        return []
     out = []
     start = 0
     while start < n:
@@ -1595,6 +1602,86 @@ def fixations_idt(path):
             start = cur_end + 1
         else:
             start += 1
+    return out
+
+
+def fixations_idt(path):
+    """Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector over the
+    scanpath's ordered viewport centers -- per-point data ``(t=path[i][0], cx=path[i][1],
+    cy=path[i][2], w=path[i][3])``. Deterministic and index-based (see the module-section note
+    above for why this is NOT DBSCAN).
+
+    Algorithm (:func:`_fixations_idt_run`), operating on ``path``'s existing point order (no
+    sorting/resampling), starting with ``start = 0``:
+
+    1. Grow the window ``[start, end]`` one point at a time until its time span (``t[end] -
+       t[start]``) first reaches :data:`MIN_FIXATION_MS` -- the smallest possible window that could
+       qualify as a fixation. If the path runs out of points before the span is reached (``end``
+       would run past the last index), STOP -- no more fixations.
+    2. The window's dispersion threshold is fixed **once**, from the ``w`` of the window's first
+       point (``path[start][3]``) at the moment this minimal window is found:
+       ``threshold = DISPERSION_FRAC * w_at_window_start``. It is never recomputed as the window
+       later expands (see :data:`DISPERSION_FRAC`'s docstring).
+    3. If the minimal window's dispersion (:func:`_window_dispersion`) is ``<= threshold``: expand
+       the window one point at a time for as long as the NEXT point keeps the (whole, from
+       ``start``) window's dispersion ``<= threshold``; the moment adding the next point would
+       exceed the threshold (or the path runs out of points), STOP expanding and emit one fixation
+       over the final window: ``startMs = t[start]``, ``durationMs = t[final_end] - t[start]``,
+       ``centerImageX = mean(cx over the window)``, ``centerImageY = mean(cy over the window)``,
+       ``nPoints = final_end - start + 1``. Advance ``start`` to ``final_end + 1`` (past the whole
+       emitted window, so its points are never reused by a later fixation) and go to step 1.
+    4. Else (the minimal window is already over threshold -- no fixation starts here): advance
+       ``start`` by exactly ONE point (not past the whole rejected window) and go to step 1 -- this
+       lets a fixation start at ``start + 1`` even though it was itself part of the rejected window.
+
+    **Idle-gap hard boundary (final-review fix):** a step flagged idle by :func:`idle_step_mask`
+    (``dt > IDLE_GAP_MS`` -- Tier 2 B1's "reader stepped away, viewport didn't move" gap) is a
+    HARD window boundary a fixation may never bridge -- before this fix, the algorithm above ran
+    over the WHOLE path with no idle awareness at all, so a >60s away-gap (with an otherwise
+    near-stationary viewport either side of it -- exactly the case a low-dispersion window would
+    happily keep expanding through) got silently bridged into ONE giant fixation spanning the
+    entire gap, corrupting every summary stat (``nFixations``/``meanFixationMs``/
+    ``medianFixationMs``/``sdFixationMs``) and leaving ``fixationsPerMin`` (whose idle-excluded
+    ``activeSpanMs`` denominator already existed, Tier 2 B1) numerically inconsistent with a
+    numerator that was NOT idle-aware. The fix splits ``path`` at every idle step into maximal
+    idle-free "runs" and calls the unmodified :func:`_fixations_idt_run` algorithm independently on
+    each run in order, concatenating the results -- a window can then never grow across a run
+    boundary (each run is processed as if it were the whole path), and each run's own
+    "path runs out of points" termination (step 1's existing STOP, already handled above) does
+    double duty as "close the window at the idle boundary: emit it if it already qualified as a
+    fixation over ``[start, end]``, else discard the never-yet-qualified partial window" -- exactly
+    the required idle-boundary semantics, with no new termination logic needed. A run of exactly 1
+    point (an idle step immediately after another idle step, or at the very start/end of ``path``)
+    contributes zero fixations (:func:`_fixations_idt_run`'s own <2-point guard), never a crash.
+    For a path with NO idle step at all (the common case), this is a no-op -- the single "run" is
+    the whole path, identical to the pre-fix behavior.
+
+    Returns ``None`` if ``path`` has fewer than 2 points -- fixation extraction is not computable at
+    all, distinct from an empty list (see below); this is the sentinel every metrics.csv column
+    below (:func:`n_fixations` etc.) maps to a blank cell. Returns ``[]`` (a real, well-defined
+    "zero fixations found" -- NOT blank) if the path has >=2 points but no window ever qualifies,
+    e.g. a path shorter than :data:`MIN_FIXATION_MS` in total span, or one whose dispersion never
+    drops to or below its own threshold. Otherwise returns a list of dicts (in start-index/time
+    order): ``{"startMs", "durationMs", "centerImageX", "centerImageY", "nPoints"}``.
+
+    Every arithmetic step here (max/min, sum/len mean, ``<``/``<=`` comparisons) is plain, order-
+    independent float arithmetic over already-float-coerced inputs -- ``durationMs`` is an exact
+    integer difference of integer millisecond timestamps (so mean/median/sd of durations are exact
+    across languages), and an R port using the same step-by-step index loop (not a vectorized/
+    library shortcut) reproduces the identical fixation sequence to 1e-6 (only the
+    ``centerImageX``/``centerImageY`` mean of non-integer real coordinates carries the sub-1e-6
+    long-double-vs-double summation wobble a mean over few, small-magnitude values can show)."""
+    if not path or len(path) < 2:
+        return None
+    n = len(path)
+    idle = idle_step_mask(path)
+    out = []
+    run_start = 0
+    for i in range(n - 1):
+        if idle[i]:
+            out.extend(_fixations_idt_run(path[run_start:i + 1]))
+            run_start = i + 1
+    out.extend(_fixations_idt_run(path[run_start:n]))
     return out
 
 
@@ -1705,12 +1792,22 @@ def mouse_raster_from_path(path, img_w, img_h, gw, gh):
     pairs* to deposit a step's dt into (e.g. a single on-slide sample surrounded by off-slide
     ones, or a 1-point path) -- this mirrors the file's existing "0.0 for a well-defined but empty
     computation" convention (e.g. :func:`coverage`/:func:`entropy` on an all-zero grid), distinct
-    from the two `None` cases above where nothing is measurable at all."""
+    from the two `None` cases above where nothing is measurable at all.
+
+    **Zero-size-grid guard (final-review fix):** also returns ``None`` if ``gw<=0`` or ``gh<=0``
+    (a schema-valid fragment recording ``gridWidth``/``gridHeight`` of ``0``) -- this is a THIRD
+    "nothing measurable" case, folded into the same ``None`` sentinel the two above already use.
+    Without this guard, a zero-size grid's column/row clamp (``min(max(...), gw-1)`` with
+    ``gw-1=-1``) always resolves to ``-1``, so ``grid[row, -1] += dt`` on a genuinely size-``(gh,
+    0)`` array raises ``IndexError`` the moment there is at least one valid on-slide step,
+    aborting the whole batch run."""
     if not has_mouse_data(path):
         return None
     if not any(mouse_cursor_over_slide(p) for p in path):
         return None
     gw, gh = int(gw), int(gh)
+    if gw <= 0 or gh <= 0:
+        return None
     img_w = float(img_w) if img_w else 1.0
     img_h = float(img_h) if img_h else 1.0
     grid = np.zeros((gh, gw), dtype=float)

@@ -350,11 +350,14 @@ below: B1 idle exclusion, B3 canonical magnification bands); everything else is 
 - **`nFixations` / `meanFixationMs` / `medianFixationMs` / `sdFixationMs` / `fixationsPerMin`**
   (`metrics.csv`, path-only, Tier 3 C1) — see "Trajectory" below for the fixation algorithm.
   `fixationsPerMin` uses the same idle-excluded `activeSpanMs` denominator as the rate metrics
-  above. All 5 blank if the path has <2 points; `nFixations`/`meanFixationMs`/`medianFixationMs`/
-  `sdFixationMs` additionally need >=1 (or >=2 for `sdFixationMs`) fixations actually found — a
-  genuinely-zero-fixations path (e.g. shorter than `MIN_FIXATION_MS`=250ms total) reports
-  `nFixations=0`/`fixationsPerMin=0.0` (well-defined zero) but blank mean/median/sd (undefined over
-  zero fixations).
+  above, and (final-review fix) the numerator is now idle-consistent too: an idle-flagged step
+  (`dt > IDLE_GAP_MS`) is a hard fixation-window boundary, so `nFixations`/the other summary
+  stats never bridge a >60s away-gap into one artificially long fixation — see the "Fixation
+  extraction (I-DT)" entry below for the full idle-boundary rule. All 5 blank if the path has <2
+  points; `nFixations`/`meanFixationMs`/`medianFixationMs`/`sdFixationMs` additionally need >=1
+  (or >=2 for `sdFixationMs`) fixations actually found — a genuinely-zero-fixations path (e.g.
+  shorter than `MIN_FIXATION_MS`=250ms total) reports `nFixations=0`/`fixationsPerMin=0.0`
+  (well-defined zero) but blank mean/median/sd (undefined over zero fixations).
 - **`decisionLatencyMs` vs `responseLatencyMs`** (`decisions.csv`, Tier 3 C5) —
   `decisionLatencyMs` = time from slide-open to submit (**permanently** == `decisionMs`; for a
   leave-prompt capture this is essentially the whole slide-viewing `durationMs`, not a reaction
@@ -450,11 +453,19 @@ below: B1 idle exclusion, B3 canonical magnification bands); everything else is 
   guaranteed identical across languages/library versions, which would break Python↔R parity).
   Dispersion threshold = `0.25 ×` the visible viewport width **at the window's first point**
   (fixed once, never recomputed as the window expands — avoids a circular threshold); minimum
-  fixation duration = 250ms. **These are I-DT viewport-jump proxies, not true eye-tracking
-  fixations** — label them as such in any downstream write-up. Per-fixation rows in
-  `fixations_<slug>.csv` (see "Spatial"/output-files table above); summary stats in `metrics.csv`
-  (see "Temporal" above). Directional metrics (turn-angle, transitions) stay tick-based and are
-  untouched by this — fixations are an added lens, not a rebase.
+  fixation duration = 250ms. **Idle-gap hard boundary (final-review fix):** a step flagged idle
+  by `idle_step_mask` (Tier 2 B1, `dt > IDLE_GAP_MS` = 60s) is a hard window boundary a fixation
+  may never bridge — the path is split into maximal idle-free "runs" and each run is fed through
+  the (otherwise unmodified) I-DT loop independently, so a >60s away-gap with a near-stationary
+  viewport either side no longer gets silently bridged into one artificially long fixation. This
+  keeps `nFixations`/`meanFixationMs`/`medianFixationMs`/`sdFixationMs` consistent with
+  `fixationsPerMin`'s idle-excluded `activeSpanMs` denominator (both numerator and denominator are
+  now idle-aware). A session with no >60s gap is numerically unchanged (the split is a no-op).
+  **These are I-DT viewport-jump proxies, not true eye-tracking fixations** — label them as such
+  in any downstream write-up. Per-fixation rows in `fixations_<slug>.csv` (see "Spatial"/
+  output-files table above); summary stats in `metrics.csv` (see "Temporal" above). Directional
+  metrics (turn-angle, transitions) stay tick-based and are untouched by this — fixations are an
+  added lens, not a rebase.
 
 ### Mouse / cursor
 

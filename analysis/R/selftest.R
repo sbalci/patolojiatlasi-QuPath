@@ -768,6 +768,127 @@ build_c6_roi_fc <- function() {
   )
 }
 
+# ---------------------------------------------------------------------------
+# Final review (2026-07-24, docs/superpowers/sdd/enrichment-finalfix-report.md): pipeline-level
+# fixtures for the 4 CONFIRMED findings -- mirrors analysis/python/selftest.py's own final-review
+# section function-for-function/fixture-for-fixture.
+# ---------------------------------------------------------------------------
+
+#' Minimal fragment builder for the final-review fixtures below -- unlike `.fragment` (which
+#' hardcodes the module's GW/GH/IMG_W/IMG_H constants), every grid/image dimension is an explicit
+#' parameter, since Findings 1/2's zero-size-grid fixtures need gridWidth/gridHeight of 0 -- a
+#' shape the module constants never exercise.
+.finalfix_fragment <- function(session_id, schema, grid, gw, gh, img_w, img_h, duration_ms,
+                                sample_count, path = NULL, slide_key = NULL) {
+  d <- list(
+    schema = paste0("atlas-focus-contribution/", schema),
+    slideKey = slide_key,
+    sessionId = session_id,
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = gw, gridHeight = gh,
+    grid = grid,
+    durationMs = duration_ms,
+    sampleCount = sample_count,
+    date = "2026-07-24"
+  )
+  if (!is.null(path)) {
+    if (is.matrix(path)) {
+      d$path <- lapply(seq_len(nrow(path)), function(i) as.numeric(path[i, ]))
+    } else {
+      d$path <- path
+    }
+  }
+  d
+}
+
+ZEROGRID_PATH_SLIDE_KEY <- "sha256:selftest-slide-finalfix-zerogrid-path-0001"
+#' Finding 1 fixture: a single schema/3 session recording gridWidth=0/gridHeight=5 (grid=numeric(0),
+#' schema-valid per `.is_valid_fragment`'s `length(grid)==gw*gh` check: `0*5==0`) WITH a real path
+#' -- the combination the pre-fix code crashed on: `visited_sequence` clamps every path point's
+#' cell index to -1 at this (gw=0, gh=5) resolution, so `visit_count_grid`'s assignment loop on a
+#' genuinely size-0 vector would (in a naive port) raise/abort, propagating up through
+#' `visit_count_jaccard` into `analyze()`.
+build_zerogrid_path_fragment <- function() {
+  path <- do.call(rbind, lapply(0:9, function(t) c(t * 250, 100 + t, 100 + t, 400, 300)))
+  .finalfix_fragment(
+    "zg-path1", 3, numeric(0), 0L, 5L, 2000, 1500, 2250, 10, path = path,
+    slide_key = ZEROGRID_PATH_SLIDE_KEY
+  )
+}
+
+ZEROGRID_MOUSE_SLIDE_KEY <- "sha256:selftest-slide-finalfix-zerogrid-mouse-0001"
+#' Finding 2 fixture: a single schema/5 session recording gridWidth=0/gridHeight=5 WITH on-slide
+#' mouse data -- exercises `mouse_raster_from_path`'s zero-size-grid guard through the full
+#' `analyze()` pipeline.
+build_zerogrid_mouse_fragment <- function() {
+  path <- matrix(
+    c(
+      0, 100, 100, 400, 300, 1000, 50, 50,
+      1000, 100, 100, 400, 300, 1000, 60, 60
+    ),
+    nrow = 2, ncol = 8, byrow = TRUE
+  )
+  .finalfix_fragment(
+    "zg-mouse1", 5, numeric(0), 0L, 5L, 2000, 1500, 1000, 2, path = path,
+    slide_key = ZEROGRID_MOUSE_SLIDE_KEY
+  )
+}
+
+TOPK_SPARSE_SLIDE_KEY <- "sha256:selftest-slide-finalfix-topk-sparse-0001"
+#' Finding 3 fixture: a 10x10 (n=100) dwell grid where only 5 cells (flat indices 1-5, row0
+#' col0-4) are nonzero (~100 each) -- a focused/sparse reader on a fine grid. `frac=0.10` wants
+#' `k=ceiling(0.10*100)=10`, but only 5 cells are nonzero, so the 10th-largest value (the cutoff)
+#' is 0.0. The ROI (see `build_topk_sparse_roi_fc`) is the DISJOINT bottom half (rows 5-9) -- zero
+#' overlap with the reader's 5 attended cells by construction.
+build_topk_sparse_fragment <- function() {
+  gw <- 10L; gh <- 10L
+  grid <- rep(0.0, gw * gh)
+  grid[1:5] <- 100.0
+  .finalfix_fragment(
+    "topk-sparse1", 2, grid, gw, gh, 1000, 1000, 1000, 5,
+    slide_key = TOPK_SPARSE_SLIDE_KEY
+  )
+}
+
+#' ROI = the bottom half of `build_topk_sparse_fragment`'s 10x10 grid over a 1000x1000 image (rows
+#' 5-9, y in [500, 1000]) -- disjoint from the 5 nonzero cells in row 0.
+build_topk_sparse_roi_fc <- function() {
+  list(
+    type = "FeatureCollection",
+    features = list(list(
+      type = "Feature",
+      geometry = list(
+        type = "Polygon",
+        coordinates = list(list(c(0, 500), c(1000, 500), c(1000, 1000), c(0, 1000), c(0, 500)))
+      ),
+      properties = list()
+    ))
+  )
+}
+
+IDLE_FIXATION_SLIDE_KEY <- "sha256:selftest-slide-finalfix-idle-fixation-0001"
+#' Finding 4 fixture: a schema/3, 4-point path with a KNOWN idle-boundary fixation split -- "4s
+#' dwell, then a 66s away-gap (idle, >IDLE_GAP_MS=60000ms) with an otherwise near-stationary
+#' viewport either side, then a 1s dwell". Mirrors the Python toolkit's
+#' `build_idle_fixation_fragment` -- see its docstring (and
+#' docs/superpowers/sdd/enrichment-finalfix-report.md) for the full hand derivation.
+build_idle_fixation_fragment <- function() {
+  grid <- .n_nonzero_grid(10)
+  path <- matrix(
+    c(
+      0, 100, 100, 400, 300,
+      4000, 100, 100, 400, 300,
+      70000, 101, 101, 400, 300,
+      71000, 100, 100, 400, 300
+    ),
+    nrow = 4, ncol = 5, byrow = TRUE
+  )
+  .finalfix_fragment(
+    "idlefix1", 3, grid, GW, GH, IMG_W, IMG_H, 71000, 4, path = path,
+    slide_key = IDLE_FIXATION_SLIDE_KEY
+  )
+}
+
 write_fragments_to_dir <- function(fragments, d) {
   for (f in fragments) {
     writeLines(jsonlite::toJSON(f, auto_unbox = TRUE), file.path(d, paste0(f$sessionId, ".json")))
@@ -1478,6 +1599,45 @@ check_tier3_direct_unit_asserts <- function() {
   # sample sd (ddof=1) of [300,400,500]: mean=400, sq devs=[10000,0,10000], sum=20000, var=10000,
   # sd=100.0
   stopifnot(abs(sd_fixation_ms(synth_fixations) - 100.0) < 1e-9)
+
+  # --- Final-review Finding 4 regression: an idle-flagged step (dt > IDLE_GAP_MS=60000) is a HARD
+  # fixation-window boundary -- a window may never bridge it. Hand-derived (see
+  # docs/superpowers/sdd/enrichment-finalfix-report.md): 4s dwell at (100,100), a 66s away-gap
+  # (idle) with an otherwise near-stationary viewport either side, then a 1s dwell at ~(100,100).
+  # PRE-FIX this bridged into ONE 71000ms fixation (nPoints=4); POST-FIX it must split into exactly
+  # 2 fixations at the idle boundary.
+  idle_gap_path <- matrix(
+    c(
+      0, 100, 100, 400, 300,
+      4000, 100, 100, 400, 300,
+      70000, 101, 101, 400, 300,   # step2 (p2->p3) dt=66000 > IDLE_GAP_MS=60000 -> idle
+      71000, 100, 100, 400, 300
+    ),
+    nrow = 4, ncol = 5, byrow = TRUE
+  )
+  fx_idle <- fixations_idt(idle_gap_path)
+  stopifnot(
+    "expected the idle gap to SPLIT the path into exactly 2 fixations (not 1 bridged 71000ms fixation)" =
+      !is.null(fx_idle) && length(fx_idle) == 2
+  )
+  fxi1 <- fx_idle[[1]]; fxi2 <- fx_idle[[2]]
+  stopifnot(abs(fxi1$startMs - 0.0) < 1e-9, abs(fxi1$durationMs - 4000.0) < 1e-9)
+  stopifnot(fxi1$nPoints == 2L, abs(fxi1$centerImageX - 100.0) < 1e-9)
+  stopifnot(abs(fxi2$startMs - 70000.0) < 1e-9, abs(fxi2$durationMs - 1000.0) < 1e-9)
+  stopifnot(fxi2$nPoints == 2L, abs(fxi2$centerImageX - 100.5) < 1e-9)
+  stopifnot(n_fixations(fx_idle) == 2)
+  stopifnot(abs(mean_fixation_ms(fx_idle) - 2500.0) < 1e-9)
+  stopifnot(abs(median_fixation_ms(fx_idle) - 2500.0) < 1e-9)
+  # sample sd (ddof=1) of [4000, 1000]: mean=2500, sq devs=[2250000,2250000], sum=4500000,
+  # var=4500000, sd=sqrt(4500000)=2121.320343559643
+  stopifnot(abs(sd_fixation_ms(fx_idle) - 2121.320343559643) < 1e-6)
+  # activeSpanMs = (71000-0) - idleMs(66000) = 5000 -> fixationsPerMin = 2 / (5000/60000) = 24.0
+  stopifnot(abs(idle_ms(idle_gap_path) - 66000.0) < 1e-9)
+  stopifnot(abs(active_span_ms(idle_gap_path) - 5000.0) < 1e-9)
+  stopifnot(abs(fixations_per_min(fx_idle, idle_gap_path) - 24.0) < 1e-9)
+  # No-drift check: the pre-existing non-idle fixtures above contain no step whose dt exceeds
+  # IDLE_GAP_MS, so `idle_step_mask` is all-FALSE for each and this fix is a no-op for all of them
+  # -- already re-verified by the unmodified stopifnot()s above still passing.
 }
 
 #' Tier 3 C1 pipeline-level check: runs the hand-derivable fixation fixture (see
@@ -1591,6 +1751,23 @@ check_tier4_direct_unit_asserts <- function() {
   stopifnot(
     "expected cell(1,1)==100 -- the active step1's dt, owned by point1's on-slide cursor" =
       abs(grid_idle[4] - 100.0) < 1e-9
+  )
+
+  # ---- Final-review Finding 2 regression: mouse_raster_from_path must NOT crash on a zero-size
+  # grid (gw=0/gh=0) -- the column/row clamp resolves to -1 for a zero-size axis, so `grid[row+1,
+  # col+1]` (col+1L == 0L) would touch R's index-0 no-op quirk rather than crash, but the guard is
+  # added anyway for explicit Python<->R parity (see mouse_raster_from_path's docs).
+  path_zero_grid <- list(
+    c(0, 0, 0, 400, 300, 1000, 10, 10),
+    c(1000, 0, 0, 400, 300, 1000, 20, 20)
+  )
+  stopifnot(
+    "mouse_raster_from_path should return NULL (not crash) for a zero-size grid (gw=0)" =
+      is.null(mouse_raster_from_path(path_zero_grid, 100, 100, 0L, 5L))
+  )
+  stopifnot(
+    "mouse_raster_from_path should return NULL (not crash) for a zero-size grid (gh=0)" =
+      is.null(mouse_raster_from_path(path_zero_grid, 100, 100, 5L, 0L))
   )
 
   # ---- C3: dtw_distance ----
@@ -1809,6 +1986,38 @@ check_tier6_direct_unit_asserts <- function() {
   pr_empty <- precision_recall_at_topk(numeric(0), logical(0), 0.10)
   stopifnot(is.nan(pr_empty$precision), is.nan(pr_empty$recall))
 
+  # ---- Final-review Finding 3 regression: sparse/focused grid where fewer than k=ceil(0.10*n)
+  # cells are nonzero -> cutoff falls to 0.0. PRE-FIX, `grid >= 0.0` matched EVERY cell (the whole
+  # grid), so a reader whose top-K region never touched the ROI at all still reported recall=1.0.
+  # A 10x10 (n=100) grid, only 5 cells nonzero (~100, flat indices 1-5 i.e. row0 col0-4), ROI = the
+  # DISJOINT bottom half (row 5-9, flat indices 51-100) -- zero overlap by construction.
+  n_sparse <- 100L
+  k_sparse <- 10L  # ceiling(0.10 * 100)
+  sparse_grid <- rep(0.0, n_sparse)
+  sparse_grid[1:5] <- 100.0
+  sparse_roi <- rep(FALSE, n_sparse)
+  sparse_roi[51:100] <- TRUE
+  sparse_mask <- top_k_frac_mask(sparse_grid, 0.10)
+  stopifnot(
+    "expected top_k_frac_mask to select exactly the 5 strictly-positive cells, not the whole grid" =
+      sum(sparse_mask) == 5
+  )
+  pr_sparse <- precision_recall_at_topk(sparse_grid, sparse_roi, 0.10)
+  stopifnot(
+    "expected precisionAtTopK == 0.0 (disjoint ROI)" = abs(pr_sparse$precision - 0.0) < 1e-12
+  )
+  stopifnot(
+    "expected recall == 0.0 (reader never touched the ROI) -- pre-fix bug reported 1.0" =
+      abs(pr_sparse$recall - 0.0) < 1e-12
+  )
+  # No-drift check for the DENSE/non-degenerate case (cutoff > 0, guard is a no-op): reassert the
+  # distinct_grid/roi_first_two case above unchanged.
+  pr_dense_recheck <- precision_recall_at_topk(distinct_grid, roi_first_two, 0.10)
+  stopifnot(
+    "dense/non-degenerate precisionAtTopK/recall must NOT drift after the strictly-positive guard" =
+      abs(pr_dense_recheck$precision - 1.0) < 1e-12 && abs(pr_dense_recheck$recall - 0.5) < 1e-12
+  )
+
   # ---- visit_count_grid / visit_count_jaccard ----
   dwell4 <- c(100.0, 10.0, 5.0, 1.0)
   visit_seq <- c(0, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2)
@@ -1817,6 +2026,31 @@ check_tier6_direct_unit_asserts <- function() {
   jaccard <- visit_count_jaccard(dwell4, 2, 2, visit_seq, top_n = 2)
   stopifnot("expected visitCountJaccard == 1/3" = abs(jaccard - (1.0 / 3.0)) < 1e-12)
   stopifnot(is.nan(visit_count_jaccard(numeric(0), 0, 0, integer(0), top_n = 5)))
+
+  # ---- Final-review Finding 1 regression: visit_count_grid must NOT crash on a zero-size grid
+  # (gw=0) fed a NON-EMPTY visited-cell sequence -- this is exactly what analyze() produces when a
+  # schema-valid fragment records gridWidth=0: visited_sequence's col-clamp resolves every entry to
+  # -1, and (unlike the existing `visit_count_jaccard(numeric(0), 0, 0, integer(0), ...)` assert
+  # above, whose EMPTY seq never touches the assignment loop at all) this non-empty seq DOES.
+  crash_seq <- c(-1L, -1L, -1L)  # visited_sequence's actual output shape for gw=0
+  zero_grid_counts <- visit_count_grid(crash_seq, 0L, 5L)
+  stopifnot(
+    "expected an EMPTY vector (not a crash/growth) for visit_count_grid on a zero-size grid" =
+      length(zero_grid_counts) == 0
+  )
+  stopifnot(is.nan(visit_count_jaccard(numeric(0), 0L, 5L, crash_seq, top_n = 5)))
+
+  # ---- Incidental parity fix confirmation (surfaced by the Finding 1/2 zero-size-grid guards
+  # above, previously unreachable behind their crash): cc() on two zero-length grids -- e.g. the
+  # self-comparison diagonal row in compare_<slug>.csv for a single zero-size-grid session -- must
+  # return 0.0 ("correlation undefined"). R's `cc()` already guards `length(a) < 2` (no code
+  # change needed on this side); the Python port lacked the equivalent guard (`.std()` of an empty
+  # array is `nan`, not exactly `0.0`, so its old `a.std() == 0` check alone missed this one
+  # degenerate case) -- fixed there for parity.
+  stopifnot(
+    "expected cc(numeric(0), numeric(0)) == 0.0 (correlation undefined for an empty grid)" =
+      cc(numeric(0), numeric(0)) == 0.0
+  )
 
   # ---- annotated_area_union_px: reuses the same outer/inner nested-rectangle geometry as the
   # Python toolkit's regression fixture (10x10 grid over a 100x100 image). ----
@@ -1927,6 +2161,120 @@ check_tier6_c6_fixture <- function(tmp) {
   expected <- c("0 0" = 1, "0 1" = 2, "2 2" = 1)
   stopifnot(all(names(expected) %in% names(got)))
   stopifnot(all(abs(got[names(expected)] - expected) < 1e-9))
+}
+
+#' Final-review Finding 1 pipeline-level check: a schema-valid gridWidth=0/gridHeight=5 fragment
+#' WITH a path must run through the full `analyze()` pipeline to completion (no crash), with
+#' `visitCountJaccard` blank (NA) for the degenerate zero-size grid.
+check_finalfix_zerogrid_path_fixture <- function(tmp) {
+  frag <- build_zerogrid_path_fragment()
+  in_dir <- file.path(tmp, "in_zerogrid_path")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_zerogrid_path")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot(nrow(metrics) == 1)
+  stopifnot("path must still have been processed" = metrics$pathPoints[1] == 10)
+  stopifnot(
+    "expected blank visitCountJaccard for a zero-size grid" = is.na(metrics$visitCountJaccard[1])
+  )
+}
+
+#' Final-review Finding 2 pipeline-level check: a schema/5 gridWidth=0/gridHeight=5 fragment WITH
+#' on-slide mouse data must run through the full `analyze()` pipeline to completion (no crash),
+#' with `mouseCoveragePct`/`mouseEntropy` blank (NA).
+check_finalfix_zerogrid_mouse_fixture <- function(tmp) {
+  frag <- build_zerogrid_mouse_fragment()
+  in_dir <- file.path(tmp, "in_zerogrid_mouse")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_zerogrid_mouse")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot(nrow(metrics) == 1)
+  stopifnot(
+    "expected blank mouseCoveragePct for a zero-size grid" = is.na(metrics$mouseCoveragePct[1])
+  )
+  stopifnot(
+    "expected blank mouseEntropy for a zero-size grid" = is.na(metrics$mouseEntropy[1])
+  )
+}
+
+#' Final-review Finding 3 pipeline-level check: runs `build_topk_sparse_fragment` (a focused/
+#' sparse reader whose top-K cutoff falls to 0.0) through the full `analyze()` pipeline with
+#' `--roi` set to a region DISJOINT from every attended cell, and asserts
+#' `reference_<slug>.csv`'s `precisionAtTopK`/`recall` are the correct 0.0 -- NOT the pre-fix
+#' bug's 1.0/ROI-area-fraction values.
+check_finalfix_topk_sparse_fixture <- function(tmp) {
+  frag <- build_topk_sparse_fragment()
+  in_dir <- file.path(tmp, "in_topk_sparse")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  roi_path <- file.path(tmp, "topk_sparse_roi.geojson")
+  writeLines(jsonlite::toJSON(build_topk_sparse_roi_fc(), auto_unbox = TRUE), roi_path)
+  out_dir <- file.path(tmp, "out_topk_sparse")
+  analyze(list(in_dir), out_dir, roi = roi_path)
+
+  out_files <- list.files(out_dir)
+  ref_files <- out_files[startsWith(out_files, "reference_")]
+  stopifnot(length(ref_files) == 1)
+  ref <- utils::read.csv(file.path(out_dir, ref_files[1]), stringsAsFactors = FALSE)
+  row <- ref[ref$session == "topk-sparse1", ]
+  stopifnot(
+    "expected precisionAtTopK == 0.0 (disjoint ROI)" = abs(row$precisionAtTopK - 0.0) < 1e-9
+  )
+  stopifnot(
+    "expected recall == 0.0 (reader never touched the ROI) -- pre-fix bug reported 1.0" =
+      abs(row$recall - 0.0) < 1e-9
+  )
+}
+
+#' Final-review Finding 4 pipeline-level check: runs the hand-derivable idle-gap fixation fixture
+#' (`build_idle_fixation_fragment`) through the full `analyze()` pipeline and asserts every
+#' documented number -- `metrics.csv`'s summary columns AND `fixations_<slug>.csv`'s per-fixation
+#' rows -- against the hand-derived split (2 fixations), NOT the pre-fix bridged single 71000ms
+#' fixation.
+check_finalfix_idle_fixation_fixture <- function(tmp) {
+  frag <- build_idle_fixation_fragment()
+  in_dir <- file.path(tmp, "in_idle_fixation")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_idle_fixation")
+  analyze(list(in_dir), out_dir)
+
+  metrics <- utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
+  stopifnot(nrow(metrics) == 1)
+  row <- metrics[1, ]
+
+  stopifnot(
+    "expected nFixations == 2 (idle-split) -- pre-fix bug bridged into nFixations==1" =
+      row$nFixations == 2
+  )
+  stopifnot(abs(row$meanFixationMs - 2500.0) < 1e-6)
+  stopifnot(abs(row$medianFixationMs - 2500.0) < 1e-6)
+  stopifnot(abs(row$sdFixationMs - 2121.320343559643) < 1e-6)
+  stopifnot(abs(row$idleMs - 66000.0) < 1e-6)
+  stopifnot(abs(row$activeSpanMs - 5000.0) < 1e-6)
+  stopifnot(abs(row$fixationsPerMin - 24.0) < 1e-6)
+
+  out_files <- list.files(out_dir)
+  fixation_files <- out_files[startsWith(out_files, "fixations_")]
+  stopifnot(length(fixation_files) == 1)
+  fixations <- utils::read.csv(file.path(out_dir, fixation_files[1]), stringsAsFactors = FALSE)
+  stopifnot("expected 2 fixation rows (idle-split)" = nrow(fixations) == 2)
+
+  f1 <- fixations[fixations$idx == 1, ]
+  stopifnot(abs(f1$startMs - 0.0) < 1e-9)
+  stopifnot(abs(f1$durationMs - 4000.0) < 1e-9)
+  stopifnot(abs(f1$centerImageX - 100.0) < 1e-9)
+  stopifnot(abs(f1$centerImageY - 100.0) < 1e-9)
+  stopifnot(f1$nPoints == 2)
+
+  f2 <- fixations[fixations$idx == 2, ]
+  stopifnot(abs(f2$startMs - 70000.0) < 1e-9)
+  stopifnot(abs(f2$durationMs - 1000.0) < 1e-9)
+  stopifnot(abs(f2$centerImageX - 100.5) < 1e-9)
+  stopifnot(abs(f2$centerImageY - 100.5) < 1e-9)
+  stopifnot(f2$nPoints == 2)
 }
 
 run <- function() {
@@ -2840,6 +3188,13 @@ run <- function() {
   # --- Tier 3 C6: JSD, precision@k/recall, visit-count Jaccard, union area, reader-count map ---
   check_tier6_direct_unit_asserts()
   check_tier6_c6_fixture(tmp)
+
+  # --- Final review (2026-07-24): zero-size-grid guards (visit-count, mouse-raster),
+  # precision@k strictly-positive, fixation idle-boundary ---
+  check_finalfix_zerogrid_path_fixture(tmp)
+  check_finalfix_zerogrid_mouse_fixture(tmp)
+  check_finalfix_topk_sparse_fixture(tmp)
+  check_finalfix_idle_fixation_fixture(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }
