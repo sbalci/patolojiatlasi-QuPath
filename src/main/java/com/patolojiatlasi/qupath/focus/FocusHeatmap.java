@@ -437,10 +437,25 @@ public final class FocusHeatmap {
         // reference recordDecision uses for decisionMs, so decisionMs - promptShownMs is the true
         // response latency once prompted (C5).
         long promptShownRel = System.currentTimeMillis() - blindedSlideStartMs;
+        // Freeze the slide session identity at prompt time. showAndWait spins a nested FX event loop
+        // that does NOT pause the sampling Timeline, so an externally-triggered slide/project switch
+        // (e.g. a Groovy setProject) can run switchTo() while this modal is open -- resetting
+        // blindedSlideStartMs/currentMap/currentDecision to a different slide. currentMap identity is
+        // a reliable proxy for "same slide session" (it is replaced together with blindedSlideStartMs
+        // in switchTo()/startBlinded(), never alone). If it changed, recording now would compute a
+        // negative response latency and misattribute this slide's decision to the wrong fragment --
+        // so drop it, mirroring the leave path's frozen-snapshot discipline.
+        FocusMap mapAtPrompt = currentMap;
         DecisionDialog.DecisionInput in = DecisionDialog.show(qupath,
                 getCurrentDecisionDiagnosis(), getCurrentDecisionConfidence(), header);
-        if (in != null)
+        if (in != null) {
+            if (currentMap != mapAtPrompt) {
+                logger.info("Slide session changed while the decision dialog was open; "
+                        + "discarding the decision to avoid misattributing it to the wrong slide.");
+                return;
+            }
             recordDecision(in.diagnosis(), in.confidence(), promptShownRel);
+        }
     }
 
     /** Leave path gate: prompt on leaving the current slide only if enabled, no decision yet, not
