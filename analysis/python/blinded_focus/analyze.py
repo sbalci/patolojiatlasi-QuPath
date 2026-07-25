@@ -1151,7 +1151,20 @@ def analyze(
         # trigger the file, same as the annotations gate is on nAnnotations > 0, not on the mask
         # being non-empty). A session without mouse data contributes its all-zero mouse_native
         # placeholder (never None), so every session_ids entry participates in the pairwise matrix.
+        #
+        # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC, a SLIDE-LEVEL
+        # ICC(2,1) of the mouse-dwell grids (reusing the same `icc()` compare_<slug>.csv's
+        # meanPairwiseCC/icc already use), placed on the same diagonal-reuse row as
+        # coincidenceLevel. Unlike the cc/iou/coincidenceLevel columns above (deliberately computed
+        # across EVERY session_ids entry, including mouse-data-less placeholder grids, for CSV
+        # matrix completeness), mouseICC is computed only over the sessions that actually carry
+        # mouse data -- an all-zero placeholder grid isn't a second "reader" to agree with, and
+        # icc() itself would silently mix a real dwell grid with a meaningless constant-zero one
+        # otherwise. NaN (-> blank) when fewer than 2 sessions have mouse data, mirroring icc()'s
+        # own "<2 grids" guard.
         # ------------------------------------------------------------------
+        mouse_mean_cc = float("nan")
+        mouse_icc_val = float("nan")
         if any(m.has_mouse_data(f.get("path")) for _, f in sessions):
             mouse_resampled = {
                 sid: m.resample_nn(mouse_native[sid], native_grid[sid][1], native_grid[sid][2], tw, th)
@@ -1160,6 +1173,9 @@ def analyze(
             mouse_coincidence_val = m.coincidence_level(
                 [mouse_resampled[sid] for sid in session_ids], IOU_THRESH
             )
+            mouse_data_sids = [sid for sid, f in sessions if m.has_mouse_data(f.get("path"))]
+            mouse_mean_cc = m.mean_pairwise_cc([mouse_resampled[sid] for sid in mouse_data_sids])
+            mouse_icc_val = m.icc([mouse_resampled[sid] for sid in mouse_data_sids])
             mouse_rows = []
             for idx_a, a in enumerate(session_ids):
                 for b in session_ids:
@@ -1169,14 +1185,16 @@ def analyze(
                         "cc": m.cc(mouse_resampled[a], mouse_resampled[b]),
                         "iou": m.iou(mouse_resampled[a], mouse_resampled[b], IOU_THRESH),
                         "coincidenceLevel": "",
+                        "mouseICC": "",
                     }
                     if a == b and idx_a == 0:
                         mouse_row["coincidenceLevel"] = mouse_coincidence_val
+                        mouse_row["mouseICC"] = mouse_icc_val
                     mouse_rows.append(mouse_row)
             _write_csv(
                 os.path.join(out_dir, f"mouse_{slide_slug}.csv"),
                 mouse_rows,
-                ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel"],
+                ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"],
             )
 
         mean_cc = m.mean_pairwise_cc([resampled[sid] for sid in session_ids])
@@ -1207,6 +1225,12 @@ def analyze(
             "meanDwellInAnnotationPct": _mean_of("dwellInAnnotationPct"),
             "annotationCoincidenceLevel": annotation_coincidence_val,
             "meanCursorOverSlidePct": _mean_of("cursorOverSlidePct"),
+            # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouse-dwell
+            # cross-reader agreement, for the new summary.md "cursor agreement" line. NaN (->
+            # "n/a" via _fmt) when the slide has no mouse data at all, or fewer than 2 sessions
+            # carry it.
+            "meanPairwiseMouseCC": mouse_mean_cc,
+            "mouseICC": mouse_icc_val,
         })
 
         # ------------------------------------------------------------------
@@ -1601,6 +1625,11 @@ def _write_summary(
         lines.append(
             f"- cursor coupling: mean % of path time cursor was over the slide = "
             f"{_fmt(s['meanCursorOverSlidePct'], 1)}"
+        )
+        # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2).
+        lines.append(
+            f"- cursor agreement: mean pairwise mouse CC = {_fmt(s['meanPairwiseMouseCC'])}, "
+            f"mouse ICC(2,1) = {_fmt(s['mouseICC'])}"
         )
         lines.append("")
     if reference_summaries:

@@ -546,6 +546,32 @@ build_mouse_fixture <- function() {
   list(f1, f2)
 }
 
+MOUSE_ICC_SLIDE_KEY <- "sha256:selftest-slide-mouse-icc-0001"
+#' PT2 fixture (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): 2 schema/5 sessions
+#' with a BYTE-IDENTICAL mouse path -- their post-resample mouse-dwell grids are therefore
+#' identical arrays. Hand-derivation of ICC(2,1) for 2 identical columns in the two-way-ANOVA
+#' formula `icc()` uses: col_means both == grand_mean -> ss_cols == 0 -> ms_cols == 0; row_means
+#' == the (shared) per-cell value -> ss_rows == ss_total exactly -> ss_error == 0 -> ms_error == 0
+#' -> denom == ms_rows == (ms_rows - ms_error) -> ICC == 1.0 EXACTLY (as long as the grid itself
+#' isn't perfectly uniform, i.e. ms_rows != 0 -- true here since only cell(0,0) is dwelled on).
+#' meanPairwiseMouseCC is also exactly 1.0 (cc of a grid against an identical copy of itself, with
+#' nonzero variance, is a perfect Pearson correlation). Mirrors the Python toolkit's
+#' `build_mouse_icc_fixture` exactly.
+build_mouse_icc_fixture <- function() {
+  grid <- .n_nonzero_grid(10)
+  path <- matrix(
+    c(
+      0, 1000, 750, 400, 300, 1000, 50, 50,
+      1000, 1000, 750, 400, 300, 1000, 60, 60,
+      2000, 1000, 750, 400, 300, 1000, 70, 70
+    ),
+    nrow = 3, ncol = 8, byrow = TRUE
+  )
+  f1 <- .fragment("micc1", 5, grid, 2000, 3, path = path, slide_key = MOUSE_ICC_SLIDE_KEY)
+  f2 <- .fragment("micc2", 5, grid, 2000, 3, path = path, slide_key = MOUSE_ICC_SLIDE_KEY)
+  list(f1, f2)
+}
+
 SEGLIN_SLIDE_KEY <- "sha256:selftest-slide-seglin-0001"
 #' Tier 3 C4 fixture: a single schema/3, 5-point path with a KNOWN hotspot split -- one clean
 #' segment of exactly linearity==1.0 between two of the grid's top-5 hotspot cells, bracketed by
@@ -1903,6 +1929,50 @@ check_tier4_mouse_fixture <- function(tmp) {
   )
 }
 
+#' PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2) pipeline-level check: runs
+#' `build_mouse_icc_fixture` (2 schema/5 sessions with an identical mouse path, so their resampled
+#' mouse-dwell grids are identical arrays) through the full `analyze()` pipeline and asserts
+#' `mouse_<slug>.csv`'s new `mouseICC` column is exactly `1.0` on the diagonal-reuse row (the
+#' first session) and blank on every other row -- plus the mirrored `summary.md` "cursor
+#' agreement" line.
+check_mouse_icc_fixture <- function(tmp) {
+  fragments <- build_mouse_icc_fixture()
+  in_dir <- file.path(tmp, "in_mouse_icc")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_mouse_icc")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  mouse_files <- out_files[startsWith(out_files, "mouse_")]
+  stopifnot("expected exactly one mouse_ file" = length(mouse_files) == 1)
+  mouse_df <- utils::read.csv(file.path(out_dir, mouse_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "mouse_<slug>.csv columns mismatch" =
+      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"))
+  )
+  stopifnot("expected 2x2=4 pairwise rows" = nrow(mouse_df) == 4)
+
+  diag1 <- mouse_df[mouse_df$sessionA == "micc1" & mouse_df$sessionB == "micc1", ]
+  stopifnot(
+    "expected mouseICC == 1.0 (identical mouse-dwell grids, diagonal-reuse row)" =
+      abs(diag1$mouseICC - 1.0) < 1e-9
+  )
+  diag2 <- mouse_df[mouse_df$sessionA == "micc2" & mouse_df$sessionB == "micc2", ]
+  stopifnot(
+    "mouseICC should be blank on every diagonal row except the first session's" =
+      is.na(diag2$mouseICC)
+  )
+  cross <- mouse_df[mouse_df$sessionA == "micc1" & mouse_df$sessionB == "micc2", ]
+  stopifnot("mouseICC should be blank on off-diagonal rows" = is.na(cross$mouseICC))
+
+  summary_text <- paste(readLines(file.path(out_dir, "summary.md"), warn = FALSE), collapse = "\n")
+  stopifnot(
+    "expected the new PT2 'cursor agreement' summary.md line with meanPairwiseMouseCC/mouseICC both 1.000" =
+      grepl("cursor agreement: mean pairwise mouse CC = 1.000, mouse ICC(2,1) = 1.000", summary_text, fixed = TRUE)
+  )
+}
+
 #' Tier 3 C4 pipeline-level check: runs `build_seglin_fragment` (a single path with a known
 #' 2-boundary hotspot split, colinear segment) through the full `analyze()` pipeline and asserts
 #' `meanSegmentLinearity == 1.0` exactly.
@@ -2986,7 +3056,7 @@ run <- function() {
   mouse_df <- utils::read.csv(file.path(out_dir, mouse_files[1]), stringsAsFactors = FALSE)
   stopifnot(
     "mouse_<slug>.csv columns mismatch" =
-      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel"))
+      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"))
   )
   stopifnot("expected 4x4=16 pairwise rows" = nrow(mouse_df) == 16)
   diag_s1 <- mouse_df[mouse_df$sessionA == "s1" & mouse_df$sessionB == "s1", ]
@@ -2999,6 +3069,13 @@ run <- function() {
       "all-zero placeholder mouse grid should self-cc == 0.0 (constant)" = abs(diag$cc - 0.0) < 1e-9
     )
   }
+  # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): only s1 actually has mouse
+  # data on this 4-session slide -- fewer than 2 mouse-carrying sessions -> mouseICC must be
+  # blank (icc() is undefined for a single reader), even though the diagonal-reuse row (s1,
+  # idx 1) is where coincidenceLevel IS populated.
+  stopifnot(
+    "mouseICC should be blank with only 1 mouse-data session on the slide" = is.na(diag_s1$mouseICC)
+  )
 
   # --- Tier 3 C4 (segment-level linearity): populated for s1/s2 (whose synthetic path dwells
   # right at their own recorded grid's center -- and also drifts through a couple of neighboring
@@ -3368,6 +3445,9 @@ run <- function() {
   check_consensus3_fixture(tmp)
   check_meandiff_n1_boundary(tmp)
   check_calibration_direct_unit_asserts()
+
+  # --- PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC ---
+  check_mouse_icc_fixture(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }

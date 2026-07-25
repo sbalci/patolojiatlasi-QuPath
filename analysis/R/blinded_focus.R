@@ -3559,7 +3559,19 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     # annotations gate above being on nAnnotations > 0, not on the mask being non-empty). A session
     # without mouse data contributes its all-zero mouse_native placeholder (never NULL), so every
     # session_ids entry participates in the pairwise matrix.
+    #
+    # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC, a SLIDE-LEVEL
+    # ICC(2,1) of the mouse-dwell grids (reusing the same `icc()` compare_<slug>.csv's
+    # meanPairwiseCC/icc already use), placed on the same diagonal-reuse row as coincidenceLevel.
+    # Unlike the cc/iou/coincidenceLevel columns above (deliberately computed across EVERY
+    # session_ids entry, including mouse-data-less placeholder grids, for CSV matrix
+    # completeness), mouseICC is computed only over the sessions that actually carry mouse data --
+    # an all-zero placeholder grid isn't a second "reader" to agree with, and icc() itself would
+    # silently mix a real dwell grid with a meaningless constant-zero one otherwise. NaN (->
+    # blank) when fewer than 2 sessions have mouse data, mirroring icc()'s own "<2 grids" guard.
     # ------------------------------------------------------------------
+    mouse_mean_cc <- NaN
+    mouse_icc_val <- NaN
     any_mouse <- any(sapply(session_ids, function(sid) has_mouse_data(by_session[[sid]]$path)))
     if (any_mouse) {
       mouse_resampled <- list()
@@ -3571,6 +3583,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       mouse_coincidence_val <- coincidence_level(
         lapply(session_ids, function(sid) mouse_resampled[[sid]]), IOU_THRESH
       )
+      mouse_data_sids <- session_ids[sapply(session_ids, function(sid) has_mouse_data(by_session[[sid]]$path))]
+      mouse_mean_cc <- mean_pairwise_cc(lapply(mouse_data_sids, function(sid) mouse_resampled[[sid]]))
+      mouse_icc_val <- icc(lapply(mouse_data_sids, function(sid) mouse_resampled[[sid]]))
       mouse_rows <- list()
       for (idx_a in seq_along(session_ids)) {
         a <- session_ids[idx_a]
@@ -3580,17 +3595,19 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             sessionB = label_for(b, labels),
             cc = cc(mouse_resampled[[a]], mouse_resampled[[b]]),
             iou = iou(mouse_resampled[[a]], mouse_resampled[[b]], IOU_THRESH),
-            coincidenceLevel = NA
+            coincidenceLevel = NA,
+            mouseICC = NA
           )
           if (identical(a, b) && idx_a == 1) {
             mouse_row$coincidenceLevel <- mouse_coincidence_val
+            mouse_row$mouseICC <- mouse_icc_val
           }
           mouse_rows[[length(mouse_rows) + 1]] <- mouse_row
         }
       }
       write_csv_tidy(
         mouse_rows, file.path(out_dir, paste0("mouse_", slide_slug, ".csv")),
-        c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel")
+        c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC")
       )
     }
 
@@ -3615,7 +3632,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       # Phase 2 headline numbers.
       meanDwellInAnnotationPct = .mean_of_col(slide_metric_rows, "dwellInAnnotationPct"),
       annotationCoincidenceLevel = annotation_coincidence_val,
-      meanCursorOverSlidePct = .mean_of_col(slide_metric_rows, "cursorOverSlidePct")
+      meanCursorOverSlidePct = .mean_of_col(slide_metric_rows, "cursorOverSlidePct"),
+      # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouse-dwell cross-reader
+      # agreement, for the new summary.md "cursor agreement" line. NaN (-> "n/a" via .fmt) when
+      # the slide has no mouse data at all, or fewer than 2 sessions carry it.
+      meanPairwiseMouseCC = mouse_mean_cc,
+      mouseICC = mouse_icc_val
     )
 
     # ------------------------------------------------------------------
@@ -4043,6 +4065,11 @@ write_summary <- function(out_dir, groups, slide_summaries, reference_summaries,
     lines <- c(lines, paste0(
       "- cursor coupling: mean % of path time cursor was over the slide = ",
       .fmt(s$meanCursorOverSlidePct, 1)
+    ))
+    # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2).
+    lines <- c(lines, paste0(
+      "- cursor agreement: mean pairwise mouse CC = ", .fmt(s$meanPairwiseMouseCC),
+      ", mouse ICC(2,1) = ", .fmt(s$mouseICC)
     ))
     lines <- c(lines, "")
   }

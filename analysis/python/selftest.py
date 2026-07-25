@@ -533,6 +533,28 @@ def build_mouse_fixture():
     return [f1, f2]
 
 
+MOUSE_ICC_SLIDE_KEY = "sha256:selftest-slide-mouse-icc-0001"
+#: PT2 fixture (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): 2 schema/5 sessions
+#: with a BYTE-IDENTICAL mouse path -- their post-resample mouse-dwell grids are therefore
+#: identical arrays. Hand-derivation of ICC(2,1) for 2 identical columns in the two-way-ANOVA
+#: formula `icc()` uses: col_means both == grand_mean -> ss_cols == 0 -> ms_cols == 0; row_means
+#: == the (shared) per-cell value -> ss_rows == ss_total exactly -> ss_error == 0 -> ms_error == 0
+#: -> denom == ms_rows == (ms_rows - ms_error) -> ICC == 1.0 EXACTLY (as long as the grid itself
+#: isn't perfectly uniform, i.e. ms_rows != 0 -- true here since only cell(0,0) is dwelled on).
+#: meanPairwiseMouseCC is also exactly 1.0 (cc of a grid against an identical copy of itself,
+#: with nonzero variance, is a perfect Pearson correlation).
+def build_mouse_icc_fixture():
+    grid = _n_nonzero_grid(10)
+    path = [
+        [0, 1000, 750, 400, 300, 1000, 50, 50],
+        [1000, 1000, 750, 400, 300, 1000, 60, 60],
+        [2000, 1000, 750, 400, 300, 1000, 70, 70],
+    ]
+    f1 = _fragment("micc1", 5, grid, 2000, 3, path=[list(p) for p in path], slide_key=MOUSE_ICC_SLIDE_KEY)
+    f2 = _fragment("micc2", 5, grid, 2000, 3, path=[list(p) for p in path], slide_key=MOUSE_ICC_SLIDE_KEY)
+    return [f1, f2]
+
+
 SEGLIN_SLIDE_KEY = "sha256:selftest-slide-seglin-0001"
 #: Tier 3 C4 fixture: a single schema/3, 5-point path with a KNOWN hotspot split -- one clean
 #: segment of exactly linearity==1.0 between two of the grid's top-5 hotspot cells, bracketed by
@@ -1869,6 +1891,48 @@ def check_tier4_mouse_fixture(tmp):
     )
 
 
+def check_mouse_icc_fixture(tmp):
+    """PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2) pipeline-level check: runs
+    :func:`build_mouse_icc_fixture` (2 schema/5 sessions with an identical mouse path, so their
+    resampled mouse-dwell grids are identical arrays) through the full ``analyze()`` pipeline and
+    asserts ``mouse_<slug>.csv``'s new ``mouseICC`` column is exactly ``1.0`` on the
+    diagonal-reuse row (the first session) and blank on every other row -- plus the mirrored
+    ``summary.md`` "cursor agreement" line."""
+    fragments = build_mouse_icc_fixture()
+    in_dir = os.path.join(tmp, "in_mouse_icc")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    out_dir = os.path.join(tmp, "out_mouse_icc")
+    analyze([in_dir], out_dir)
+
+    mouse_files = [f for f in os.listdir(out_dir) if f.startswith("mouse_")]
+    assert len(mouse_files) == 1, mouse_files
+    mouse_df = pd.read_csv(os.path.join(out_dir, mouse_files[0]))
+    assert list(mouse_df.columns) == ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"], (
+        mouse_df.columns.tolist()
+    )
+    assert len(mouse_df) == 4, f"expected 2x2=4 pairwise rows, got {len(mouse_df)}"
+
+    diag1 = mouse_df[(mouse_df.sessionA == "micc1") & (mouse_df.sessionB == "micc1")].iloc[0]
+    assert abs(diag1["mouseICC"] - 1.0) < 1e-9, (
+        f"expected mouseICC == 1.0 (identical mouse-dwell grids, diagonal-reuse row), "
+        f"got {diag1['mouseICC']}"
+    )
+    diag2 = mouse_df[(mouse_df.sessionA == "micc2") & (mouse_df.sessionB == "micc2")].iloc[0]
+    assert pd.isna(diag2["mouseICC"]), (
+        "mouseICC should be blank on every diagonal row except the first session's"
+    )
+    cross = mouse_df[(mouse_df.sessionA == "micc1") & (mouse_df.sessionB == "micc2")].iloc[0]
+    assert pd.isna(cross["mouseICC"]), "mouseICC should be blank on off-diagonal rows"
+
+    with open(os.path.join(out_dir, "summary.md"), encoding="utf-8") as fh:
+        summary_text = fh.read()
+    assert "cursor agreement: mean pairwise mouse CC = 1.000, mouse ICC(2,1) = 1.000" in summary_text, (
+        "expected the new PT2 'cursor agreement' summary.md line with meanPairwiseMouseCC/"
+        "mouseICC both 1.000 (identical mouse-dwell grids)"
+    )
+
+
 def check_tier4_seglin_fixture(tmp):
     """Tier 3 C4 pipeline-level check: runs :func:`build_seglin_fragment` (a single path with a
     known 2-boundary hotspot split, colinear segment) through the full ``analyze()`` pipeline and
@@ -2922,7 +2986,7 @@ def run():
         mouse_files = [f for f in os.listdir(out_dir) if f.startswith("mouse_")]
         assert len(mouse_files) == 1, f"expected exactly one mouse_ file, got {mouse_files}"
         mouse_df = pd.read_csv(os.path.join(out_dir, mouse_files[0]))
-        assert list(mouse_df.columns) == ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel"], (
+        assert list(mouse_df.columns) == ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"], (
             mouse_df.columns.tolist()
         )
         assert len(mouse_df) == 16, f"expected 4x4=16 pairwise rows, got {len(mouse_df)}"
@@ -2936,6 +3000,13 @@ def run():
                 f"{sid}'s all-zero placeholder mouse grid should self-cc == 0.0 (constant), "
                 f"got {diag['cc']}"
             )
+        # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): only s1 actually has
+        # mouse data on this 4-session slide -- fewer than 2 mouse-carrying sessions -> mouseICC
+        # must be blank (icc() is undefined for a single reader), even though the diagonal-reuse
+        # row (s1, idx 0) is where coincidenceLevel IS populated.
+        assert pd.isna(diag_s1["mouseICC"]), (
+            f"mouseICC should be blank with only 1 mouse-data session on the slide, got {diag_s1['mouseICC']}"
+        )
 
         # --- Tier 3 C4 (segment-level linearity): populated for s1/s2 (whose synthetic path
         # dwells right at their own recorded grid's center, so the path visits its own top-hotspot
@@ -3276,6 +3347,9 @@ def run():
         check_consensus3_fixture(tmp)
         check_meandiff_n1_boundary(tmp)
         check_calibration_direct_unit_asserts()
+
+        # --- PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC ---
+        check_mouse_icc_fixture(tmp)
 
         print("OK: all selftest assertions passed")
     finally:
