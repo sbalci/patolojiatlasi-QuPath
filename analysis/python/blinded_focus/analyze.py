@@ -3,7 +3,8 @@
 Usage::
 
     python -m blinded_focus.analyze <input...> --out DIR [--reference SESSIONID]
-        [--roi geojson] [--labels csv] [--figures] [--res 512] [--magbands 3]
+        [--roi geojson] [--labels csv] [--key csv] [--graded csv] [--figures]
+        [--res 512] [--magbands 3]
 
 ``<input...>`` may be fragment JSON files, directories (recursed for ``*.json``), and/or
 ``.zip`` archives, in any mix. See ``../README.md`` for the full output-file contract.
@@ -32,8 +33,26 @@ Output files (written to ``--out DIR``):
   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
   diagonal-reuse convention as ``compare_<slug>.csv``) plus a slide-level ``coincidenceLevel``
   over those same regions.
+- (Phase 3) ``decisions.csv`` — one row per (slide, session) with a hand-entered ``decision``
+  object (``diagnosis``, ``confidence``, ``decisionMs``): ``slide``, ``sessionId`` (stable join
+  key), ``session`` (display label), ``diagnosis``, ``confidence``, ``confidenceScaled``
+  (``(confidence-1)/4``, blank if ``confidence`` isn't numeric), ``decisionMs``,
+  ``decisionLatencyMs`` (currently ``== decisionMs``), ``correctDx`` (DISPLAY-ONLY, from
+  ``--key``), ``correct`` (HAND-GRADED ONLY, from ``--graded`` — blank otherwise; never
+  auto-derived by comparing ``diagnosis`` to ``correctDx``). Written only if at least one
+  fragment carries a decision; otherwise a stderr warning and no file.
+- (Phase 3) ``nav_accuracy.csv`` — written only when ``--graded`` supplies at least one graded
+  decision: one row per :data:`NAV_ACCURACY_COLS` navigation metric, joined to ``correct`` by
+  ``(slide, sessionId)`` — ``metric``, ``n``, ``pointBiserialR`` (plain Pearson, blank unless
+  ``n >= 5`` and both sides have non-zero variance — see :func:`_pearson_guarded`),
+  ``meanCorrect``, ``meanIncorrect``, ``medianCorrect``, ``medianIncorrect``, ``meanDiff``
+  (blank unless both groups have ``n >= 2``). No p-values or confidence intervals at this
+  pilot scale.
 - ``summary.md`` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers,
-  and (Phase 2) headline annotation-coverage + cursor-coupling numbers.
+  (Phase 2) headline annotation-coverage + cursor-coupling numbers, and (Phase 3, gated on
+  ``--graded``) a "Navigation ↔ diagnostic accuracy" section — overall accuracy, per-metric r/n/
+  group means, and a calibration summary (``calibrationGap``, ``brierScore``,
+  ``confidenceAccuracyR``).
 - with ``--figures``: per-(slide,session) heatmap/scanpath/coverage-over-time PNGs under
   ``<out>/<slug>/``, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
   ``--res`` resolution (``..._scanpath_raster.png`` — the trustworthy high-magnification map,
@@ -318,7 +337,14 @@ def _sanitize_nan(value):
 
 def _write_csv(path, rows, fieldnames):
     with open(path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=fieldnames)
+        # extrasaction="ignore": a row dict may carry extra in-memory-only keys not in
+        # `fieldnames` (e.g. metrics_rows' "sessionId", used only by _nav_accuracy_rows's join --
+        # see the module docstring's "coincidenceLevel" section and the row-build comment in
+        # analyze()). Without this, DictWriter's default extrasaction="raise" would abort the
+        # write the moment such an extra key showed up; "ignore" drops it and writes exactly the
+        # same columns as before (byte-identical output for every existing call site, whose row
+        # dicts already match `fieldnames` 1:1).
+        w = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
         for r in rows:
             w.writerow({k: _sanitize_nan(v) for k, v in r.items()})
@@ -334,13 +360,122 @@ def _fmt(x, nd=3):
     return f"{xf:.{nd}f}"
 
 
+#: Navigation-metric columns (from ``metrics.csv``) correlated against graded diagnostic accuracy
+#: in :func:`_nav_accuracy_rows`. All are grid/path-level per-session metrics already present as
+#: ``row`` keys in the main loop above.
+NAV_ACCURACY_COLS = [
+    "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
+    "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
+    "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
+]
+#: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or
+#: with zero variance on either side) :func:`_pearson_guarded` returns blank, never a numerically
+#: unstable/undefined statistic.
+MIN_CORRELATION_N = 5
+
+
+def _pearson_guarded(xs, ys, min_n=MIN_CORRELATION_N):
+    """Plain Pearson r (point-biserial when one side is 0/1), or ``float('nan')`` if ``n < min_n``
+    or either side has zero variance. Parity-safe with the planned R port: ``numpy.corrcoef``,
+    statistic only -- no p-value, no confidence interval (pilot-scale n doesn't support them)."""
+    xs = np.asarray(xs, dtype=float)
+    ys = np.asarray(ys, dtype=float)
+    if len(xs) < min_n or np.var(xs) == 0.0 or np.var(ys) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(xs, ys)[0, 1])
+
+
+def _nav_accuracy_rows(metrics_rows, decision_rows):
+    """Join decisions' hand-graded ``correct`` (0/1) onto ``metrics_rows`` by the stable
+    ``(slide, sessionId)`` key (never the display label), then compute a guarded point-biserial r
+    plus group means/medians per navigation column in :data:`NAV_ACCURACY_COLS`.
+
+    Returns ``(rows, had_any_graded)`` -- ``had_any_graded`` gates whether ``nav_accuracy.csv`` and
+    the summary section get written at all (only when at least one ``--graded`` row was supplied).
+    """
+    # Direct sessionId join: metrics_rows carries the stable sessionId (stamped in analyze()'s
+    # per-session loop, right next to the human DISPLAY LABEL) -- so no label-based bridge is
+    # needed here at all. (Prior versions recovered the sessionId via a (slide, display-label)
+    # lookup into decision_rows, which silently collapsed two sessions sharing a display label
+    # -- e.g. via `--labels` mapping distinct sessionIds to the same name -- onto whichever
+    # session's decision row was built last, misattributing/erasing the other's grade. Stamping
+    # sessionId directly on metrics_rows removes the label from this join entirely.)
+    correct_by = {
+        (r["slide"], r["sessionId"]): r["correct"] for r in decision_rows if r["correct"] in (0, 1)
+    }
+    rows = []
+    had_any_graded = bool(correct_by)
+    for col in NAV_ACCURACY_COLS:
+        xs, ys = [], []
+        for mr in metrics_rows:
+            key = (mr["slide"], mr["sessionId"])
+            if key not in correct_by:
+                continue
+            # Some metrics (e.g. enrichmentRatio) store a literal float NaN in the in-memory row
+            # for a well-defined "undefined" case (only rendered as a blank cell later, at
+            # metrics.csv write time, via _sanitize_nan) -- treat that identically to a blank
+            # here, or a stray NaN would silently poison statistics.mean/np.var below.
+            v = _sanitize_nan(mr.get(col, ""))
+            if v == "" or v is None:
+                continue
+            xs.append(float(v))
+            ys.append(correct_by[key])
+        r = _pearson_guarded(ys, xs)
+        correct_vals = [x for x, y in zip(xs, ys) if y == 1]
+        incorrect_vals = [x for x, y in zip(xs, ys) if y == 0]
+        mean_correct = float(statistics.mean(correct_vals)) if correct_vals else float("nan")
+        mean_incorrect = float(statistics.mean(incorrect_vals)) if incorrect_vals else float("nan")
+        median_correct = float(statistics.median(correct_vals)) if correct_vals else float("nan")
+        median_incorrect = float(statistics.median(incorrect_vals)) if incorrect_vals else float("nan")
+        mean_diff = (
+            (mean_correct - mean_incorrect)
+            if (len(correct_vals) >= 2 and len(incorrect_vals) >= 2)
+            else float("nan")
+        )
+        rows.append({
+            "metric": col,
+            "n": len(xs),
+            "pointBiserialR": r,
+            "meanCorrect": mean_correct,
+            "meanIncorrect": mean_incorrect,
+            "medianCorrect": median_correct,
+            "medianIncorrect": median_incorrect,
+            "meanDiff": mean_diff,
+        })
+    return rows, had_any_graded
+
+
+def _calibration_stats(decision_rows):
+    """Soft-guarded calibration summary over graded rows with a non-blank ``confidenceScaled``:
+    ``calibrationGap = mean(confidenceScaled) - mean(correct)`` (positive = overconfident),
+    ``brierScore = mean((confidenceScaled - correct) ** 2)`` (lower = better calibrated), and
+    ``confidenceAccuracyR`` (hard-guarded via :func:`_pearson_guarded`). All three are ``float('nan')``
+    (renders blank) when there are zero eligible rows; ``confidenceAccuracyR`` additionally needs
+    ``n >= MIN_CORRELATION_N`` and non-zero variance on both sides (same guard as
+    :func:`_nav_accuracy_rows`)."""
+    pairs = [
+        (r["confidenceScaled"], r["correct"]) for r in decision_rows
+        if r["correct"] in (0, 1)
+        and isinstance(r["confidenceScaled"], (int, float))
+        and r["confidenceScaled"] == r["confidenceScaled"]  # exclude NaN (NaN != NaN)
+    ]
+    if not pairs:
+        return float("nan"), float("nan"), float("nan"), 0
+    conf_vals = [p[0] for p in pairs]
+    correct_vals = [p[1] for p in pairs]
+    gap = float(statistics.mean(conf_vals) - statistics.mean(correct_vals))
+    brier = float(statistics.mean((c - a) ** 2 for c, a in pairs))
+    conf_acc_r = _pearson_guarded(conf_vals, correct_vals)
+    return gap, brier, conf_acc_r, len(pairs)
+
+
 # ---------------------------------------------------------------------------
 # core pipeline
 # ---------------------------------------------------------------------------
 
 def analyze(
     inputs, out_dir, reference=None, roi=None, labels_csv=None, make_figures=False,
-    res=DEFAULT_RES, magbands=DEFAULT_MAGBANDS,
+    res=DEFAULT_RES, magbands=DEFAULT_MAGBANDS, key_csv=None, graded_csv=None,
 ):
     """Run the full pipeline over ``inputs`` (files/dirs/zips) into ``out_dir``. Returns the list
     of metrics-row dicts written to ``metrics.csv`` (for programmatic/test use).
@@ -348,6 +483,13 @@ def analyze(
     ``res`` sets the longest-side resolution of the scanpath-rasterized fine/magband heatmaps
     (see :func:`_res_grid_dims`); ``magbands`` sets the number of within-path zoom bands for the
     magnification-split analysis (see :func:`blinded_focus.metrics.zoom_band_labels`).
+
+    ``key_csv`` (``--key``) is a DISPLAY-ONLY ``slideKey,correctDx`` answer key -- it populates
+    ``decisions.csv``'s ``correctDx`` column beside the reader's own ``diagnosis`` for a human to
+    compare, but is never string-matched against ``diagnosis`` to derive ``correct``. ``correct``
+    comes only from ``graded_csv`` (``--graded``, a ``slideKey,sessionId,correct`` hand-graded
+    sheet); without it every ``correct`` cell is blank and no navigation-accuracy correlation is
+    computed (see :func:`_nav_accuracy_rows`).
     """
     os.makedirs(out_dir, exist_ok=True)
     fragments = bf_io.load_fragments(inputs)
@@ -357,6 +499,8 @@ def analyze(
             file=sys.stderr,
         )
     labels = bf_io.load_labels(labels_csv)
+    answer_key = bf_io.load_answer_key(key_csv)
+    graded = bf_io.load_graded(graded_csv)
     groups = bf_io.group_by_slide(fragments)
     roi_fc = load_roi_fc(roi) if roi else None
     # Kept only for the reference/ROI gate below (truthy iff the ROI file has >=1 ring) -- the
@@ -366,6 +510,7 @@ def analyze(
     roi_rings = rings_from_feature_collection(roi_fc) if roi_fc else None
 
     metrics_rows = []
+    decision_rows = []
     slide_summaries = []
     reference_summaries = []
 
@@ -427,6 +572,12 @@ def analyze(
             row = {
                 "slide": slide_key,
                 "session": _session_label(f, labels),
+                # Stable join key for _nav_accuracy_rows -- NOT written to metrics.csv (its
+                # fieldnames list below deliberately omits "sessionId"; _write_csv's
+                # extrasaction="ignore" drops it silently at write time). Kept in-memory only so
+                # the nav-accuracy join below never has to bridge back through the (possibly
+                # colliding) human display label -- see _nav_accuracy_rows's docstring.
+                "sessionId": sid,
                 "durationMs": f.get("durationMs", ""),
                 "sampleCount": f.get("sampleCount", ""),
                 "coveragePct": m.coverage(grid) * 100.0,
@@ -496,6 +647,56 @@ def analyze(
                     row["mouseViewportCouplingPx"] = m.mouse_viewport_coupling_px(path)
 
             metrics_rows.append(row)
+
+            # ---- decisions.csv: this (slide, session)'s hand-entered diagnosis/confidence, if
+            # any -- HAND-GRADE ONLY. ``correctDx`` (from ``--key``) is display-only; ``correct``
+            # (from ``--graded``) is the only source of grading and is never derived from
+            # comparing ``diagnosis`` to ``correctDx``. Join key for both the ``--graded`` lookup
+            # here and the navigation<->accuracy correlation later is the stable ``sessionId``
+            # (``sid_stable``), never the human display label.
+            dec = bf_io.get_decision(f)
+            diagnosis = dec.get("diagnosis", "")
+            confidence = dec.get("confidence")
+            conf_scaled = (
+                "" if not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+                else (float(confidence) - 1.0) / 4.0
+            )
+            decision_ms = dec.get("decisionMs", "")
+            # Blank iff absent/None or its string form is empty; otherwise the string form -- so a
+            # numeric 0 sessionId stably maps to "0" (matches the R toolkit's
+            # nzchar(as.character(...)) rule exactly; the prior `f.get("sessionId") or ""` treated
+            # a falsy-but-present 0 the same as absent, diverging from R's "0").
+            _sid = f.get("sessionId")
+            sid_stable = "" if _sid is None or str(_sid) == "" else str(_sid)
+            correct_dx = answer_key.get(slide_key, "")
+            graded_val = graded.get((slide_key, sid_stable), "")
+            decision_rows.append({
+                "slide": slide_key,
+                "sessionId": sid_stable,
+                "session": _session_label(f, labels),
+                "diagnosis": diagnosis,
+                # Blank unless confidence is a real number (never a bool -- bool is an int
+                # subclass in Python, so `isinstance(x, (int, float))` alone would let True/False
+                # through as 1/0 -- matches confidenceScaled's existing guard below, extended to
+                # this raw column too; the R sibling's `is.numeric(confidence)` already excludes
+                # logical values, so this keeps both toolkits' raw `confidence` cell identical for
+                # a malformed boolean input).
+                "confidence": (
+                    confidence
+                    if isinstance(confidence, (int, float)) and not isinstance(confidence, bool)
+                    else ""
+                ),
+                "confidenceScaled": conf_scaled,
+                "decisionMs": decision_ms,
+                # == decisionMs (both are relative to the slide's recording start); kept as a
+                # separate column so a future recorder revision that captures a distinct
+                # "time from leave-prompt to submit" value has a column ready to diverge into.
+                "decisionLatencyMs": decision_ms,
+                "correctDx": correct_dx,
+                # blank unless --graded supplied a (slideKey, sessionId) row -- NEVER auto-derived
+                # from diagnosis == correctDx string comparison.
+                "correct": graded_val,
+            })
 
         # ------------------------------------------------------------------
         # cross-user compare (pairwise cc/sim/iou + consensus + agreement summary)
@@ -784,11 +985,37 @@ def analyze(
          "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
          "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"],
     )
-    _write_summary(out_dir, groups, slide_summaries, reference_summaries)
+
+    if any(r["diagnosis"] != "" for r in decision_rows):
+        _write_csv(
+            os.path.join(out_dir, "decisions.csv"), decision_rows,
+            ["slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
+             "decisionMs", "decisionLatencyMs", "correctDx", "correct"],
+        )
+    else:
+        print(
+            "warning: no decisions found in any fragment; decisions.csv not written",
+            file=sys.stderr,
+        )
+
+    nav_rows, had_graded = _nav_accuracy_rows(metrics_rows, decision_rows)
+    if had_graded:
+        _write_csv(
+            os.path.join(out_dir, "nav_accuracy.csv"), nav_rows,
+            ["metric", "n", "pointBiserialR", "meanCorrect", "meanIncorrect",
+             "medianCorrect", "medianIncorrect", "meanDiff"],
+        )
+
+    _write_summary(
+        out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded,
+    )
     return metrics_rows
 
 
-def _write_summary(out_dir, groups, slide_summaries, reference_summaries):
+def _write_summary(
+    out_dir, groups, slide_summaries, reference_summaries,
+    decision_rows=None, nav_rows=None, had_graded=False,
+):
     lines = ["# Blinded-focus analysis summary", "", f"- Slides analyzed: {len(groups)}", ""]
     lines.append("## Per-slide agreement")
     lines.append("")
@@ -835,6 +1062,42 @@ def _write_summary(out_dir, groups, slide_summaries, reference_summaries):
                     f"IoU={_fmt(row['iou'])}"
                 )
             lines.append("")
+
+    # ------------------------------------------------------------------
+    # Navigation <-> diagnostic accuracy (Phase 3): only when hand-graded decisions exist at all
+    # (--graded). Never rendered otherwise -- no section, no nav_accuracy.csv, nothing implying a
+    # correlation was computed from ungraded data.
+    # ------------------------------------------------------------------
+    if had_graded:
+        lines.append("## Navigation ↔ diagnostic accuracy")
+        lines.append("")
+        lines.append(
+            "> Pilot-scale caveats: viewport-only navigation has a null-result precedent; at "
+            "n=5–20 only r, its n, and group means/medians are defensible — no p-values/CIs. "
+            "Coincidence/accuracy numbers are cohort-composition-dependent."
+        )
+        lines.append("")
+        graded_dec = [r for r in decision_rows if r["correct"] in (0, 1)]
+        n_all = len(graded_dec)
+        if n_all:
+            acc = sum(r["correct"] for r in graded_dec) / n_all
+            lines.append(
+                f"- overall accuracy: {sum(r['correct'] for r in graded_dec)}/{n_all} = "
+                f"{_fmt(acc * 100, 1)}%" + (" (n<5 → descriptive only)" if n_all < 5 else "")
+            )
+        for nr in nav_rows or []:
+            lines.append(
+                f"- {nr['metric']}: r={_fmt(nr['pointBiserialR'])} (n={nr['n']}), "
+                f"meanCorrect={_fmt(nr['meanCorrect'])}, meanIncorrect={_fmt(nr['meanIncorrect'])}, "
+                f"meanDiff={_fmt(nr['meanDiff'])}"
+            )
+        calibration_gap, brier_score, conf_acc_r, n_conf = _calibration_stats(decision_rows or [])
+        lines.append(
+            f"- calibration (n={n_conf}): calibrationGap={_fmt(calibration_gap)}, "
+            f"brierScore={_fmt(brier_score)}, confidenceAccuracyR={_fmt(conf_acc_r)}"
+        )
+        lines.append("")
+
     with open(os.path.join(out_dir, "summary.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -862,6 +1125,17 @@ def main(argv=None):
     )
     ap.add_argument("--labels", default=None, help="sessionId,label CSV for human-readable output")
     ap.add_argument(
+        "--key", default=None,
+        help="slideKey,correctDx CSV -- DISPLAY-ONLY reference answer shown beside the reader's "
+             "diagnosis in decisions.csv; never used to auto-derive `correct` (use --graded)",
+    )
+    ap.add_argument(
+        "--graded", default=None,
+        help="slideKey,sessionId,correct CSV -- the ONLY source of decisions.csv's `correct` "
+             "column (hand-graded); also enables the navigation<->accuracy correlation "
+             "(nav_accuracy.csv + summary.md section)",
+    )
+    ap.add_argument(
         "--figures", action="store_true",
         help="also write per-(slide,session) heatmap/scanpath/coverage-over-time PNGs",
     )
@@ -880,6 +1154,7 @@ def main(argv=None):
         args.inputs, args.out, reference=args.reference, roi=args.roi,
         labels_csv=args.labels, make_figures=args.figures,
         res=args.res, magbands=args.magbands,
+        key_csv=args.key, graded_csv=args.graded,
     )
 
 

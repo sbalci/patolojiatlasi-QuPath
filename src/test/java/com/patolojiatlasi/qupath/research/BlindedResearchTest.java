@@ -24,4 +24,35 @@ class BlindedResearchTest {
         java.nio.file.Files.writeString(new File(dir, "atlas-research.json").toPath(), "{ bad");
         assertFalse(BlindedResearch.readBlinded(dir));        // fail-soft, no throw
     }
+
+    // --- decisionPromptOnLeave: defaults true (absent sidecar, absent key, corrupt sidecar), only
+    // an explicit false in the sidecar turns the leave-prompt off. ---------------------------------
+
+    @Test void decisionPromptOnLeaveDefaultsTrueWhenSidecarAbsent(@TempDir File dir) {
+        assertTrue(BlindedResearch.decisionPromptOnLeave(dir));   // no sidecar at all -> true
+    }
+
+    @Test void decisionPromptOnLeaveDefaultsTrueWhenKeyAbsent(@TempDir File dir) {
+        BlindedResearch.writeFlag(dir, true);   // existing write path never sets decisionPromptOnLeave
+        assertTrue(BlindedResearch.decisionPromptOnLeave(dir));
+    }
+
+    @Test void decisionPromptOnLeaveDefaultsTrueOnCorruptSidecar(@TempDir File dir) throws Exception {
+        java.nio.file.Files.writeString(new File(dir, "atlas-research.json").toPath(), "{ bad");
+        assertTrue(BlindedResearch.decisionPromptOnLeave(dir));   // fail-soft, no throw
+    }
+
+    @Test void decisionPromptOnLeaveHonoursExplicitFalse(@TempDir File dir) throws Exception {
+        java.nio.file.Files.writeString(new File(dir, "atlas-research.json").toPath(),
+                "{\"schema\":\"atlas-research/1\",\"blindedTracking\":true,\"consented\":true,"
+                        + "\"decisionPromptOnLeave\":false}");
+        assertFalse(BlindedResearch.decisionPromptOnLeave(dir));
+    }
+
+    @Test void decisionPromptOnLeaveHonoursExplicitTrue(@TempDir File dir) throws Exception {
+        java.nio.file.Files.writeString(new File(dir, "atlas-research.json").toPath(),
+                "{\"schema\":\"atlas-research/1\",\"blindedTracking\":true,\"consented\":true,"
+                        + "\"decisionPromptOnLeave\":true}");
+        assertTrue(BlindedResearch.decisionPromptOnLeave(dir));
+    }
 }

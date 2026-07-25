@@ -242,6 +242,8 @@ public class AtlasExtension implements QuPathExtension {
         if (choice.isPresent() && choice.get() == ButtonType.OK) {
             BlindedResearch.writeFlag(dir, true);
             BlindedResearch.markConsented(p);
+            // startBlinded() self-configures decisionPromptOnLeave from the current project's
+            // sidecar (Task 3 review Fix 1) -- no external wiring needed here.
             focusHeatmap.startBlinded();
             Alert done = new Alert(Alert.AlertType.INFORMATION,
                     "Proje işaretlendi; gezinme kaydı başladı ve her açılışta sürecek.");
@@ -272,6 +274,8 @@ public class AtlasExtension implements QuPathExtension {
         if (focusHeatmap.isBlinded())
             return;
 
+        // startBlinded() self-configures decisionPromptOnLeave from the current project's sidecar
+        // (Task 3 review Fix 1) -- no external wiring needed at either call site below.
         if (BlindedResearch.hasConsented(newProj)) {
             focusHeatmap.startBlinded();
             return;

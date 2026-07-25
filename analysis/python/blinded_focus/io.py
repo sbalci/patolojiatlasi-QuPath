@@ -207,10 +207,74 @@ def load_labels(csv_path):
     with open(csv_path, newline="", encoding="utf-8") as fh:
         rows = list(csv.reader(fh))
     start = 0
-    if rows and rows[0][0].strip().lower() in ("sessionid", "session_id", "session"):
+    if rows and rows[0] and rows[0][0].strip().lower() in ("sessionid", "session_id", "session"):
         start = 1
     labels = {}
     for row in rows[start:]:
         if len(row) >= 2 and row[0].strip():
             labels[row[0].strip()] = row[1].strip()
     return labels
+
+
+#: Fallback returned by :func:`get_decision` for a fragment with no (or a malformed) ``decision``
+#: field. A fresh dict is constructed on every call (not a shared reference), same rationale as
+#: :func:`_empty_feature_collection`.
+def _empty_decision():
+    return {}
+
+
+def get_decision(fragment):
+    """Return a fragment's ``decision`` object (a dict with at least a string ``diagnosis``) or
+    an empty dict when the field is absent or malformed -- so schema/1-5 fragments recorded
+    without a decision (or with a corrupt one) degrade to blank decision columns, never a crash."""
+    dec = fragment.get("decision")
+    if isinstance(dec, dict) and isinstance(dec.get("diagnosis"), str):
+        return dec
+    return _empty_decision()
+
+
+def load_answer_key(csv_path):
+    """Load a ``slideKey,correctDx`` CSV (optional header) into ``{slideKey: correctDx}``.
+
+    This is a DISPLAY-ONLY reference answer -- populated beside the reader's own ``diagnosis`` in
+    ``decisions.csv`` purely for a human to read side by side. It is never compared against
+    ``diagnosis`` to derive ``correct``; grading is hand-supplied only, via :func:`load_graded`.
+    Returns ``{}`` for a falsy ``csv_path``.
+    """
+    if not csv_path:
+        return {}
+    with open(csv_path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    start = 1 if rows and rows[0] and rows[0][0].strip().lower() in ("slidekey", "slide_key", "slide") else 0
+    key = {}
+    for row in rows[start:]:
+        if len(row) >= 2 and row[0].strip():
+            key[row[0].strip()] = row[1].strip()
+    return key
+
+
+def load_graded(csv_path):
+    """Load a ``slideKey,sessionId,correct`` CSV (optional header) into ``{(slideKey, sessionId):
+    correct}`` where ``correct`` is ``1``/``0`` (parsed, case-insensitively, from
+    ``1``/``0``/``true``/``false``/``yes``/``no``/``correct``/``incorrect``).
+
+    The join key is the stable ``sessionId``, never the human-readable display label -- so a
+    coordinator's grading sheet stays valid even if ``--labels`` is re-mapped later. Rows with an
+    unparseable ``correct`` value are skipped (never crash the load). Returns ``{}`` for a falsy
+    ``csv_path``. This is the ONLY source of ``correct`` in ``decisions.csv`` -- it is never
+    auto-derived from comparing ``diagnosis`` to :func:`load_answer_key`'s answers.
+    """
+    if not csv_path:
+        return {}
+    with open(csv_path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.reader(fh))
+    start = 1 if rows and rows[0] and rows[0][0].strip().lower() in ("slidekey", "slide_key", "slide") else 0
+    graded = {}
+    for row in rows[start:]:
+        if len(row) >= 3 and row[0].strip() and row[1].strip():
+            v = row[2].strip().lower()
+            if v in ("1", "true", "yes", "correct"):
+                graded[(row[0].strip(), row[1].strip())] = 1
+            elif v in ("0", "false", "no", "incorrect"):
+                graded[(row[0].strip(), row[1].strip())] = 0
+    return graded

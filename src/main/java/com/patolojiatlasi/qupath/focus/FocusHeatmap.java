@@ -107,6 +107,35 @@ public final class FocusHeatmap {
      *  unbounded list on a pathologically long session, not an expected ceiling in practice (20000
      *  points at the ~250ms sample interval is ~83 minutes of continuous active dwell). */
     private static final int MAX_PATH_POINTS = 20000;
+    /** Minimum accumulated dwell (ms) on a slide before its leave triggers a decision auto-prompt —
+     *  a short-glance gate so rapidly flipping past slides doesn't nag (reactivity control). */
+    private static final long MIN_DWELL_FOR_PROMPT_MS = 3000;
+
+    /** One reader's per-slide diagnostic decision. decisionMs is relative to blindedSlideStartMs
+     *  (decision latency), never absolute wall-clock — anonymization-safe like path timestamps. */
+    private record Decision(String diagnosis, Integer confidence, long decisionMs) {
+        /** Fragment JSON shape: {diagnosis, confidence(nullable), decisionMs}. */
+        Map<String, Object> toMap() {
+            Map<String, Object> d = new LinkedHashMap<>();
+            d.put("diagnosis", diagnosis);
+            d.put("confidence", confidence);   // null ⇒ Gson (no serializeNulls) OMITS the key; analysis treats absent/null as blank
+            d.put("decisionMs", decisionMs);
+            return d;
+        }
+    }
+
+    /** Immutable snapshot of everything buildBlindedJson needs for one slide's fragment, captured
+     *  eagerly while still on that slide — so a deferred (post-switch) save builds the correct slide's
+     *  fragment without reading instance fields that have since moved to the next slide. {@code dir} is
+     *  the {@link #blindedDir} that was live at capture time: a project switch (e.g. a Groovy {@code
+     *  setProject} off the FX thread) between the snapshot and the deferred write reassigns the {@code
+     *  blindedDir} instance field to the new project, so every write/delete for this snapshot must go
+     *  through {@code snap.dir()} rather than re-reading the (by-then-stale) instance field — otherwise
+     *  the departing slide's fragment would land in the wrong project's {@code atlas-focus} folder and
+     *  the checkpoint delete could orphan the real checkpoint or clobber the new project's live one. */
+    private record BlindedSnapshot(String uri, FocusMap map, java.util.List<int[]> path,
+            boolean pathTruncated, Double baseMagnification, JsonElement annotations, long slideStartMs,
+            String date, File dir) { }
 
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
@@ -162,6 +191,16 @@ public final class FocusHeatmap {
     /** True once {@link #blindedPath} has hit {@link #MAX_PATH_POINTS} for the current slide session,
      *  so the drop is logged once rather than on every subsequent tick. */
     private boolean blindedPathCapped;
+    /** The current slide-session's decision, or null if none entered yet. A single volatile ref ⇒
+     *  atomic read from the off-FX shutdown hook (no torn read). Reset with the map at the two reset points. */
+    private volatile Decision currentDecision;
+    /** Guards the deferred leave-prompt: while true, tick() early-returns so no sampling/switch races
+     *  the pending prompt+save of the slide just left. */
+    private boolean pendingDecisionSave;
+    /** Slides (by uri) whose leave-prompt the reader declined — don't nag again on revisit-and-leave. */
+    private final java.util.Set<String> decisionPromptedSlides = new java.util.HashSet<>();
+    /** When true (default), leaving a slide with no decision auto-prompts. Set from the sidecar. */
+    private boolean decisionPromptOnLeave = true;
     /** Guards against registering {@link #flushOnShutdown()} more than once across repeated
      *  start/stop cycles within the same JVM (a shutdown hook can't be usefully "un-added" per
      *  session, so it's registered once and self-guards on {@link #blindedRecording} at fire time). */
@@ -235,6 +274,9 @@ public final class FocusHeatmap {
     private MenuItem clearItem;
     private MenuItem saveItem;
     private MenuItem contributeItem;
+    // Only meaningful while blinded recording is active — enabled in startBlinded(), disabled in
+    // stopBlinded(), mirroring the (inverse) clearItem/saveItem/contributeItem toggling above.
+    private MenuItem decisionItem;
     private Stage window;
     private ImageView windowView;
 
@@ -284,9 +326,15 @@ public final class FocusHeatmap {
                 stopBlinded();
         });
 
+        // Per-slide decision capture (menu path). Only meaningful while blinded recording is
+        // active, so it starts disabled and is toggled from startBlinded()/stopBlinded().
+        decisionItem = new MenuItem("Bu slayt için tanı/karar gir…");
+        decisionItem.setOnAction(e -> promptDecisionInteractive());
+        decisionItem.setDisable(!blindedRecording);
+
         Menu menu = new Menu("Odak ısı haritası");
         menu.getItems().addAll(overlayItem, windowItem, clearItem, saveItem, contributeItem,
-                new SeparatorMenuItem(), keepItem, blindedItem);
+                new SeparatorMenuItem(), keepItem, blindedItem, decisionItem);
         return menu;
     }
 
@@ -349,6 +397,89 @@ public final class FocusHeatmap {
         return blindedRecording;
     }
 
+    /** Record (or overwrite) the current slide's decision; stamps decisionMs relative to the slide's
+     *  blinded-recording start. FX thread only (menu / deferred prompt). No-op if not blinded / no slide. */
+    void recordDecision(String diagnosis, Integer confidence) {
+        if (!blindedRecording || currentMap == null)
+            return;
+        long ms = System.currentTimeMillis() - blindedSlideStartMs;
+        currentDecision = new Decision(diagnosis, confidence, ms);
+    }
+
+    String getCurrentDecisionDiagnosis() { Decision d = currentDecision; return d == null ? null : d.diagnosis(); }
+    Integer getCurrentDecisionConfidence() { Decision d = currentDecision; return d == null ? null : d.confidence(); }
+    boolean isBlindedRecording() { return blindedRecording; }
+
+    /** Menu path: show the decision dialog (pre-filled for edit) for the CURRENT slide and record the
+     *  result. Runs on the FX thread from the menu item's action, between Timeline pulses — unlike the
+     *  leave path, {@code showAndWait} is legal here without deferring via {@code Platform.runLater}. */
+    void promptDecisionInteractive() {
+        // A deferred leave-prompt is already queued for the slide just left (Platform.runLater is
+        // pending) -- don't stack a second dialog on top of it if the menu is clicked during that
+        // sub-pulse window.
+        if (pendingDecisionSave)
+            return;
+        if (!blindedRecording || currentMap == null) {
+            new Alert(Alert.AlertType.INFORMATION,
+                    "Karar kaydı yalnızca gezinme kaydı açık ve bir slayt açıkken kullanılabilir.")
+                    .showAndWait();
+            return;
+        }
+        String header = currentSlide == null ? "Bu slayt" : "Bu slayt: " + currentSlide;
+        DecisionDialog.DecisionInput in = DecisionDialog.show(qupath,
+                getCurrentDecisionDiagnosis(), getCurrentDecisionConfidence(), header);
+        if (in != null)
+            recordDecision(in.diagnosis(), in.confidence());
+    }
+
+    /** Leave path gate: prompt on leaving the current slide only if enabled, no decision yet, not
+     *  already declined this session, the reader actually dwelled (short-glance gate), and no prompt
+     *  already pending. */
+    private boolean shouldPromptDecisionOnLeave() {
+        return decisionPromptOnLeave
+                && currentDecision == null
+                && !pendingDecisionSave
+                && currentUri != null
+                && !decisionPromptedSlides.contains(currentUri)
+                && currentMap != null
+                && currentMap.getTotalWeight() >= MIN_DWELL_FOR_PROMPT_MS;
+    }
+
+    /** Deferred continuation of a leave-prompt: runs via {@code Platform.runLater} (between Timeline
+     *  pulses ⇒ {@code showAndWait} is legal), never called synchronously from {@code switchTo}/{@code
+     *  tick}. Prompts for the slide just left (state captured eagerly in {@code snap}, before the
+     *  instance fields moved on to the next slide — see {@link #currentSnapshot()}), saves its
+     *  fragment with whatever decision (or none) was entered, then releases the {@link
+     *  #pendingDecisionSave} gate that {@link #tick()} checks on every pulse. Best-effort: any failure
+     *  is logged and swallowed, never thrown into the FX event queue.
+     *  <p>
+     *  {@code leavingSlide} (the display name of the slide being left, captured in {@code switchTo}
+     *  before any reset) is threaded into the dialog's header so the reader isn't misled into
+     *  thinking the decision is about whichever slide is already on screen by the time this fires. */
+    private void deferredDecisionPromptAndSave(BlindedSnapshot snap, String leavingUri, String leavingSlide) {
+        try {
+            String header = leavingSlide == null ? "Az önce görüntülediğiniz slayt"
+                    : "Az önce görüntülediğiniz slayt: " + leavingSlide;
+            DecisionDialog.DecisionInput in = DecisionDialog.show(qupath, null, null, header);
+            Decision decision = null;
+            if (in != null) {
+                long ms = System.currentTimeMillis() - snap.slideStartMs();
+                decision = new Decision(in.diagnosis(), in.confidence(), ms);
+            } else if (leavingUri != null) {
+                decisionPromptedSlides.add(leavingUri);   // declined — don't nag on revisit
+            }
+            writeBlindedFragmentSync(snap, decision);
+            // Same rationale as writeBlindedFragmentSync above: target snap.dir(), not the (possibly
+            // by-now-reassigned) live blindedDir, so this can't orphan the departing project's real
+            // checkpoint or clobber a new project's live one.
+            deleteCheckpoint(snap.dir());
+        } catch (Exception e) {
+            logger.debug("Deferred decision prompt/save failed: {}", e.getMessage());
+        } finally {
+            pendingDecisionSave = false;
+        }
+    }
+
     /** Begin blinded recording: hides/disables any visuals, resets the current slide's map, and
      *  starts the sampling timer if it isn't already running. Idempotent (no-op if already blinded). */
     public void startBlinded() {
@@ -371,16 +502,28 @@ public final class FocusHeatmap {
             saveItem.setDisable(true);
         if (contributeItem != null)
             contributeItem.setDisable(true);
+        // Inverse of the three disables above: decision entry is only meaningful WHILE blinded.
+        if (decisionItem != null)
+            decisionItem.setDisable(false);
         if (currentMap != null)
             currentMap.clear();
         // Attribution capture: resolve the target dir once, here, from whichever project is open
         // right now -- see the blindedDir field javadoc for why this must never be re-resolved later.
         File projectDir = qupath.getProject() == null ? null : BlindedResearch.projectDir(qupath.getProject());
+        // Self-configure from the current project's sidecar -- every start path (menu checkbox,
+        // AtlasExtension's project-open hook, flagCurrentProjectAsResearch) funnels through here, so
+        // this is the one place the flag needs setting; it's never left to a stale value from a
+        // previous project because every call to startBlinded() re-reads it fresh. decisionPromptOnLeave
+        // is null-safe for projectDir == null (the ad-hoc/no-project blinded session case) -- see
+        // BlindedResearch.decisionPromptOnLeave's javadoc.
+        decisionPromptOnLeave = BlindedResearch.decisionPromptOnLeave(projectDir);
         blindedDir = BlindedStore.blindedDir(projectDir, new File(defaultDir(), "contributions"));
         blindedTicks = 0;
         blindedPath.clear();
         blindedPathCapped = false;
         blindedSlideStartMs = System.currentTimeMillis();
+        currentDecision = null;
+        decisionPromptedSlides.clear();   // a declined slide in a prior session/project must not suppress its prompt here
         // Viewer-scoped cursor tracking (image coords only, never global mouse) -- starts following
         // whichever viewer is active now, and re-follows on every later active-viewer change.
         qupath.viewerProperty().addListener(viewerMouseListener);
@@ -414,7 +557,7 @@ public final class FocusHeatmap {
         qupath.viewerProperty().removeListener(viewerMouseListener);
         attachMouseTracking(null);
         if (currentMap != null && !currentMap.isEmpty())
-            saveBlindedSync(currentUri, currentMap);
+            writeBlindedFragmentSync(currentSnapshot(), currentDecision);
         // The final fragment above (if any) now carries whatever the checkpoint was tracking --
         // remove the checkpoint so it doesn't linger as stale/duplicate data in blindedDir.
         deleteCheckpoint();
@@ -449,12 +592,17 @@ public final class FocusHeatmap {
             saveItem.setDisable(false);
         if (contributeItem != null)
             contributeItem.setDisable(false);
+        // Inverse of startBlinded(): decision entry is only meaningful while blinded.
+        if (decisionItem != null)
+            decisionItem.setDisable(true);
         if (blindedItem != null && blindedItem.isSelected())
             blindedItem.setSelected(false);
         refreshTracking();
     }
 
     private void tick() {
+        if (pendingDecisionSave)
+            return;   // a deferred leave-prompt+save is in flight; don't sample/switch until it completes
         try {
             QuPathViewer v = qupath.getViewer();
             ImageData<BufferedImage> id = (v == null) ? null : v.getImageData();
@@ -524,6 +672,21 @@ public final class FocusHeatmap {
         }
     }
 
+    /** Build a BlindedSnapshot from the current instance state, eagerly (copies the path, computes
+     *  baseMag, serializes annotations now) so it stays valid after switchTo moves to the next slide.
+     *  Reads currentImageData for baseMag/annotations — same off-FX torn-read tradeoff as flushOnShutdown. */
+    private BlindedSnapshot currentSnapshot() {
+        Double baseMag = null;
+        try {
+            double x = currentImageData.getServer().getMetadata().getMagnification();
+            if (!Double.isNaN(x) && x > 0)
+                baseMag = x;
+        } catch (Exception ignored) { }
+        return new BlindedSnapshot(currentUri, currentMap, new java.util.ArrayList<>(blindedPath),
+                blindedPathCapped, baseMag, buildAnnotationsFeatureCollection(), blindedSlideStartMs,
+                java.time.LocalDate.now().toString(), blindedDir);
+    }
+
     /**
      * Crash-safety checkpoint: overwrite {@code <blindedDir>/session-<sessionId>.partial.json} with
      * the current slide's accumulated dwell-ms, so a crash loses at most ~{@link
@@ -535,19 +698,31 @@ public final class FocusHeatmap {
         if (blindedDir == null || currentMap == null || currentMap.isEmpty())
             return;
         try {
-            final String json = buildBlindedJson(currentUri, currentMap);
+            final String json = buildBlindedJson(currentSnapshot(), currentDecision);
             writeTextAsync(new File(blindedDir, "session-" + sessionId + ".partial.json"), json);
         } catch (Exception e) {
             logger.debug("Blinded checkpoint failed: {}", e.getMessage());
         }
     }
 
-    /** Best-effort delete of the current session's checkpoint file (its data has just been promoted
-     *  into a final fragment). No-op / silent if it doesn't exist or can't be removed. */
+    /** Best-effort delete of the current session's checkpoint file in the live {@link #blindedDir}
+     *  (its data has just been promoted into a final fragment). No-op / silent if it doesn't exist or
+     *  can't be removed. Delegates to {@link #deleteCheckpoint(File)} — used by the synchronous call
+     *  sites, where the live {@code blindedDir} is still the directory the just-written fragment
+     *  belongs to. */
     private void deleteCheckpoint() {
+        deleteCheckpoint(blindedDir);
+    }
+
+    /** Best-effort delete of the current session's checkpoint file in an explicit directory. Used by
+     *  {@link #deferredDecisionPromptAndSave} with the departing slide's {@code snap.dir()}, so a
+     *  project switch that has since reassigned {@link #blindedDir} to a new project can't make this
+     *  delete either miss the real (departing-project) checkpoint or clobber the new project's live
+     *  one. No-op / silent if {@code dir} is null, the file doesn't exist, or it can't be removed. */
+    private void deleteCheckpoint(File dir) {
         try {
-            if (blindedDir != null)
-                new File(blindedDir, "session-" + sessionId + ".partial.json").delete();
+            if (dir != null)
+                new File(dir, "session-" + sessionId + ".partial.json").delete();
         } catch (Exception e) {
             logger.debug("Could not remove blinded checkpoint: {}", e.getMessage());
         }
@@ -574,7 +749,7 @@ public final class FocusHeatmap {
         try {
             if (!blindedRecording || currentMap == null || currentMap.isEmpty() || blindedDir == null)
                 return;
-            String json = buildBlindedJson(currentUri, currentMap);
+            String json = buildBlindedJson(currentSnapshot(), currentDecision);
             String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(currentUri))) + "__shutdown-"
                     + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
             if (!blindedDir.exists())
@@ -646,13 +821,26 @@ public final class FocusHeatmap {
         // Independent of keepMaps: while blinded, always persist the finished slide's real dwell
         // time before it's discarded — otherwise switching slides mid-session would silently lose it.
         if (blindedRecording && currentMap != null && !currentMap.isEmpty()) {
-            // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
-            // disk first — an async write could still be in flight if a crash follows, losing this
-            // slide with no checkpoint fallback. A small JSON write is negligible vs. slide loading.
-            saveBlindedSync(currentUri, currentMap);
-            // The fragment just written now carries whatever the checkpoint was tracking for the
-            // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
-            deleteCheckpoint();
+            if (shouldPromptDecisionOnLeave()) {
+                // tick() runs inside a Timeline KeyFrame -- showAndWait() here would throw
+                // IllegalStateException. Capture the slide BEING LEFT now (before any reset below),
+                // gate tick() via pendingDecisionSave, and defer the prompt+save to run between
+                // pulses via Platform.runLater. Never save synchronously in this branch.
+                BlindedSnapshot snap = currentSnapshot();
+                String leavingUri = currentUri;
+                String leavingSlide = currentSlide;   // named in the deferred dialog's header (Task 3 review Fix 2)
+                pendingDecisionSave = true;   // tick() early-returns until the deferred save completes
+                javafx.application.Platform.runLater(
+                        () -> deferredDecisionPromptAndSave(snap, leavingUri, leavingSlide));
+            } else {
+                // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
+                // disk first — an async write could still be in flight if a crash follows, losing this
+                // slide with no checkpoint fallback. A small JSON write is negligible vs. slide loading.
+                writeBlindedFragmentSync(currentSnapshot(), currentDecision);
+                // The fragment just written now carries whatever the checkpoint was tracking for the
+                // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
+                deleteCheckpoint();
+            }
         }
         removeOverlay();
         currentViewer = v;
@@ -672,6 +860,7 @@ public final class FocusHeatmap {
                 blindedPath.clear();
                 blindedPathCapped = false;
                 blindedSlideStartMs = System.currentTimeMillis();
+                currentDecision = null;
             }
         } else {
             currentMap = null;
@@ -810,8 +999,8 @@ public final class FocusHeatmap {
 
     /** Snapshot the map on the (FX) calling thread, then write JSON + PNG on a background thread. */
     private void save(String slide, String uri, FocusMap map, File dir) {
-        // Defense-in-depth: a blinded map is anonymised-JSON-only (see saveBlindedSync) and must never
-        // reach the PNG/username-bearing path below, regardless of which caller reached here.
+        // Defense-in-depth: a blinded map is anonymised-JSON-only (see writeBlindedFragmentSync) and
+        // must never reach the PNG/username-bearing path below, regardless of which caller reached here.
         if (currentMapBlinded)
             return;
         final String json = buildJson(slide, uri, map);
@@ -858,8 +1047,8 @@ public final class FocusHeatmap {
      * disabled until the atlas website has a receiver; until then the file can be shared manually.
      */
     private void contribute() {
-        // A blinded map is anonymised-JSON-only via saveBlindedSync; never re-contribute it under the
-        // schema/1 counts path (mirrors the identical guard at the top of save()).
+        // A blinded map is anonymised-JSON-only via writeBlindedFragmentSync; never re-contribute it
+        // under the schema/1 counts path (mirrors the identical guard at the top of save()).
         if (currentMapBlinded)
             return;
         if (currentMap == null || currentMap.isEmpty()) {
@@ -899,11 +1088,11 @@ public final class FocusHeatmap {
     }
 
     /**
-     * Persist a finished blinded-recording map: raw JSON only, <b>never</b> a PNG (no visual
-     * artifact of blinded viewing should ever be produced, on disk or otherwise). Written
-     * <b>synchronously</b> on the calling thread into {@link #blindedDir} -- the project's
+     * Persist a finished blinded fragment (JSON only, <b>never</b> a PNG — no visual artifact of
+     * blinded viewing should ever be produced, on disk or otherwise) synchronously from an explicit
+     * {@link BlindedSnapshot} + {@link Decision}, into {@link #blindedDir} -- the project's
      * {@code atlas-focus/} folder if one was open when {@link #startBlinded()} ran, else the
-     * home-dir fallback -- under schema/3.
+     * home-dir fallback.
      * <p>
      * Both call sites need the write to have completed before they proceed: {@link #switchTo}
      * deletes the checkpoint immediately after (an in-flight async write followed by a crash would
@@ -911,14 +1100,21 @@ public final class FocusHeatmap {
      * directory back with {@link BlindedStore#zipFragments} (an async write could race that read and
      * ship a zip missing a slide viewed under {@link #CHECKPOINT_EVERY_TICKS}, before a checkpoint
      * landed). Hence synchronous, not fire-and-forget. Best-effort (logs and swallows any failure
-     * rather than throwing into the caller).
+     * rather than throwing into the caller). Takes an explicit snapshot (rather than reading instance
+     * fields) so a deferred (post-switch) save still builds the correct slide's fragment — see {@link
+     * #currentSnapshot()}. Writes into {@code snap.dir()}, not the live {@link #blindedDir} instance
+     * field: for the synchronous call sites the two are identical ({@code dir()} was captured from
+     * {@code blindedDir} moments earlier in {@link #currentSnapshot()}), but a deferred save's snapshot
+     * may have been taken against a project that has since been switched away from — reading {@code
+     * blindedDir} at write time would then misattribute the fragment to the new project instead of the
+     * departing one.
      */
-    private void saveBlindedSync(String uri, FocusMap map) {
+    private void writeBlindedFragmentSync(BlindedSnapshot snap, Decision decision) {
         try {
-            final String json = buildBlindedJson(uri, map);
-            final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(uri))) + "__"
+            final String json = buildBlindedJson(snap, decision);
+            final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(snap.uri()))) + "__"
                     + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
-            File dir = blindedDir;
+            File dir = snap.dir();
             if (!dir.exists())
                 dir.mkdirs();
             File file = new File(dir, base + ".json");
@@ -960,41 +1156,42 @@ public final class FocusHeatmap {
      * cursor is over the slide viewer (never a global/OS mouse position); {@code -1,-1} means the
      * cursor was off the viewer at that tick. Purely additive to each point; the fragment-level shape
      * ({@code grid}, {@code annotations}, etc.) is unchanged.
+     * <p>
+     * Schema/5 fragments MAY additionally carry an optional top-level {@code decision} object
+     * ({@code {diagnosis, confidence, decisionMs}}, {@code decisionMs} relative to slide-record start)
+     * when the reader recorded a per-slide diagnosis (added 2026-07). Purely additive; the schema
+     * number stays 5 so an older analysis reader still accepts the fragment (it ignores the unknown
+     * key). Omitted entirely when no decision was entered.
      */
-    private String buildBlindedJson(String uri, FocusMap map) {
+    private String buildBlindedJson(BlindedSnapshot snap, Decision decision) {
         Map<String, Object> m = new LinkedHashMap<>();
-        m.put("schema", CONTRIBUTION_SCHEMA_BLINDED);
-        m.put("slideKey", anonymizeSlideKey(slideKey(uri)));
+        m.put("schema", CONTRIBUTION_SCHEMA_BLINDED);   // stays atlas-focus-contribution/5
+        m.put("slideKey", anonymizeSlideKey(slideKey(snap.uri())));
         m.put("sessionId", sessionId);
-        m.put("imageWidth", map.getImageWidth());
-        m.put("imageHeight", map.getImageHeight());
-        m.put("gridWidth", map.getGridWidth());
-        m.put("gridHeight", map.getGridHeight());
-        m.put("sampleCount", map.getSampleCount());
+        m.put("imageWidth", snap.map().getImageWidth());
+        m.put("imageHeight", snap.map().getImageHeight());
+        m.put("gridWidth", snap.map().getGridWidth());
+        m.put("gridHeight", snap.map().getGridHeight());
+        m.put("sampleCount", snap.map().getSampleCount());
         m.put("weightUnit", "ms");
-        m.put("durationMs", map.getTotalWeight());
-        m.put("date", java.time.LocalDate.now().toString());
-        m.put("grid", map.getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
-        m.put("path", new java.util.ArrayList<>(blindedPath));   // ordered [tRelMs,cx,cy,w,h,dsMilli,mouseX,mouseY] points; defensive snapshot
-        m.put("pathTruncated", blindedPathCapped);   // true if MAX_PATH_POINTS was hit and points were dropped
-        Double baseMag = null;
-        try {
-            double x = currentImageData.getServer().getMetadata().getMagnification();
-            if (!Double.isNaN(x) && x > 0)
-                baseMag = x;
-        } catch (Exception ignored) {
-            // currentImageData/server/metadata unavailable, or magnification unreadable -- leave null.
-        }
-        m.put("baseMagnification", baseMag);   // objective power for the fragment's slide, or null if unknown
-        m.put("annotations", buildAnnotationsFeatureCollection());   // schema/4: GeoJSON FeatureCollection, never null
+        m.put("durationMs", snap.map().getTotalWeight());
+        m.put("date", snap.date());   // captured at snapshot time ⇒ a deferred save stamps the view-day, not the save-day
+        m.put("grid", snap.map().getGrid().clone());   // dwell-ms per cell; aggregator normalises per-contribution
+        m.put("path", new java.util.ArrayList<>(snap.path()));   // ordered [tRelMs,cx,cy,w,h,dsMilli,mouseX,mouseY] points; defensive snapshot
+        m.put("pathTruncated", snap.pathTruncated());   // true if MAX_PATH_POINTS was hit and points were dropped
+        m.put("baseMagnification", snap.baseMagnification());   // objective power for the fragment's slide, or null if unknown
+        m.put("annotations", snap.annotations());   // schema/4: GeoJSON FeatureCollection, never null
+        if (decision != null)
+            m.put("decision", decision.toMap());   // schema/5 additive; omitted when no decision entered
         return new GsonBuilder().create().toJson(m);
     }
 
     /**
      * Snapshot the current slide's annotations as a GeoJSON {@code FeatureCollection} {@link
-     * JsonElement} for embedding in {@link #buildBlindedJson}. Best-effort/no-throw: on any failure
-     * (no image loaded, closed hierarchy, serialization error) this returns an empty {@code
-     * FeatureCollection} rather than propagating -- a blinded save must never fail because of this.
+     * JsonElement} for embedding in a {@link BlindedSnapshot} via {@link #currentSnapshot()}.
+     * Best-effort/no-throw: on any failure (no image loaded, closed hierarchy, serialization error)
+     * this returns an empty {@code FeatureCollection} rather than propagating -- a blinded save must
+     * never fail because of this.
      * <p>
      * Serializes via {@link GsonTools#getInstance()}'s {@code toJson(Object, Type)} (a JSON
      * <em>string</em>), then reparses with {@link JsonParser} -- deliberately <strong>not</strong>
@@ -1005,15 +1202,16 @@ public final class FocusHeatmap {
      * string round-trip avoids that path entirely and still yields a real nested {@link JsonElement}
      * once parsed -- never a quoted string in the final fragment.
      * <p>
-     * Threading: {@link #checkpointBlinded()} and {@link #saveBlindedSync} both run on the FX thread
-     * (driven by the sampling {@link Timeline}/a menu action), so {@code currentImageData} and its
-     * hierarchy are read safely there. {@link #flushOnShutdown()} is the one caller that runs off the
-     * FX thread (a JVM shutdown hook, by its own javadoc) -- {@link
-     * qupath.lib.objects.hierarchy.PathObjectHierarchy#getAnnotationObjects()} returns a fresh {@code
-     * ArrayList} snapshot (verified via the 0.6.0 bytecode), so collection iteration itself can't throw
-     * a {@code ConcurrentModificationException}; only a per-object torn read of in-flight name/class
-     * edits is possible in that narrow window, which this method's try/catch bounds to "fall back to
-     * empty" -- the same tradeoff {@link #flushOnShutdown()} already accepts for {@code currentMap}.
+     * Threading: {@link #currentSnapshot()} is called from {@link #checkpointBlinded()} and the
+     * synchronous save call sites (all FX-thread, driven by the sampling {@link Timeline}/a menu
+     * action), so {@code currentImageData} and its hierarchy are read safely there. {@link
+     * #flushOnShutdown()} is the one caller that runs off the FX thread (a JVM shutdown hook, by its
+     * own javadoc) -- {@link qupath.lib.objects.hierarchy.PathObjectHierarchy#getAnnotationObjects()}
+     * returns a fresh {@code ArrayList} snapshot (verified via the 0.6.0 bytecode), so collection
+     * iteration itself can't throw a {@code ConcurrentModificationException}; only a per-object torn
+     * read of in-flight name/class edits is possible in that narrow window, which this method's
+     * try/catch bounds to "fall back to empty" -- the same tradeoff {@link #flushOnShutdown()} already
+     * accepts for {@code currentMap}.
      */
     private JsonElement buildAnnotationsFeatureCollection() {
         try {

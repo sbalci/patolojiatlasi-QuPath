@@ -60,6 +60,15 @@ deliberate: seeing where you'd looked would change how you look). Work naturally
 > name, MRN, accession/case number) into an annotation note — the geometry is anonymized, but free
 > text you type is stored verbatim.
 
+> ⚠️ **If your study asks you to record a diagnosis,** after finishing a slide you may be
+> auto-prompted, or you can open **Extensions ▸ Araştırma ▸ Odak ısı haritası ▸ Bu slayt için
+> tanı/karar gir…** yourself, to type a free-text diagnosis and an optional 1–5 confidence rating.
+> **Never type an identifying detail** (patient name, MRN, accession/case number) into the
+> diagnosis field — like an annotation note, it is stored verbatim in your returned data. Your
+> coordinator can turn the auto-prompt off; either way, **the very last slide before you quit
+> QuPath gets no auto-prompt** (a pop-up during shutdown isn't safe) — use the menu action above
+> before closing if that slide still needs a decision recorded.
+
 ### 4. Send your data back
 
 When you finish (close the project, or quit QuPath), the extension writes **one file** into the
@@ -157,6 +166,30 @@ Telling a reader, in the moment, that their viewing is being recorded can **chan
   - Use condition-coded `--labels sessionId,label` (never names).
 - The recording captures the three axes: **spatial** (dwell grid), **temporal** (dwell-ms + total
   duration), and **directional** (the ordered scanpath, schema/3).
+
+#### If your study records a per-slide diagnosis — the two-pass hand-grading workflow
+
+A recorded diagnosis is always **free text**; nothing auto-grades it (no synonym matching, no
+string comparison against an answer key). Grading is a deliberate, hand-done second pass:
+
+1. **First pass — collect the diagnoses.** Run the analysis, optionally with `--key key.csv`
+   (`slideKey,correctDx`, header row optional) if you want a reference answer shown for
+   comparison. This writes `decisions.csv` — one row per (slide, session) with `diagnosis`,
+   `confidence` (1–5 or blank), and `correctDx` alongside it — but its `correct` column is
+   **blank**. `--key` is **display-only**: it never marks a row correct/incorrect.
+2. **Hand-grade.** Open `decisions.csv`, compare each row's `diagnosis` to the reference answer
+   yourself (clinical judgement — that's the point of leaving it free text, not a picklist), and
+   write a new sheet `slideKey,sessionId,correct` (`correct` = `1`/`0`). The join is on the stable
+   `sessionId`, **not** the display `session` label, so this sheet stays valid even if you
+   re-label sessions later.
+3. **Second pass — re-run with the grades.** Re-run with `--graded decisions_graded.csv` (your
+   sheet from step 2). This re-writes `decisions.csv` with `correct` populated, and additionally
+   writes `nav_accuracy.csv` plus a "Navigation ↔ diagnostic accuracy" section in `summary.md` —
+   correlating navigation metrics (zoom, scanning rate, coverage, …) against correct/incorrect,
+   under the guard rules documented in
+   [`analysis/python/README.md`](analysis/python/README.md) /
+   [`analysis/R/README.md`](analysis/R/README.md). Without `--graded`, no accuracy correlation is
+   computed — it needs at least one hand-graded row.
 
 ---
 

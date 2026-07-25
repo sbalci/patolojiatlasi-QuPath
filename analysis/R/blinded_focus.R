@@ -204,6 +204,14 @@ slug <- function(text, maxlen = 40) {
   hex
 }
 
+#' Composite lookup key for a `(slideKey, sessionId)` pair, used by `load_graded`'s named-list
+#' lookup and `.nav_accuracy_rows`'s `(slide, sessionId) -> correct` map.  (ASCII unit
+#' separator, never expected in a slideKey/sessionId/session label) avoids the collision risk of
+#' plain string concatenation (e.g. `"ab"+"c"` vs `"a"+"bc"`).
+.decision_key <- function(a, b) {
+  paste0(as.character(a), "", as.character(b))
+}
+
 #' Load a `sessionId,label` CSV (optional header row) into a named list `sessionId -> label`.
 #' Returns an empty named list if `csv_path` is NULL/empty. Out-of-band identity mapping: the
 #' fragment data itself stays anonymous (sessionId only); a coordinator supplies this CSV
@@ -227,6 +235,69 @@ load_labels <- function(csv_path) {
     }
   }
   labels
+}
+
+#' Load a `slideKey,correctDx` CSV (optional header) into a named list `slideKey -> correctDx`.
+#'
+#' This is a DISPLAY-ONLY reference answer -- populated beside the reader's own `diagnosis` in
+#' `decisions.csv` purely for a human to read side by side. It is never compared against
+#' `diagnosis` to derive `correct`; grading is hand-supplied only, via `load_graded`. Returns an
+#' empty named list for a NULL/empty `csv_path` (mirrors `load_labels`'s convention exactly).
+load_answer_key <- function(csv_path) {
+  key <- list()
+  if (is.null(csv_path) || !nzchar(csv_path)) {
+    return(key)
+  }
+  rows <- utils::read.csv(csv_path, header = FALSE, colClasses = "character", stringsAsFactors = FALSE)
+  start <- 1
+  if (nrow(rows) > 0 && tolower(trimws(rows[1, 1])) %in% c("slidekey", "slide_key", "slide")) {
+    start <- 2
+  }
+  if (nrow(rows) >= start) {
+    for (i in start:nrow(rows)) {
+      sk <- trimws(rows[i, 1])
+      if (nzchar(sk) && ncol(rows) >= 2) {
+        key[[sk]] <- trimws(rows[i, 2])
+      }
+    }
+  }
+  key
+}
+
+#' Load a `slideKey,sessionId,correct` CSV (optional header) into a named list keyed by
+#' `.decision_key(slideKey, sessionId)` -> `correct` (`1L`/`0L`, parsed case-insensitively from
+#' `1`/`0`/`true`/`false`/`yes`/`no`/`correct`/`incorrect`).
+#'
+#' The join key is the stable `sessionId`, never the human-readable display label -- so a
+#' coordinator's grading sheet stays valid even if `--labels` is re-mapped later. Rows with an
+#' unparseable `correct` value are skipped (never crash the load). Returns an empty named list for
+#' a NULL/empty `csv_path`. This is the ONLY source of `correct` in `decisions.csv` -- it is never
+#' auto-derived from comparing `diagnosis` to `load_answer_key`'s answers.
+load_graded <- function(csv_path) {
+  graded <- list()
+  if (is.null(csv_path) || !nzchar(csv_path)) {
+    return(graded)
+  }
+  rows <- utils::read.csv(csv_path, header = FALSE, colClasses = "character", stringsAsFactors = FALSE)
+  start <- 1
+  if (nrow(rows) > 0 && tolower(trimws(rows[1, 1])) %in% c("slidekey", "slide_key", "slide")) {
+    start <- 2
+  }
+  if (nrow(rows) >= start && ncol(rows) >= 3) {
+    for (i in start:nrow(rows)) {
+      sk <- trimws(rows[i, 1])
+      sid <- trimws(rows[i, 2])
+      if (nzchar(sk) && nzchar(sid)) {
+        v <- tolower(trimws(rows[i, 3]))
+        if (v %in% c("1", "true", "yes", "correct")) {
+          graded[[.decision_key(sk, sid)]] <- 1L
+        } else if (v %in% c("0", "false", "no", "incorrect")) {
+          graded[[.decision_key(sk, sid)]] <- 0L
+        }
+      }
+    }
+  }
+  graded
 }
 
 #' Resolve a sessionId to its human-readable label if `labels` has one, else the sessionId itself.
@@ -271,6 +342,25 @@ get_annotations <- function(fragment) {
     return(.empty_feature_collection())
   }
   raw
+}
+
+#' Fallback returned by `get_decision` for a fragment with no (or a malformed) `decision` field. A
+#' fresh empty list is constructed on every call (not a shared reference), same rationale as
+#' `.empty_feature_collection`.
+.empty_decision <- function() {
+  list()
+}
+
+#' Return a fragment's `decision` object (a list with at least a single-string `diagnosis`) or an
+#' empty list when the field is absent or malformed -- so schema/1-5 fragments recorded without a
+#' decision (or with a corrupt one) degrade to blank decision columns, never a crash.
+get_decision <- function(fragment) {
+  dec <- fragment$decision
+  if (!is.null(dec) && is.list(dec) && !is.null(dec$diagnosis) &&
+    is.character(dec$diagnosis) && length(dec$diagnosis) == 1) {
+    return(dec)
+  }
+  .empty_decision()
 }
 
 # ---------------------------------------------------------------------------
@@ -1640,6 +1730,130 @@ DEFAULT_MAGBANDS <- 3
   c(gw, gh)
 }
 
+# ---------------------------------------------------------------------------
+# Phase 3: navigation <-> diagnostic accuracy correlation (schema/decision, "--key"/"--graded").
+# Mirrors `blinded_focus.analyze`'s equivalent section in the Python toolkit function-for-function.
+# ---------------------------------------------------------------------------
+
+#: Navigation-metric columns (from `metrics.csv`) correlated against graded diagnostic accuracy in
+#: `.nav_accuracy_rows`. All are grid/path-level per-session metrics already present as `row` keys
+#: in `analyze()`'s main loop.
+NAV_ACCURACY_COLS <- c(
+  "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
+  "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
+  "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy"
+)
+#: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or with
+#: zero variance on either side) `.pearson_guarded` returns `NaN` (blank), never a numerically
+#: unstable/undefined statistic.
+MIN_CORRELATION_N <- 5
+
+#' Plain Pearson r (point-biserial when one side is 0/1) via `stats::cor(..., method="pearson")`,
+#' or `NaN` if `length(xs) < min_n` or either side has zero variance -- guard checked BEFORE
+#' calling `cor()`, never after. `cor()` is scale-invariant to the n vs n-1 std convention (see
+#' `cc()`'s docstring above), so this agrees with `numpy.corrcoef` exactly despite the population-
+#' vs-sample variance difference; no p-value, no confidence interval (pilot-scale n doesn't support
+#' them). Parity-safe port of `blinded_focus.analyze._pearson_guarded`.
+.pearson_guarded <- function(xs, ys, min_n = MIN_CORRELATION_N) {
+  xs <- as.numeric(xs); ys <- as.numeric(ys)
+  if (length(xs) < min_n || stats::var(xs) == 0.0 || stats::var(ys) == 0.0) {
+    return(NaN)
+  }
+  as.numeric(stats::cor(xs, ys, method = "pearson"))
+}
+
+#' Join decisions' hand-graded `correct` (0/1) onto `metrics_rows` by the stable `(slide,
+#' sessionId)` key (never the display label), then compute a guarded point-biserial r plus group
+#' means/medians per navigation column in `NAV_ACCURACY_COLS`.
+#'
+#' Direct sessionId join: `metrics_rows` carries the stable `sessionId` (stamped in `analyze()`'s
+#' per-session loop, right next to the human display `label_for` label) -- so no label-based
+#' bridge is needed here at all. (Prior versions recovered the sessionId via a `(slide,
+#' display-label)` lookup into `decision_rows`, which silently collapsed two sessions sharing a
+#' display label -- e.g. via `--labels` mapping distinct sessionIds to the same name -- onto
+#' whichever session's decision row was built last, misattributing/erasing the other's grade.
+#' Stamping sessionId directly on `metrics_rows` removes the label from this join entirely.)
+#' Mirrors `blinded_focus.analyze._nav_accuracy_rows` exactly.
+#'
+#' Returns `list(rows=..., had_any_graded=...)` -- `had_any_graded` gates whether
+#' `nav_accuracy.csv` and the summary section get written at all (only when at least one
+#' `--graded` row was supplied).
+.nav_accuracy_rows <- function(metrics_rows, decision_rows) {
+  correct_by <- list()
+  for (r in decision_rows) {
+    if (!is.na(r$correct)) {
+      correct_by[[.decision_key(r$slide, r$sessionId)]] <- r$correct
+    }
+  }
+  had_any_graded <- length(correct_by) > 0
+  rows <- list()
+  for (col in NAV_ACCURACY_COLS) {
+    xs <- numeric(0); ys <- numeric(0)
+    for (mr in metrics_rows) {
+      key <- .decision_key(mr$slide, mr$sessionId)
+      cval <- correct_by[[key]]
+      if (is.null(cval)) next
+      # Some metrics (e.g. enrichmentRatio) store a literal NaN in the in-memory row for a
+      # well-defined "undefined" case (only rendered as a blank cell later, at CSV-write time, via
+      # write_csv_tidy's na="") -- `is.na()` in R is TRUE for both NA and NaN, so this single check
+      # already treats both identically, unlike the Python port which needs a separate
+      # `_sanitize_nan` step (Python's blank placeholder is the literal string `""`, not NaN).
+      v <- mr[[col]]
+      if (is.null(v) || is.na(v)) next
+      xs <- c(xs, as.numeric(v))
+      ys <- c(ys, cval)
+    }
+    r_val <- .pearson_guarded(ys, xs)
+    correct_vals <- xs[ys == 1]
+    incorrect_vals <- xs[ys == 0]
+    mean_correct <- if (length(correct_vals) > 0) mean(correct_vals) else NaN
+    mean_incorrect <- if (length(incorrect_vals) > 0) mean(incorrect_vals) else NaN
+    median_correct <- if (length(correct_vals) > 0) stats::median(correct_vals) else NaN
+    median_incorrect <- if (length(incorrect_vals) > 0) stats::median(incorrect_vals) else NaN
+    mean_diff <- if (length(correct_vals) >= 2 && length(incorrect_vals) >= 2) {
+      mean_correct - mean_incorrect
+    } else {
+      NaN
+    }
+    rows[[length(rows) + 1]] <- list(
+      metric = col,
+      n = length(xs),
+      pointBiserialR = r_val,
+      meanCorrect = mean_correct,
+      meanIncorrect = mean_incorrect,
+      medianCorrect = median_correct,
+      medianIncorrect = median_incorrect,
+      meanDiff = mean_diff
+    )
+  }
+  list(rows = rows, had_any_graded = had_any_graded)
+}
+
+#' Soft-guarded calibration summary over graded rows with a non-blank `confidenceScaled`:
+#' `calibrationGap = mean(confidenceScaled) - mean(correct)` (positive = overconfident),
+#' `brierScore = mean((confidenceScaled - correct)^2)` (lower = better calibrated), and
+#' `confidenceAccuracyR` (hard-guarded via `.pearson_guarded`). All three are `NaN` (blank) when
+#' there are zero eligible rows; `confidenceAccuracyR` additionally needs `n >= MIN_CORRELATION_N`
+#' and non-zero variance on both sides (same guard as `.nav_accuracy_rows`). Returns
+#' `list(gap=, brier=, conf_acc_r=, n=)`. Mirrors `blinded_focus.analyze._calibration_stats`.
+.calibration_stats <- function(decision_rows) {
+  conf_vals <- numeric(0); correct_vals <- numeric(0)
+  for (r in decision_rows) {
+    if (is.na(r$correct)) next
+    cs <- r$confidenceScaled
+    if (is.null(cs) || is.na(cs) || !is.numeric(cs)) next
+    conf_vals <- c(conf_vals, as.numeric(cs))
+    correct_vals <- c(correct_vals, r$correct)
+  }
+  if (length(conf_vals) == 0) {
+    return(list(gap = NaN, brier = NaN, conf_acc_r = NaN, n = 0L))
+  }
+  gap <- mean(conf_vals) - mean(correct_vals)
+  brier <- mean((conf_vals - correct_vals)^2)
+  conf_acc_r <- .pearson_guarded(conf_vals, correct_vals)
+  list(gap = gap, brier = brier, conf_acc_r = conf_acc_r, n = length(conf_vals))
+}
+
 #' Run the full blinded-focus pipeline over `inputs` (files/dirs/zips) into `out_dir`. Returns the
 #' `metrics.csv` rows as a data frame (for programmatic/test use), and writes:
 #'
@@ -1673,13 +1887,22 @@ DEFAULT_MAGBANDS <- 3
 #' `.res_grid_dims`); `magbands` sets the number of within-path zoom bands for the
 #' magnification-split analysis (see `zoom_band_labels`).
 analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = NULL,
-                     make_figures = FALSE, res = DEFAULT_RES, magbands = DEFAULT_MAGBANDS) {
+                     make_figures = FALSE, res = DEFAULT_RES, magbands = DEFAULT_MAGBANDS,
+                     key_csv = NULL, graded_csv = NULL) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   fragments <- load_fragments(inputs)
   if (length(fragments) == 0) {
     message("warning: no valid fragments found (schema atlas-focus-contribution/{1,2,3,4,5})")
   }
   labels <- load_labels(labels_csv)
+  # `key_csv` (`--key`) is a DISPLAY-ONLY `slideKey,correctDx` answer key -- it populates
+  # `decisions.csv`'s `correctDx` column beside the reader's own `diagnosis` for a human to
+  # compare, but is never string-matched against `diagnosis` to derive `correct`. `correct` comes
+  # only from `graded_csv` (`--graded`, a `slideKey,sessionId,correct` hand-graded sheet); without
+  # it every `correct` cell is blank and no navigation-accuracy correlation is computed (see
+  # `.nav_accuracy_rows`).
+  answer_key <- load_answer_key(key_csv)
+  graded <- load_graded(graded_csv)
   groups <- group_by_slide(fragments)
   roi_fc <- if (!is.null(roi)) load_roi_fc(roi) else NULL
   # Kept only for the reference/ROI gate below (truthy iff the ROI file has >=1 ring) -- the
@@ -1689,6 +1912,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
   roi_rings <- if (!is.null(roi_fc)) rings_from_feature_collection(roi_fc) else NULL
 
   metrics_rows <- list()
+  decision_rows <- list()
   slide_summaries <- list()
   reference_summaries <- list()
 
@@ -1762,6 +1986,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       row <- list(
         slide = slide_key,
         session = label_for(sid, labels),
+        # Stable join key for .nav_accuracy_rows -- NOT written to metrics.csv (its fieldnames
+        # vector below deliberately omits "sessionId"; write_csv_tidy's `r[fieldnames]` subset
+        # drops it silently at write time). Kept in-memory only so the nav-accuracy join below
+        # never has to bridge back through the (possibly colliding) human display label -- see
+        # .nav_accuracy_rows's docs.
+        sessionId = sid,
         durationMs = if (!is.null(f$durationMs)) as.numeric(f$durationMs) else NA,
         sampleCount = if (!is.null(f$sampleCount)) as.numeric(f$sampleCount) else NA,
         coveragePct = coverage(grid) * 100.0,
@@ -1830,6 +2060,52 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         }
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
+
+      # ---- decisions.csv: this (slide, session)'s hand-entered diagnosis/confidence, if any --
+      # HAND-GRADE ONLY. `correctDx` (from `--key`) is display-only; `correct` (from `--graded`) is
+      # the only source of grading and is never derived from comparing `diagnosis` to `correctDx`.
+      # Join key for both the `--graded` lookup here and the navigation<->accuracy correlation
+      # later is the stable `sessionId` (`sid_stable`), never the human display label.
+      dec <- get_decision(f)
+      diagnosis <- if (!is.null(dec$diagnosis)) as.character(dec$diagnosis) else NA_character_
+      confidence <- dec$confidence
+      conf_scaled <- if (!is.null(confidence) && is.numeric(confidence)) {
+        (as.numeric(confidence) - 1.0) / 4.0
+      } else {
+        NA_real_
+      }
+      decision_ms <- if (!is.null(dec$decisionMs)) as.numeric(dec$decisionMs) else NA_real_
+      # Blank iff absent/NULL or its string form is empty; otherwise the string form -- so a
+      # numeric 0 sessionId stably maps to "0" (this already matched that rule before the Python
+      # parity fix: `nzchar(as.character(0))` is TRUE since "0" has 1 char, so this line needs no
+      # change here -- see the Python sibling's `_sid = f.get("sessionId"); sid_stable = "" if
+      # _sid is None or str(_sid) == "" else str(_sid)`, added to align it with this rule).
+      sid_stable <- if (!is.null(f$sessionId) && nzchar(as.character(f$sessionId))) as.character(f$sessionId) else ""
+      correct_dx <- if (!is.null(answer_key[[slide_key]])) answer_key[[slide_key]] else NA_character_
+      graded_val <- graded[[.decision_key(slide_key, sid_stable)]]
+      if (is.null(graded_val)) graded_val <- NA_integer_
+      decision_rows[[length(decision_rows) + 1]] <- list(
+        slide = slide_key,
+        sessionId = sid_stable,
+        session = label_for(sid, labels),
+        diagnosis = diagnosis,
+        # Blank unless confidence is a real number -- `is.numeric()` already excludes logical
+        # values (R's `is.numeric(TRUE)` is FALSE), so a malformed boolean confidence renders NA
+        # here (mirrors the Python sibling's isinstance(x, (int,float)) and not isinstance(x, bool)
+        # guard on this same raw column, added for parity: pre-fix, `as.numeric(TRUE)` coerced a
+        # boolean confidence to `1`, diverging from Python's `True` literal in the same cell).
+        confidence = if (!is.null(confidence) && is.numeric(confidence)) as.numeric(confidence) else NA_real_,
+        confidenceScaled = conf_scaled,
+        decisionMs = decision_ms,
+        # == decisionMs (both are relative to the slide's recording start); kept as a separate
+        # column so a future recorder revision that captures a distinct "time from leave-prompt to
+        # submit" value has a column ready to diverge into.
+        decisionLatencyMs = decision_ms,
+        correctDx = correct_dx,
+        # blank unless --graded supplied a (slideKey, sessionId) row -- NEVER auto-derived from
+        # diagnosis == correctDx string comparison.
+        correct = graded_val
+      )
     }
 
     # ------------------------------------------------------------------
@@ -2135,14 +2411,38 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"
     )
   )
-  write_summary(out_dir, groups, slide_summaries, reference_summaries)
+
+  if (any(vapply(decision_rows, function(r) !is.na(r$diagnosis) && nzchar(r$diagnosis), logical(1)))) {
+    write_csv_tidy(
+      decision_rows, file.path(out_dir, "decisions.csv"),
+      c("slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
+        "decisionMs", "decisionLatencyMs", "correctDx", "correct")
+    )
+  } else {
+    message("warning: no decisions found in any fragment; decisions.csv not written")
+  }
+
+  nav_result <- .nav_accuracy_rows(metrics_rows, decision_rows)
+  nav_rows <- nav_result$rows
+  had_graded <- nav_result$had_any_graded
+  if (had_graded) {
+    write_csv_tidy(
+      nav_rows, file.path(out_dir, "nav_accuracy.csv"),
+      c("metric", "n", "pointBiserialR", "meanCorrect", "meanIncorrect",
+        "medianCorrect", "medianIncorrect", "meanDiff")
+    )
+  }
+
+  write_summary(out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded)
   utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
 }
 
 #' Write `summary.md`: slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/
-#' duration spread, and the reference ranking when applicable. Matches the Python toolkit's
-#' `_write_summary` structure/section headers.
-write_summary <- function(out_dir, groups, slide_summaries, reference_summaries) {
+#' duration spread, the reference ranking when applicable, and (Phase 3, gated on `had_graded`) a
+#' "Navigation <-> diagnostic accuracy" section. Matches the Python toolkit's `_write_summary`
+#' structure/section headers exactly.
+write_summary <- function(out_dir, groups, slide_summaries, reference_summaries,
+                           decision_rows = NULL, nav_rows = NULL, had_graded = FALSE) {
   lines <- c("# Blinded-focus analysis summary", "", paste0("- Slides analyzed: ", length(groups)), "")
   lines <- c(lines, "## Per-slide agreement", "")
   for (s in slide_summaries) {
@@ -2190,5 +2490,44 @@ write_summary <- function(out_dir, groups, slide_summaries, reference_summaries)
       lines <- c(lines, "")
     }
   }
+
+  # ------------------------------------------------------------------
+  # Navigation <-> diagnostic accuracy (Phase 3): only when hand-graded decisions exist at all
+  # (--graded). Never rendered otherwise -- no section, no nav_accuracy.csv, nothing implying a
+  # correlation was computed from ungraded data.
+  # ------------------------------------------------------------------
+  if (isTRUE(had_graded)) {
+    lines <- c(lines, "## Navigation ↔ diagnostic accuracy", "")
+    lines <- c(lines, paste0(
+      "> Pilot-scale caveats: viewport-only navigation has a null-result precedent; at ",
+      "n=5–20 only r, its n, and group means/medians are defensible — no p-values/CIs. ",
+      "Coincidence/accuracy numbers are cohort-composition-dependent."
+    ))
+    lines <- c(lines, "")
+    graded_dec <- Filter(function(r) !is.na(r$correct), decision_rows)
+    n_all <- length(graded_dec)
+    if (n_all > 0) {
+      total_correct <- sum(vapply(graded_dec, function(r) r$correct, numeric(1)))
+      acc <- total_correct / n_all
+      suffix <- if (n_all < 5) " (n<5 → descriptive only)" else ""
+      lines <- c(lines, paste0(
+        "- overall accuracy: ", total_correct, "/", n_all, " = ", .fmt(acc * 100, 1), "%", suffix
+      ))
+    }
+    for (nr in nav_rows) {
+      lines <- c(lines, paste0(
+        "- ", nr$metric, ": r=", .fmt(nr$pointBiserialR), " (n=", nr$n, "), ",
+        "meanCorrect=", .fmt(nr$meanCorrect), ", meanIncorrect=", .fmt(nr$meanIncorrect), ", ",
+        "meanDiff=", .fmt(nr$meanDiff)
+      ))
+    }
+    calib <- .calibration_stats(if (is.null(decision_rows)) list() else decision_rows)
+    lines <- c(lines, paste0(
+      "- calibration (n=", calib$n, "): calibrationGap=", .fmt(calib$gap), ", ",
+      "brierScore=", .fmt(calib$brier), ", confidenceAccuracyR=", .fmt(calib$conf_acc_r)
+    ))
+    lines <- c(lines, "")
+  }
+
   writeLines(lines, file.path(out_dir, "summary.md"))
 }

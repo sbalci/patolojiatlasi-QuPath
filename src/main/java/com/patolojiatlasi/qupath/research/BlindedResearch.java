@@ -35,6 +35,11 @@ public final class BlindedResearch {
         String schema;
         boolean blindedTracking;
         boolean consented;
+        // Boxed (not primitive) so a missing key deserializes to null rather than false -- lets
+        // decisionPromptOnLeave(File) tell "absent" (default true) apart from an explicit false.
+        // Existing write paths (writeFlag/markConsented) never set this field, so it's omitted from
+        // written JSON (GSON here has no serializeNulls()) until something else opts to persist it.
+        Boolean decisionPromptOnLeave;
 
         Sidecar(String schema, boolean blindedTracking, boolean consented) {
             this.schema = schema;
@@ -93,6 +98,27 @@ public final class BlindedResearch {
     static boolean readBlinded(File dir) {
         Sidecar s = read(dir);
         return s != null && s.blindedTracking;
+    }
+
+    /**
+     * Whether leaving a slide with no decision entered should auto-prompt, per the optional
+     * {@code decisionPromptOnLeave} sidecar key in {@code dir}. Defaults to {@code true} (prompt)
+     * when the sidecar is missing/unreadable, when the key itself is absent, and on any error --
+     * mirrors {@link #readBlinded}/{@link #readConsented}'s fail-soft pattern, except the polarity
+     * of the default is {@code true} rather than {@code false} (nagging-by-default is the safer
+     * fallback for a feature that's off only when a project explicitly opts out).
+     * <p>
+     * Public (unlike the package-private {@code readBlinded}/{@code readConsented}) because it's
+     * called from {@code AtlasExtension}, in the sibling {@code com.patolojiatlasi.qupath} package
+     * -- same reason {@link #writeFlag} and {@link #projectDir} are public.
+     */
+    public static boolean decisionPromptOnLeave(File dir) {
+        try {
+            Sidecar s = read(dir);
+            return s == null || s.decisionPromptOnLeave == null || s.decisionPromptOnLeave;
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     /** Mark the sidecar in {@code dir} as consented, preserving its {@code blindedTracking} value. */
