@@ -13,6 +13,7 @@ import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
 import javafx.scene.control.RadioButton;
@@ -56,6 +57,15 @@ import qupath.lib.roi.interfaces.ROI;
  * transient: they are removed again as soon as that question is left (Önceki/Sonraki or window
  * close) — see {@link #leaveQuestion(AtlasQuiz, int)} — while everything present before the
  * question was shown is left untouched.
+ * <p>
+ * This is also the player for a guided teaching tour: a NARRATION stop is caption-only (no answer
+ * widget, no "correct answer" line on reveal — see {@link #buildInput(QuizQuestion)}/
+ * {@link #revealAnswer()}), any stop may carry an optional {@code highlightGeoJson} drawn as a
+ * toggleable overlay independent of "Göster" (see {@link #afterSlideReady(QuizQuestion)}), an
+ * {@link AtlasQuiz#isAllowBack()} of {@code false} makes "Önceki" forward-only, and slide URLs are
+ * opened through {@link QuizSlide#openSlideAsync} so a local (non-atlas) tour slide opens the same
+ * way a DZI quiz slide always has. {@link #show(QuPathGUI, boolean)}'s {@code tourMode} only changes
+ * the progress label's framing ("Durak" vs "Soru") — it is the same player either way.
  */
 public class QuizRunnerWindow {
 
@@ -68,25 +78,31 @@ public class QuizRunnerWindow {
     private AtlasQuiz quiz;
     private int currentIndex = 0; // 1-based; 0 = no quiz loaded yet
 
-    // Guards overlapping slide opens: set true just before QuizSlide.openAsync is called for the
-    // question being shown, cleared in its onDone/onError callback — both of which QuizSlide
+    // Set once, at construction, by whichever show(...) overload created this instance --
+    // false for ordinary quiz play, true for guided-tour play. Never reassigned afterwards.
+    // The only thing it changes is progressLabel's framing in showQuestion ("Durak" vs "Soru");
+    // everything else in this class is identical for both modes.
+    private boolean tourMode = false;
+
+    // Guards overlapping slide opens: set true just before QuizSlide.openSlideAsync is called for
+    // the question being shown, cleared in its onDone/onError callback — both of which QuizSlide
     // guarantees run on the FX thread. While true, "Sınav yükle…", Önceki, Göster and Sonraki are
     // all disabled (see setControlsDisabled), so a second navigation click can't fire a second
-    // openAsync while the first is still resolving. Touched only on the JavaFX thread, mirroring
-    // AtlasBrowser's "opening" / ProjectBuilderDialog's "building" guard.
+    // openSlideAsync while the first is still resolving. Touched only on the JavaFX thread,
+    // mirroring AtlasBrowser's "opening" / ProjectBuilderDialog's "building" guard.
     private boolean opening = false;
 
     // Set true once the learner has confirmed (or the viewer held nothing risky in the first
     // place) replacing whatever was in the active viewer with a quiz slide. Checked/set only in
-    // applySlide, before the FIRST QuizSlide.openAsync call of this runner window's lifetime --
+    // applySlide, before the FIRST QuizSlide.openSlideAsync call of this runner window's lifetime --
     // every swap after that one only ever replaces a previous quiz slide (whose only content is
     // the learner's own transient drawings, already handled by leaveQuestion), so it needs no
     // further prompting. FX-thread only.
     private boolean confirmedViewerReplace = false;
 
     // Incremented at the start of every applySlide call; the token captured at that point is
-    // passed to QuizSlide.openAsync as part of its stillWanted check, so a load superseded by a
-    // later question navigation (Önceki/Sonraki/promptLoad, each of which calls applySlide again
+    // passed to QuizSlide.openSlideAsync as part of its stillWanted check, so a load superseded by
+    // a later question navigation (Önceki/Sonraki/promptLoad, each of which calls applySlide again
     // before the previous load resolves) becomes a no-op instead of clobbering the newer state.
     // FX-thread only.
     private int loadToken = 0;
@@ -102,6 +118,15 @@ public class QuizRunnerWindow {
     private final Button loadBtn = new Button("Sınav yükle…");
 
     private final Label promptLabel = new Label();
+    // Graceful-missing-slide note ("Slayt açılamadı: <slideTitle>"), set by applySlide's onError
+    // path and cleared at the start of every showQuestion. Hidden (setVisible+setManaged false)
+    // whenever there is nothing to show, so it never reserves layout space for the common case
+    // where a slide opens successfully -- see setSlideStatus.
+    private final Label slideStatusLabel = new Label();
+    // Per-stop highlight toggle ("Vurguyu göster"): visible only for a stop whose
+    // QuizQuestion.getHighlightGeoJson() is non-blank (see afterSlideReady), independent of the
+    // reveal area below. Default-selected each time such a stop is shown.
+    private final CheckBox highlightToggle = new CheckBox("Vurguyu göster");
     private final VBox inputArea = new VBox(6);
 
     private final VBox revealArea = new VBox(6);
@@ -122,6 +147,21 @@ public class QuizRunnerWindow {
     // touched only on the FX thread, mirroring FocusHeatmap's currentOverlay/currentViewer pair.
     private QuizRevealOverlay revealOverlay;
     private QuPathViewer revealOverlayViewer;
+
+    // Per-stop highlight overlay + the viewer it was added to -- same shape as revealOverlay/
+    // revealOverlayViewer above but tracked separately, since the highlight is independent of
+    // "Göster" (shown as soon as the stop's slide is ready, not only on reveal) and both can be
+    // showing at once (e.g. a NAVIGATION question that also carries a highlight). Added/removed by
+    // showHighlightOverlay/removeHighlightOverlay; removeHighlightOverlay is called from
+    // leaveQuestion (same lifecycle as removeRevealOverlay) so it can never leak into the next stop.
+    private QuizRevealOverlay highlightOverlay;
+    private QuPathViewer highlightOverlayViewer;
+
+    // The current question's parsed highlight ROI, or null if it has none (or its geometry failed
+    // to parse). Set once per question-show in afterSlideReady so highlightToggle's listener can
+    // show/hide it without re-parsing (and re-alerting on malformed geometry) on every click.
+    // Cleared in leaveQuestion.
+    private ROI currentHighlightRoi;
 
     // Snapshot of the hierarchy's annotation objects taken when the current ANNOTATION/NAVIGATION
     // question's slide became ready (see afterSlideReady). On leaving such a question, only
@@ -160,14 +200,27 @@ public class QuizRunnerWindow {
         this.qupath = qupath;
     }
 
-    /** Show (or focus) the single runner window. */
+    /** Show (or focus) the single runner window, playing an ordinary quiz pack. */
     public static void show(QuPathGUI qupath) {
+        show(qupath, false);
+    }
+
+    /**
+     * Show (or focus) the single runner window. {@code tourMode} only changes {@link #showQuestion}'s
+     * progress-label framing ("Durak N / M" vs "Soru N / M") -- everything else (NARRATION render,
+     * per-stop highlight, {@code allowBack} gating, local-slide routing) applies identically to both
+     * quiz and tour play. Same single-window focus-if-open pattern as {@link #show(QuPathGUI)}: if a
+     * runner window is already open, it is simply brought to front (its existing mode, whichever that
+     * was, is left unchanged).
+     */
+    public static void show(QuPathGUI qupath, boolean tourMode) {
         if (stage != null) {
             stage.show();
             stage.toFront();
             return;
         }
         QuizRunnerWindow runner = new QuizRunnerWindow(qupath);
+        runner.tourMode = tourMode;
         stage = runner.buildStage();
         stage.show();
     }
@@ -188,6 +241,20 @@ public class QuizRunnerWindow {
         promptLabel.setWrapText(true);
         promptLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
 
+        slideStatusLabel.setWrapText(true);
+        slideStatusLabel.setStyle("-fx-text-fill: #b3261e;");
+        setSlideStatus(null);
+
+        highlightToggle.setSelected(true);
+        highlightToggle.setOnAction(e -> {
+            if (highlightToggle.isSelected() && currentHighlightRoi != null)
+                showHighlightOverlay(currentHighlightRoi);
+            else
+                removeHighlightOverlay();
+        });
+        highlightToggle.setVisible(false);
+        highlightToggle.setManaged(false);
+
         inputArea.setPadding(new Insets(4, 0, 4, 0));
 
         revealAnswerLabel.setWrapText(true);
@@ -197,14 +264,18 @@ public class QuizRunnerWindow {
         revealArea.setPadding(new Insets(8, 0, 0, 0));
         setRevealVisible(false);
 
-        VBox center = new VBox(10, promptLabel, inputArea, revealArea);
+        VBox center = new VBox(10, promptLabel, slideStatusLabel, highlightToggle, inputArea, revealArea);
         center.setPadding(new Insets(12));
 
         prevBtn.setOnAction(e -> goPrev());
         revealBtn.setOnAction(e -> revealAnswer());
         nextBtn.setOnAction(e -> goNext());
         // Nothing loaded yet — Önceki/Göster/Sonraki start disabled; loadBtn stays enabled.
-        prevBtn.setDisable(true);
+        // prevBtn goes through updatePrevEnabled() rather than a bare setDisable(true): with
+        // currentIndex==0 and quiz==null at this point, currentIndex <= 1 is already true, so the
+        // result is identical to the old hardcoded true -- routing it through the same helper used
+        // everywhere else prevBtn's state changes just avoids a second, divergent copy of the rule.
+        updatePrevEnabled();
         revealBtn.setDisable(true);
         nextBtn.setDisable(true);
 
@@ -293,9 +364,10 @@ public class QuizRunnerWindow {
         annotationBaselineViewer = null;
         annotationBaselineImageData = null;
 
-        progressLabel.setText("Soru " + currentIndex + " / " + n);
+        progressLabel.setText((tourMode ? "Durak " : "Soru ") + currentIndex + " / " + n);
         promptLabel.setText(q.getPrompt());
         setRevealVisible(false);
+        setSlideStatus(null);
         buildInput(q);
         applySlide(q);
     }
@@ -335,6 +407,9 @@ public class QuizRunnerWindow {
                 label.setWrapText(true);
                 inputArea.getChildren().add(label);
             }
+            case NARRATION -> {
+                // Caption-only stop: promptLabel already shows q.getPrompt(); no answer widget.
+            }
         }
     }
 
@@ -348,7 +423,7 @@ public class QuizRunnerWindow {
         // Captured before any early return, so every applySlide call -- including one that turns
         // out not to need a reload at all -- advances the token; the only thing that matters is
         // that a load actually started under an OLDER token stops being "wanted" once a newer one
-        // has been issued (see the stillWanted supplier passed to openAsync below).
+        // has been issued (see the stillWanted supplier passed to openSlideAsync below).
         final int myToken = ++loadToken;
 
         String current = QuizSlide.currentSlideUrl(qupath.getViewer());
@@ -379,7 +454,11 @@ public class QuizRunnerWindow {
         opening = true;
         progress.setVisible(true);
         setControlsDisabled(true);
-        QuizSlide.openAsync(qupath, q.getSlideUrl(),
+        // openSlideAsync (rather than openAsync directly) dispatches by URL kind: an atlas .dzi
+        // URL still streams through the unchanged openAsync path below it; any other URI (a local
+        // tour slide) is built via QuPath's standard ImageServers.buildServer instead. Same
+        // onDone/onError/stillWanted contract either way, so nothing else here needs to change.
+        QuizSlide.openSlideAsync(qupath, q.getSlideUrl(),
                 () -> {
                     opening = false;
                     progress.setVisible(false);
@@ -390,6 +469,13 @@ public class QuizRunnerWindow {
                     opening = false;
                     progress.setVisible(false);
                     setControlsDisabled(false);
+                    // Graceful-missing: beyond the existing alert, leave a persistent note in the
+                    // prompt/status area (cleared on the next showQuestion) and make sure navigation
+                    // is left usable (setControlsDisabled(false) above already re-enables Sonraki/
+                    // Göster/Sınav yükle…, and Önceki per updatePrevEnabled()) so a learner whose
+                    // tour references a slide they don't have can still step past it.
+                    String title = q.getSlideTitle();
+                    setSlideStatus("Slayt açılamadı: " + (title == null ? "" : title));
                     Alert alert = new Alert(Alert.AlertType.ERROR,
                             "Slayt açılamadı:\n\n" + ex.getMessage());
                     if (stage != null)
@@ -414,7 +500,7 @@ public class QuizRunnerWindow {
 
     /**
      * Called once {@code q}'s slide is confirmed showing in the viewer (either immediately, if it
-     * was already open, or from {@link QuizSlide#openAsync}'s {@code onDone} callback) -- i.e.
+     * was already open, or from {@link QuizSlide#openSlideAsync}'s {@code onDone} callback) -- i.e.
      * exactly the point at which the hierarchy underneath the viewer reflects {@code q}'s slide.
      * Applies the question's {@link QuizQuestion.Viewport}, if any, and -- for ANNOTATION/NAVIGATION
      * questions, the two types the learner can draw on -- pins {@link #annotationBaselineViewer}/
@@ -423,6 +509,10 @@ public class QuizRunnerWindow {
      * {@link #annotationBaselineValid}), so {@link #clearTransientAnnotations()} can later tell
      * which ones the learner added while answering -- against the *pinned* viewer/slide, not
      * whatever {@code qupath.getViewer()} happens to return at that later point.
+     * <p>
+     * Also applies {@code q}'s optional per-stop {@link QuizQuestion#getHighlightGeoJson()}, if
+     * any: parses it once (via {@link #parseGeometrySafely}) and shows it via
+     * {@link #showHighlightOverlay}, independent of "Göster" -- see {@link #highlightToggle}.
      */
     private void afterSlideReady(QuizQuestion q) {
         QuPathViewer viewer = qupath.getViewer();
@@ -436,6 +526,19 @@ public class QuizRunnerWindow {
             annotationBaselineImageData = viewer.getImageData();
             annotationBaseline = currentAnnotations(viewer);
             annotationBaselineValid = true;
+        }
+
+        String highlightGeoJson = q.getHighlightGeoJson();
+        currentHighlightRoi = (highlightGeoJson == null || highlightGeoJson.isBlank())
+                ? null : parseGeometrySafely(highlightGeoJson);
+        boolean hasHighlight = currentHighlightRoi != null;
+        highlightToggle.setVisible(hasHighlight);
+        highlightToggle.setManaged(hasHighlight);
+        if (hasHighlight) {
+            highlightToggle.setSelected(true); // default-selected every time a stop shows one
+            showHighlightOverlay(currentHighlightRoi);
+        } else {
+            removeHighlightOverlay();
         }
     }
 
@@ -486,6 +589,7 @@ public class QuizRunnerWindow {
                     revealAnswerLabel.setText("Hedef geometri mevcut değil.");
                 }
             }
+            case NARRATION -> revealAnswerLabel.setText(""); // no "correct answer" line; explanation shown below
         }
         revealExplanationLabel.setText(q.getExplanation() == null ? "" : q.getExplanation());
         setRevealVisible(true);
@@ -549,6 +653,43 @@ public class QuizRunnerWindow {
         } finally {
             revealOverlay = null;
             revealOverlayViewer = null;
+        }
+    }
+
+    /**
+     * Add a {@link QuizRevealOverlay} for {@code roi} to the active viewer as the current stop's
+     * highlight, replacing any highlight overlay already showing. Kept entirely separate from
+     * {@link #revealOverlay}/{@link #showRevealOverlay(ROI)} -- the highlight is shown as soon as
+     * the stop's slide is ready (see {@link #afterSlideReady(QuizQuestion)}), independent of
+     * "Göster", so both can be on screen at once for a NAVIGATION/ANNOTATION stop that also carries
+     * a highlight.
+     */
+    private void showHighlightOverlay(ROI roi) {
+        QuPathViewer viewer = qupath.getViewer();
+        if (viewer == null)
+            return;
+        removeHighlightOverlay();
+        QuizRevealOverlay overlay = new QuizRevealOverlay(viewer.getOverlayOptions(), roi);
+        viewer.getCustomOverlayLayers().add(overlay);
+        highlightOverlay = overlay;
+        highlightOverlayViewer = viewer;
+        viewer.repaint();
+    }
+
+    /** Remove the currently-showing highlight overlay, if any, from the viewer it was added to. */
+    private void removeHighlightOverlay() {
+        if (highlightOverlay == null)
+            return;
+        try {
+            if (highlightOverlayViewer != null) {
+                highlightOverlayViewer.getCustomOverlayLayers().remove(highlightOverlay);
+                highlightOverlayViewer.repaint();
+            }
+        } catch (Exception ex) {
+            logger.debug("Could not remove quiz highlight overlay: {}", ex.getMessage());
+        } finally {
+            highlightOverlay = null;
+            highlightOverlayViewer = null;
         }
     }
 
@@ -617,9 +758,11 @@ public class QuizRunnerWindow {
     /**
      * Clean up whatever question was on screen before navigating away from it: remove the reveal
      * overlay (regardless of question type -- it is only ever non-null for a just-left
-     * ANNOTATION/NAVIGATION question, so this is always safe) and, for ANNOTATION/NAVIGATION
-     * questions specifically, clear the learner's transient answer annotations (see
-     * {@link #clearTransientAnnotations()}).
+     * ANNOTATION/NAVIGATION question, so this is always safe), remove the just-left stop's
+     * highlight overlay and hide {@link #highlightToggle} (same lifecycle, so a highlight can never
+     * leak into the next stop -- {@link #afterSlideReady(QuizQuestion)} decides afresh whether the
+     * next stop gets one), and, for ANNOTATION/NAVIGATION questions specifically, clear the
+     * learner's transient answer annotations (see {@link #clearTransientAnnotations()}).
      * <p>
      * Callers pass the quiz/index describing the question being left <em>explicitly</em>, evaluated
      * before any field reassignment, rather than reading {@link #quiz}/{@link #currentIndex} here --
@@ -631,6 +774,10 @@ public class QuizRunnerWindow {
         if (q == null || index < 1 || index > q.getQuestions().size())
             return;
         removeRevealOverlay();
+        removeHighlightOverlay();
+        currentHighlightRoi = null;
+        highlightToggle.setVisible(false);
+        highlightToggle.setManaged(false);
         QuizQuestion previous = q.getQuestions().get(index - 1);
         if (previous.getType() == QuizType.ANNOTATION || previous.getType() == QuizType.NAVIGATION)
             clearTransientAnnotations();
@@ -644,9 +791,14 @@ public class QuizRunnerWindow {
         return t == null ? null : (Integer) t.getUserData();
     }
 
-    /** "Önceki": no-op at question 1 (nothing changed to re-show); otherwise show i-1. */
+    /**
+     * "Önceki": no-op at question 1 (nothing changed to re-show); otherwise show i-1. The
+     * {@code !quiz.isAllowBack()} check is defense-in-depth -- prevBtn is already disabled
+     * whenever allowBack is false (see {@link #updatePrevEnabled()}), so this only matters if
+     * goPrev is ever reachable some other way in future.
+     */
     private void goPrev() {
-        if (quiz == null || opening)
+        if (quiz == null || opening || !quiz.isAllowBack())
             return;
         int target = Math.max(1, currentIndex - 1);
         if (target != currentIndex) {
@@ -674,11 +826,43 @@ public class QuizRunnerWindow {
         revealArea.setManaged(visible);
     }
 
-    /** Disable/enable "Sınav yükle…" + Önceki/Göster/Sonraki together, while a slide is loading. */
+    /**
+     * Show/hide {@link #slideStatusLabel}'s graceful-missing-slide note ({@code null} or blank
+     * hides it), following the same visible+managed pairing as {@link #setRevealVisible} so it
+     * takes no layout space when there is nothing to show.
+     */
+    private void setSlideStatus(String text) {
+        boolean has = text != null && !text.isBlank();
+        slideStatusLabel.setText(has ? text : "");
+        slideStatusLabel.setVisible(has);
+        slideStatusLabel.setManaged(has);
+    }
+
+    /**
+     * Disable/enable "Sınav yükle…" + Göster/Sonraki together, while a slide is loading. Önceki is
+     * handled separately, through {@link #updatePrevEnabled()}, so that re-enabling controls after
+     * a load still respects {@code allowBack}/"already at question 1" instead of unconditionally
+     * flipping Önceki back on.
+     */
     private void setControlsDisabled(boolean disabled) {
         loadBtn.setDisable(disabled);
-        prevBtn.setDisable(disabled);
         revealBtn.setDisable(disabled);
         nextBtn.setDisable(disabled);
+        if (disabled)
+            prevBtn.setDisable(true);
+        else
+            updatePrevEnabled();
+    }
+
+    /**
+     * Apply Önceki's enabled state: disabled at question 1 (nothing to go back to) or whenever the
+     * loaded quiz/tour sets {@link AtlasQuiz#isAllowBack()} to {@code false} (forward-only play) --
+     * regardless of index. Called from {@link #setControlsDisabled(boolean)} whenever controls are
+     * being re-enabled, and once from {@link #buildStage()} for the initial "nothing loaded yet"
+     * state (where {@code currentIndex == 0}, {@code quiz == null}, and {@code currentIndex <= 1}
+     * already holds).
+     */
+    private void updatePrevEnabled() {
+        prevBtn.setDisable(currentIndex <= 1 || (quiz != null && !quiz.isAllowBack()));
     }
 }
