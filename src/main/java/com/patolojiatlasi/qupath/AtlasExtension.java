@@ -60,9 +60,10 @@ public class AtlasExtension implements QuPathExtension {
             // This extension's atlas-specific actions live under one top-level "Patoloji Atlası"
             // menu, grouped into sub-menus, instead of being scattered flat among the other
             // extensions' items in Extensions. The atlas-independent research tools (focus
-            // heatmap / blinded recording, rotation, flag-any-project) live in a separate
-            // top-level "Araştırma" menu (sibling of this one) so they read as general tools that
-            // work on any slide, not just atlas ones.
+            // heatmap / blinded recording, flag-any-project) live in a separate top-level
+            // "Araştırma" menu (sibling of this one) so they read as general tools that work on any
+            // slide, not just atlas ones. Reorientation ("Görüntüyü döndür…") is promoted further,
+            // to its own top-level Extensions item (added at the end of installExtension).
             Menu atlas = new Menu("Patoloji Atlası");
 
             // Primary entry: browse & open atlas slides.
@@ -74,9 +75,9 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
             coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
 
-            // Research group — reorientation, the focus (dwell) heatmap sub-menu (which includes
-            // the blinded-record toggle), and flag-any-project, surfaced as a separate top-level
-            // "Araştırma" menu built further down. Atlas-independent: applies to any open slide.
+            // Reorientation — a general any-slide viewing tool, added as its own top-level
+            // Extensions item at the end of installExtension (not nested in the "Araştırma" menu,
+            // whose focus-heatmap sub-menu + flag-any-project are built further down).
             RotationControl rotation = new RotationControl(qupath);
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
             rotationItem.setOnAction(e -> rotation.show());
@@ -151,11 +152,13 @@ public class AtlasExtension implements QuPathExtension {
             Menu research = new Menu("Araştırma");
             research.getItems().addAll(
                     focusHeatmap.buildMenu(),
-                    rotationItem,
                     new SeparatorMenuItem(),
                     flagProjectItem);
 
-            qupath.getMenu("Extensions", true).getItems().addAll(atlas, research);
+            // "Görüntüyü döndür…" is promoted to its own top-level Extensions item (a sibling of the
+            // "Patoloji Atlası" and "Araştırma" menus) rather than nested inside Araştırma, so this
+            // general any-slide viewing tool is reachable in one click.
+            qupath.getMenu("Extensions", true).getItems().addAll(atlas, research, rotationItem);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
