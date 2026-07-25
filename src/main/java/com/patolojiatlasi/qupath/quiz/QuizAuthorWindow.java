@@ -213,6 +213,12 @@ public class QuizAuthorWindow {
     private void saveQuiz() {
         quiz.setTitle(titleField.getText());
         quiz.setDescription(descriptionField.getText());
+        // Stamp the current format version on save: a quiz opened from an older v1 file and then
+        // edited here (adding NARRATION/highlight/allowBack — v2-only) must be written as v2 so its
+        // on-disk tag reflects its content (a genuinely-old reader then correctly rejects it rather
+        // than mis-reading v2 content as v1). Done here, not in AtlasQuizIO.write, so writing an
+        // explicit out-of-range version (e.g. a test) is still preserved verbatim.
+        quiz.setFormatVersion(AtlasQuizIO.FORMAT_VERSION);
 
         try {
             AtlasQuizIO.validate(quiz);
