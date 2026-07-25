@@ -2964,11 +2964,10 @@ check_polish_nonnumeric_basemag_fixture <- function(tmp) {
   metrics <- analyze(list(in_dir), out_dir)  # must not raise
   stopifnot(nrow(metrics) == 1)
   stopifnot(metrics$magnificationSource[1] == "proxy-downsample")
-  # NOTE (pre-existing, not introduced by this fix): unlike the Python toolkit, which passes
-  # `baseMagnification` through to metrics.csv AS-IS (so a non-numeric value like "unknown"
-  # renders as that literal string), the R toolkit's row-building numerically coerces it
-  # (`suppressWarnings(as.numeric(base_mag))`) for the CSV passthrough column -- so a non-numeric
-  # baseMagnification renders as blank/NA in R's metrics.csv, not the original string. This is a
+  # Both toolkits render a non-numeric `baseMagnification` as blank: R numerically coerces it
+  # (`suppressWarnings(as.numeric(base_mag))` -> NA -> blank), and Python now guards the passthrough
+  # column to blank on a non-numeric value too (previously it passed the raw string through -- that
+  # Python-string vs R-blank divergence is now closed). This is a
   # cosmetic passthrough-column divergence only; it does not affect magnificationSource/bandScheme,
   # which both toolkits compute identically (see the cross-language parity check).
   stopifnot(

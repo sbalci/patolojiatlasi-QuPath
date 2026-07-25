@@ -2974,8 +2974,11 @@ def check_polish_nonnumeric_basemag_fixture(tmp):
     assert len(rows) == 1, len(rows)
     row = rows[0]
     assert row["magnificationSource"] == "proxy-downsample", row["magnificationSource"]
-    assert row["baseMagnification"] == "unknown", (
-        f"baseMagnification passthrough should be untouched (still the raw string), "
+    # A non-numeric baseMagnification renders BLANK, matching R's as.numeric()->NA->blank -- closing
+    # the prior Python-passthrough-string vs R-blank divergence (same non-numeric-field parity
+    # discipline already applied to confidence/promptShownMs/sessionId).
+    assert row["baseMagnification"] == "", (
+        f"non-numeric baseMagnification should render blank for R-parity, "
         f"got {row['baseMagnification']!r}"
     )
 

@@ -791,7 +791,12 @@ def analyze(
                 "linearity": "",
                 "searchFocusRatio": "",
                 # Passthrough fragment-level fields (schema/4+; blank for /1,/2,/3 which lack them).
-                "baseMagnification": base_mag if base_mag is not None else "",
+                # Blank unless a real number (never bool) -- a non-numeric baseMagnification (only
+                # possible in a hand-edited fragment) renders blank identically to R's as.numeric()->NA,
+                # matching the same non-numeric-field parity discipline used for confidence/promptShownMs.
+                "baseMagnification": (
+                    base_mag if isinstance(base_mag, (int, float)) and not isinstance(base_mag, bool) else ""
+                ),
                 "pathTruncated": f.get("pathTruncated", ""),
                 # Phase 2 annotation metrics: nAnnotations/annotatedAreaPx/dwellInAnnotationPct
                 # only need the grid + this session's own annotation mask (no path required), so
