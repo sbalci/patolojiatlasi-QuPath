@@ -741,6 +741,223 @@ def build_roi_seglin_fragment():
     }
 
 
+MAGBAND_AGREEMENT_SLIDE_KEY = "sha256:selftest-slide-magband-agreement-0001"
+#: PT4 fixture (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): 2 schema/4 sessions
+#: with a BYTE-IDENTICAL 6-element (t,cx,cy,w,h,dsMilli) path and the SAME known
+#: ``baseMagnification`` (40.0) -- their per-band dwell rasters are therefore identical arrays, the
+#: same "hand-verifiable CC=1.0" design PT2's ``build_mouse_icc_fixture`` uses.
+#:
+#: Own small custom grid/image dims (gw=gh=4, img_w=img_h=400 -> cell = 100x100 image px), per the
+#: C6-fixture convention. 3-point path (t, cx, cy, w, h, dsMilli):
+#:   p0=(0,    50,50, 100,100, 8000) -> step0: true_mag = 40/(8000/1000) = 5.0  -> band index 3
+#:     ("4-10x", MAG_BAND_CUTS=[1,2,4,10,20,40], searchsorted(...,5.0,'right')==3). Viewport rect
+#:     (cx=50,cy=50,w=h=100) -> image px [0,100]x[0,100] -> native cell(0,0) EXACTLY.
+#:   p1=(1000, 50,50, 100,100, 2000) -> step1: true_mag = 40/(2000/1000) = 20.0 -> band index 5
+#:     ("20-40x", searchsorted(...,20.0,'right')==5 -- 20.0 equals cuts[4] exactly, side="right"
+#:     places it just after). Same viewport position -> native cell(0,0) again.
+#:   p2=(2000, 50,50, 100,100, 2000) -> endpoint (no owned step).
+#:
+#: raster_from_path(step_mask=step0)  -> dt=1000ms at native cell(0,0), 0 elsewhere (15 zero cells).
+#: raster_from_path(step_mask=step1)  -> dt=1000ms at native cell(0,0), 0 elsewhere (identical shape).
+#: Native gw=gh=4 == this slide's common (tw,th) (both sessions share the same grid dims), so
+#: resample_nn is a no-op identity copy.
+#:
+#: Both sessions' path/baseMagnification are BYTE-IDENTICAL -> for EACH band, session1's resampled
+#: raster == session2's resampled raster exactly (nonzero variance: one cell=1000.0, rest 0.0) ->
+#: cc(g,g) == 1.0 EXACTLY (Pearson correlation of a non-constant vector against an identical copy).
+#: mean_pairwise_cc([g,g]) == cc(g,g) == 1.0. coincidence_level([g,g], IOU_THRESH=0.1):
+#: normalise_max(g) is identical for both -> counts==2 at cell(0,0) (the only cell >0.1*max),
+#: 0 elsewhere -> visited=1, count(counts>=2)=1 -> coincidenceLevel == 1.0 EXACTLY.
+#:
+#: Expected magband_agreement_<slug>.csv: exactly 2 rows, band ascending --
+#:   ("4-10x", nSessions=2, meanPairwiseCC=1.0, coincidenceLevel=1.0)
+#:   ("20-40x", nSessions=2, meanPairwiseCC=1.0, coincidenceLevel=1.0)
+#: (verified against the actual implementation before this fixture was written; see
+#: docs/superpowers/sdd/pt4-report.md).
+def build_magband_agreement_fixture():
+    mba_gw = mba_gh = 4
+    mba_img_w = mba_img_h = 400
+    grid = [0.0] * 16  # the recorded dwell grid is unrelated to this fixture's PT4 metric
+    path = [
+        [0, 50, 50, 100, 100, 8000],
+        [1000, 50, 50, 100, 100, 2000],
+        [2000, 50, 50, 100, 100, 2000],
+    ]
+
+    def _frag(session_id):
+        return {
+            "schema": "atlas-focus-contribution/4",
+            "slideKey": MAGBAND_AGREEMENT_SLIDE_KEY,
+            "sessionId": session_id,
+            "imageWidth": mba_img_w, "imageHeight": mba_img_h,
+            "gridWidth": mba_gw, "gridHeight": mba_gh,
+            "grid": list(grid),
+            "durationMs": 2000,
+            "sampleCount": 3,
+            "date": "2026-07-25",
+            "path": [list(p) for p in path],
+            "baseMagnification": 40.0,
+        }
+
+    return [_frag("mba1"), _frag("mba2")]
+
+
+MAGBAND_AGREEMENT_FRAC_SLIDE_KEY = "sha256:selftest-slide-magband-agreement-frac-0001"
+#: PT4 parity-robustness fixture (per advisor review): 3 schema/4 sessions on ONE slide with a
+#: FRACTIONAL (non-1.0/non-0.0) meanPairwiseCC, AND a native grid resolution that differs from the
+#: slide's common (tw, th) grid for 2 of the 3 sessions -- so resample_nn's nearest-neighbour
+#: UPSAMPLE path is actually exercised (unlike build_magband_agreement_fixture's 4x4==4x4 identity
+#: no-op), and the "has any dwell in this band" check runs on the POST-resample grid, not the
+#: native one.
+#:
+#: mbaf1, mbaf2: native gw=gh=4, img_w=img_h=400 (cell=100px). mbaf3: native gw=gh=8, img_w=img_h=400
+#: (cell=50px) -- the LARGEST native grid on this slide, so _target_grid_dims picks (tw,th)=(8,8)
+#: and mbaf1/mbaf2's native (4,4) grids get NN-upsampled (each native cell's value is COPIED,
+#: unscaled, into a 2x2 block of the 8x8 target -- resample_nn's documented nearest-neighbour
+#: semantics, confirmed via `ys=[0,0,1,1,2,2,3,3]`-style index mapping).
+#:
+#: All 3 share baseMagnification=40.0 and the SAME 2-band ds schedule (8000ms -> "4-10x" band
+#: index3; 2000ms -> "20-40x" band index5; see build_magband_agreement_fixture's derivation), each
+#: session dwelling at its OWN distinct image position (so the 3 post-resample rasters have
+#: DISJOINT nonzero support at the (8,8) resolution -- a deliberately "readers look at different
+#: places" scenario, the opposite end of the spectrum from the identical-dwell fixture above):
+#:   mbaf1 dwells at native (4,4) cell(0,0) (cx=cy=50, w=h=100) -> upsampled to (8,8) rows{0,1} x
+#:     cols{0,1} (flat idx {0,1,8,9}), value=1000.0 (=dt) at all 4 cells (COPIED, not divided).
+#:   mbaf2 dwells at native (4,4) cell(0,1) (cx=150,cy=50, w=h=100) -> upsampled to (8,8) rows{0,1}
+#:     x cols{2,3} (flat idx {2,3,10,11}), value=1000.0 at all 4 cells.
+#:   mbaf3 dwells at native (8,8) cell(4,4) directly (cx=cy=225, w=h=50, no resampling needed since
+#:     its native grid already equals (tw,th)) -> flat idx {36}, value=1000.0.
+#:
+#: Hand-derived (raw Pearson-correlation formula, verified independently of blinded_focus.metrics.cc
+#: before this fixture was written; N=64 cells each):
+#:   cc(mbaf1, mbaf2) == -1/15 == -0.06666666666666667 EXACTLY (disjoint 4-cell/4-cell supports,
+#:     equal values -- symmetric raw-score formula: numerator=64*0-4000*4000=-16e6,
+#:     denom=sqrt(240e6*240e6)=240e6 -> -16e6/240e6 == -1/15).
+#:   cc(mbaf1, mbaf3) == cc(mbaf2, mbaf3) == -0.03253000243161777 (disjoint 4-cell/1-cell supports;
+#:     numerator=64*0-4000*1000=-4e6, denom=sqrt(240e6*63e6)).
+#:   meanPairwiseCC == mean(-0.06666666666666667, -0.03253000243161777, -0.03253000243161777)
+#:                  == -0.0439088905099674 (both bands identical value, since every session uses
+#:                  the SAME dwell position for both step0/step1 -- only the ds/band differs).
+#:   coincidenceLevel == 0.0 EXACTLY: normalise_max of each grid is 1.0 only at its own disjoint
+#:     support (0 elsewhere) -> no cell is ever >IOU_THRESH in 2+ grids -> count(counts>=2)==0.
+def build_magband_agreement_frac_fixture():
+    img_w = img_h = 400
+    ds_schedule = [8000, 2000, 2000]  # step0 -> "4-10x" (idx3), step1 -> "20-40x" (idx5)
+
+    def _path_at(cx, cy, w, h):
+        return [
+            [0, cx, cy, w, h, ds_schedule[0]],
+            [1000, cx, cy, w, h, ds_schedule[1]],
+            [2000, cx, cy, w, h, ds_schedule[2]],
+        ]
+
+    f1 = {
+        "schema": "atlas-focus-contribution/4",
+        "slideKey": MAGBAND_AGREEMENT_FRAC_SLIDE_KEY,
+        "sessionId": "mbaf1",
+        "imageWidth": img_w, "imageHeight": img_h,
+        "gridWidth": 4, "gridHeight": 4,
+        "grid": [0.0] * 16,
+        "durationMs": 2000,
+        "sampleCount": 3,
+        "date": "2026-07-25",
+        "path": _path_at(50, 50, 100, 100),   # native cell(0,0)
+        "baseMagnification": 40.0,
+    }
+    f2 = {
+        "schema": "atlas-focus-contribution/4",
+        "slideKey": MAGBAND_AGREEMENT_FRAC_SLIDE_KEY,
+        "sessionId": "mbaf2",
+        "imageWidth": img_w, "imageHeight": img_h,
+        "gridWidth": 4, "gridHeight": 4,
+        "grid": [0.0] * 16,
+        "durationMs": 2000,
+        "sampleCount": 3,
+        "date": "2026-07-25",
+        "path": _path_at(150, 50, 100, 100),  # native cell(0,1)
+        "baseMagnification": 40.0,
+    }
+    f3 = {
+        "schema": "atlas-focus-contribution/4",
+        "slideKey": MAGBAND_AGREEMENT_FRAC_SLIDE_KEY,
+        "sessionId": "mbaf3",
+        "imageWidth": img_w, "imageHeight": img_h,
+        "gridWidth": 8, "gridHeight": 8,
+        "grid": [0.0] * 64,
+        "durationMs": 2000,
+        "sampleCount": 3,
+        "date": "2026-07-25",
+        "path": _path_at(225, 225, 50, 50),   # native (8,8) cell(4,4) directly
+        "baseMagnification": 40.0,
+    }
+    return [f1, f2, f3]
+
+
+MAGBAND_AGREEMENT_PARTIAL_SLIDE_KEY = "sha256:selftest-slide-magband-agreement-partial-0001"
+#: PT4 row-skip fixture (per advisor review): the spec's hard-constraints list explicitly names "a
+#: band with only 1 dwelling session (row skipped)" as a blank-not-crash case -- neither
+#: :func:`build_magband_agreement_fixture` nor :func:`build_magband_agreement_frac_fixture` above
+#: exercises it (every canonical session in both dwells in BOTH bands). This fixture is built so
+#: exactly ONE band has 2 dwelling sessions (row emitted) and the OTHER has only 1 (row skipped) --
+#: the ``if len(grids_b) < 2: continue`` branch fires for real, not just vacuously.
+#:
+#: 2 schema/4 sessions, same small custom grid dims as :func:`build_magband_agreement_fixture`
+#: (gw=gh=4, img_w=img_h=400), same baseMagnification=40.0, same dwell position (native cell(0,0),
+#: cx=cy=50, w=h=100) so the shared band's per-session rasters are identical (hand-derivable
+#: CC=1.0/coincidence=1.0, same argument as the trivial fixture):
+#:   mbap1: 3-point path, 2 steps -- p0=(0,50,50,100,100,8000) [step0 -> band3 "4-10x"],
+#:     p1=(1000,50,50,100,100,2000) [step1 -> band5 "20-40x"], p2=(2000,...) endpoint. Dwells in
+#:     BOTH bands.
+#:   mbap2: 2-point path, 1 step ONLY -- p0=(0,50,50,100,100,8000) [step0 -> band3 "4-10x" ONLY],
+#:     p1=(1000,50,50,100,100,8000) endpoint. Dwells ONLY in band3 -- canonical_mag_band_labels
+#:     returns a single-element list [3] (a 2-point path has exactly 1 step).
+#:
+#: band index3 ("4-10x"): grids = [mbap1's band3 raster, mbap2's band3 raster], both = cell(0,0)
+#:   dwell dt=1000ms, rest 0 -- IDENTICAL -> nSessions=2, meanPairwiseCC=1.0, coincidenceLevel=1.0
+#:   (row EMITTED).
+#: band index5 ("20-40x"): only mbap1 dwells there -> grids list length 1 < 2 -> row SKIPPED.
+#: n_canonical_sessions = 2 (both mbap1/mbap2 are canonical-scheme) -> file-level gate passes ->
+#: file IS written, but with exactly 1 row.
+def build_magband_agreement_partial_fixture():
+    gw = gh = 4
+    img_w = img_h = 400
+    grid = [0.0] * 16
+    f1 = {
+        "schema": "atlas-focus-contribution/4",
+        "slideKey": MAGBAND_AGREEMENT_PARTIAL_SLIDE_KEY,
+        "sessionId": "mbap1",
+        "imageWidth": img_w, "imageHeight": img_h,
+        "gridWidth": gw, "gridHeight": gh,
+        "grid": list(grid),
+        "durationMs": 2000,
+        "sampleCount": 3,
+        "date": "2026-07-25",
+        "path": [
+            [0, 50, 50, 100, 100, 8000],
+            [1000, 50, 50, 100, 100, 2000],
+            [2000, 50, 50, 100, 100, 2000],
+        ],
+        "baseMagnification": 40.0,
+    }
+    f2 = {
+        "schema": "atlas-focus-contribution/4",
+        "slideKey": MAGBAND_AGREEMENT_PARTIAL_SLIDE_KEY,
+        "sessionId": "mbap2",
+        "imageWidth": img_w, "imageHeight": img_h,
+        "gridWidth": gw, "gridHeight": gh,
+        "grid": list(grid),
+        "durationMs": 1000,
+        "sampleCount": 2,
+        "date": "2026-07-25",
+        "path": [
+            [0, 50, 50, 100, 100, 8000],
+            [1000, 50, 50, 100, 100, 8000],
+        ],
+        "baseMagnification": 40.0,
+    }
+    return [f1, f2]
+
+
 C6_SLIDE_KEY = "sha256:selftest-slide-c6-0001"
 #: Tier 3 C6 fixture: its own small custom grid/image dims (GW=GH=4, IMG_W=IMG_H=400 -> cell =
 #: 100x100 image px), deliberately NOT the shared module GW/GH/IMG_W/IMG_H (8/8/2000/1500) --
@@ -2182,6 +2399,131 @@ def check_pt3_roi_seglin_fixture(tmp):
     assert not pd.isna(row["meanSegmentLinearity"]), "meanSegmentLinearity should still be populated"
 
 
+def check_pt4_magband_agreement_fixture(tmp):
+    """PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4) pipeline-level check: runs
+    :func:`build_magband_agreement_fixture` (2 sessions, BYTE-IDENTICAL path/baseMagnification)
+    through the full ``analyze()`` pipeline and asserts ``magband_agreement_<slug>.csv`` has
+    exactly the 2 expected bands, ascending, each with the hand-derived exact
+    ``meanPairwiseCC == 1.0`` / ``coincidenceLevel == 1.0`` (identical per-band dwell grids)."""
+    fragments = build_magband_agreement_fixture()
+    in_dir = os.path.join(tmp, "in_magband_agreement")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    out_dir = os.path.join(tmp, "out_magband_agreement")
+    analyze([in_dir], out_dir)
+
+    files = [f for f in os.listdir(out_dir) if f.startswith("magband_agreement_")]
+    assert len(files) == 1, files
+    df = pd.read_csv(os.path.join(out_dir, files[0]))
+    assert list(df.columns) == ["band", "nSessions", "meanPairwiseCC", "coincidenceLevel"], (
+        df.columns.tolist()
+    )
+    assert list(df["band"]) == ["4-10x", "20-40x"], (
+        f"expected exactly bands ['4-10x', '20-40x'] in ascending-magnification order, got "
+        f"{list(df['band'])}"
+    )
+    for _, r in df.iterrows():
+        assert int(r["nSessions"]) == 2, r
+        assert abs(r["meanPairwiseCC"] - 1.0) < 1e-9, (
+            f"expected meanPairwiseCC == 1.0 (identical per-band dwell grids), got {r['meanPairwiseCC']}"
+        )
+        assert abs(r["coincidenceLevel"] - 1.0) < 1e-9, (
+            f"expected coincidenceLevel == 1.0, got {r['coincidenceLevel']}"
+        )
+
+
+def check_pt4_magband_agreement_frac_fixture(tmp):
+    """PT4 parity-robustness check (per advisor review): runs
+    :func:`build_magband_agreement_frac_fixture` (3 sessions, disjoint per-session dwell positions,
+    2 of 3 native grids resampled up to the slide's common (8,8) grid) through the full
+    ``analyze()`` pipeline and asserts the hand-derived FRACTIONAL ``meanPairwiseCC`` (not 1.0, not
+    0.0) and the exact ``coincidenceLevel == 0.0`` (disjoint supports -- no cell is ever shared by
+    >=2 readers)."""
+    fragments = build_magband_agreement_frac_fixture()
+    in_dir = os.path.join(tmp, "in_magband_agreement_frac")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    out_dir = os.path.join(tmp, "out_magband_agreement_frac")
+    analyze([in_dir], out_dir)
+
+    files = [f for f in os.listdir(out_dir) if f.startswith("magband_agreement_")]
+    assert len(files) == 1, files
+    df = pd.read_csv(os.path.join(out_dir, files[0]))
+    assert list(df["band"]) == ["4-10x", "20-40x"], list(df["band"])
+    for _, r in df.iterrows():
+        assert int(r["nSessions"]) == 3, r
+        assert abs(r["meanPairwiseCC"] - (-0.0439088905099674)) < 1e-9, (
+            f"expected meanPairwiseCC == -0.0439088905099674 (hand-derived disjoint-support "
+            f"Pearson correlation across 3 sessions), got {r['meanPairwiseCC']}"
+        )
+        # Bite check (per advisor review): a regression that collapsed disjoint-support grids to a
+        # degenerate 1.0/0.0 value must be caught, not silently pass a loose bounds check.
+        assert abs(r["meanPairwiseCC"] - 1.0) > 1e-6, "meanPairwiseCC must not degenerate to 1.0"
+        assert abs(r["meanPairwiseCC"]) > 1e-6, "meanPairwiseCC must not degenerate to 0.0"
+        assert abs(r["coincidenceLevel"] - 0.0) < 1e-9, (
+            f"expected coincidenceLevel == 0.0 (disjoint per-session dwell, no shared cell), "
+            f"got {r['coincidenceLevel']}"
+        )
+
+
+def check_pt4_tercile_scheme_no_file(tmp):
+    """PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): running
+    :func:`build_magband_agreement_fixture` (2 sessions that WOULD be canonical-scheme by default,
+    see :func:`check_pt4_magband_agreement_fixture`) under ``--magband-scheme tercile`` must yield
+    NO ``magband_agreement_<slug>.csv`` at all -- every session's ``scheme_used`` becomes
+    ``"tercile"`` under the forced CLI flag, so ``n_canonical_sessions == 0 < 2`` and the file-level
+    gate fails, exactly like the null-``baseMagnification`` case."""
+    fragments = build_magband_agreement_fixture()
+    in_dir = os.path.join(tmp, "in_magband_agreement_tercile")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    out_dir = os.path.join(tmp, "out_magband_agreement_tercile")
+    analyze([in_dir], out_dir, magband_scheme="tercile")
+
+    assert not [f for f in os.listdir(out_dir) if f.startswith("magband_agreement_")], (
+        "magband_agreement_<slug>.csv should NOT be written under --magband-scheme tercile, even "
+        "when >=2 sessions would otherwise qualify for the canonical scheme"
+    )
+    # Sanity: the pre-existing magbands_<slug>.csv IS still written (untouched by this new gate),
+    # forced to tercile for both sessions.
+    magband_files = [f for f in os.listdir(out_dir) if f.startswith("magbands_")]
+    assert len(magband_files) == 1, magband_files
+    magbands = pd.read_csv(os.path.join(out_dir, magband_files[0]))
+    assert (magbands["bandScheme"] == "tercile").all(), (
+        "--magband-scheme tercile should force tercile for every session"
+    )
+
+
+def check_pt4_magband_agreement_partial_fixture(tmp):
+    """PT4 row-skip check (per advisor review -- the hard-constraints list explicitly names "a band
+    with only 1 dwelling session (row skipped)" as a blank-not-crash case): runs
+    :func:`build_magband_agreement_partial_fixture` (2 sessions, one dwelling in both canonical
+    bands, the other in only one) through the full ``analyze()`` pipeline and asserts
+    ``magband_agreement_<slug>.csv`` has EXACTLY 1 row (``"4-10x"``, the shared band) -- the
+    ``"20-40x"`` band, dwelled on by only 1 session, must be silently dropped, not emitted as a row
+    of NaNs."""
+    fragments = build_magband_agreement_partial_fixture()
+    in_dir = os.path.join(tmp, "in_magband_agreement_partial")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    out_dir = os.path.join(tmp, "out_magband_agreement_partial")
+    analyze([in_dir], out_dir)
+
+    files = [f for f in os.listdir(out_dir) if f.startswith("magband_agreement_")]
+    assert len(files) == 1, files
+    df = pd.read_csv(os.path.join(out_dir, files[0]))
+    assert list(df["band"]) == ["4-10x"], (
+        f"expected exactly 1 row (band '4-10x'; '20-40x' has only 1 dwelling session and must be "
+        f"dropped), got {list(df['band'])}"
+    )
+    row = df.iloc[0]
+    assert int(row["nSessions"]) == 2, row
+    assert abs(row["meanPairwiseCC"] - 1.0) < 1e-9, (
+        f"expected meanPairwiseCC == 1.0 (identical per-band dwell grids), got {row['meanPairwiseCC']}"
+    )
+    assert abs(row["coincidenceLevel"] - 1.0) < 1e-9, row["coincidenceLevel"]
+
+
 def check_tier6_direct_unit_asserts():
     """Direct, pipeline-independent unit checks for the new Tier 3 C6 functions (``js_divergence``,
     ``top_k_frac_mask``/``precision_recall_at_topk``, ``visit_count_grid``/``visit_count_jaccard``,
@@ -2907,6 +3249,15 @@ def run():
                     f"{PRE_T2_MAGBANDS[key]}, got {r['bandTimeMs']}"
                 )
 
+        # --- PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): no
+        # magband_agreement_<slug>.csv on THIS slide -- only s1 is canonical-scheme (s2/s4 fall
+        # back to tercile, per the magbands assert above), so n_canonical_sessions == 1 < 2 -> the
+        # file-level gate fails and the file must not exist at all (not header-only). ---
+        assert not [f for f in os.listdir(out_dir) if f.startswith("magband_agreement_")], (
+            "magband_agreement_<slug>.csv should NOT be written when fewer than 2 sessions use "
+            "the canonical magnification-band scheme (this slide has only 1: s1)"
+        )
+
         # --- hotspots_<slug>.csv (Tier 1 A5): written for every session (grid always present),
         # rank ascending + dwellMs descending within each session ---
         hotspot_files = [f for f in os.listdir(out_dir) if f.startswith("hotspots_")]
@@ -3572,6 +3923,13 @@ def run():
         # linearity ---
         check_pt3_direct_unit_asserts()
         check_pt3_roi_seglin_fixture(tmp)
+
+        # --- PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): per-magnification-
+        # band cross-reader agreement ---
+        check_pt4_magband_agreement_fixture(tmp)
+        check_pt4_magband_agreement_frac_fixture(tmp)
+        check_pt4_magband_agreement_partial_fixture(tmp)
+        check_pt4_tercile_scheme_no_file(tmp)
 
         print("OK: all selftest assertions passed")
     finally:

@@ -106,7 +106,24 @@ Output files (written to ``--out DIR``):
   own point-based mouse-dwell grid (resampled to the slide's common grid; a session without mouse
   data contributes an all-zero grid, same convention ``annotations_<slug>.csv`` uses for a
   session with no annotations), plus a slide-level ``coincidenceLevel`` (same diagonal-reuse
-  convention as ``compare_<slug>.csv``/``annotations_<slug>.csv``).
+  convention as ``compare_<slug>.csv``/``annotations_<slug>.csv``) and (PT2,
+  docs/superpowers/specs/2026-07-25-enrichment-polish.md P2) ``mouseICC`` — ICC(2,1) over only the
+  sessions that actually carry mouse data (a filtered population, unlike ``cc``/``iou``/
+  ``coincidenceLevel`` above, which include every session for CSV matrix completeness), placed on
+  the same diagonal-reuse row.
+- per slide, when >=2 sessions have a computable **canonical** magnification band scheme (PT4,
+  docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): ``magband_agreement_<slug>.csv`` —
+  answers "do readers agree more at overview vs cell power" (Chakraborty). One row per canonical
+  magnification band (:data:`blinded_focus.metrics.MAG_BAND_LABELS`, ascending magnification):
+  ``band``, ``nSessions``, ``meanPairwiseCC``, ``coincidenceLevel`` — each session's dwell-time
+  raster is restricted to the steps assigned to that band (reusing
+  :func:`blinded_focus.metrics.raster_from_path`'s ``step_mask``, idle-excluded automatically),
+  resampled to the slide's common grid, then compared with the same
+  :func:`blinded_focus.metrics.mean_pairwise_cc`/:func:`blinded_focus.metrics.coincidence_level`
+  ``compare_<slug>.csv`` uses. A band is emitted only when >=2 sessions actually dwelled in it.
+  Skipped entirely (no file) when fewer than 2 sessions on the slide use the canonical scheme --
+  i.e. under ``--magband-scheme tercile`` or when fewer than 2 sessions have a computable
+  ``baseMagnification``/``dsMilli`` (both collapse to "0 or 1 canonical-scheme sessions").
 - (Phase 3) ``decisions.csv`` — one row per (slide, session) with a hand-entered ``decision``
   object (``diagnosis``, ``confidence``, ``decisionMs``): ``slide``, ``sessionId`` (stable join
   key), ``session`` (display label), ``diagnosis``, ``confidence``, ``confidenceScaled``
@@ -1449,6 +1466,86 @@ def analyze(
                     os.path.join(out_dir, f"magbands_{slide_slug}.csv"),
                     magband_rows,
                     ["session", "band", "bandTimeMs", "bandTimePct", "bandScheme"],
+                )
+
+        # ------------------------------------------------------------------
+        # PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): per-magnification-band
+        # cross-reader agreement -- "do readers agree more at overview vs cell power" (Chakraborty).
+        # For each of the 7 canonical magnification bands (:data:`blinded_focus.metrics.MAG_BAND_LABELS`),
+        # build every CANONICAL-scheme session's own dwell-time-restricted raster for that band
+        # (reusing raster_from_path's step_mask mechanism -- idle-excluded automatically, same
+        # mechanism the magband_rows/figures blocks above already use), resample it to the slide's
+        # common (tw, th) grid (same resampler compare_<slug>.csv/mouse_<slug>.csv use), then
+        # mean_pairwise_cc/coincidence_level across the sessions that actually dwelled in that band.
+        #
+        # "Canonical-scheme session" is determined by RE-DERIVING (bands, scheme_used) via
+        # magband_labels_for_scheme -- the SAME per-step band assignment the magband_rows loop above
+        # already computes (recomputed here, not cached -- mirrors the fixations_<slug>.csv/
+        # meanSegmentLinearity recompute-don't-cache convention elsewhere in this module) -- rather
+        # than calling canonical_mag_band_labels directly, so that a slide run under
+        # ``--magband-scheme tercile`` transitively yields 0 canonical sessions (every session's
+        # scheme_used comes back "tercile") and the file is skipped, exactly like a session whose
+        # own baseMagnification/dsMilli are individually not computable (per-session tercile
+        # fallback) is excluded from this file's population -- the filtered-population approach
+        # PT2's mouseICC established for schema-gated sessions, not an all-or-nothing block.
+        #
+        # File-level gate: written iff >=2 sessions are canonical-scheme -- this single condition
+        # subsumes both "--magband-scheme tercile" (0 canonical sessions) and "null
+        # baseMagnification" (<2 canonical-capable sessions on this slide), both of which the spec
+        # says should skip the file entirely. "Has any dwell in this band" is checked on the
+        # POST-resample grid (consistent with what mean_pairwise_cc/coincidence_level actually
+        # consume) -- a session whose dwell in this band falls entirely into a grid cell dropped by
+        # nearest-neighbour resampling is (correctly) excluded from that band's row. Written
+        # (possibly with zero data rows, mirroring consensus_count_<slug>.csv's own "header-only is
+        # fine" convention) whenever the file-level gate passes, regardless of whether any
+        # individual band clears its own >=2-dwelling-sessions per-row threshold.
+        # ------------------------------------------------------------------
+        if scan_sids:
+            canonical_band_grids = {b: [] for b in range(CANONICAL_MAGBAND_COUNT)}
+            n_canonical_sessions = 0
+            for sid in scan_sids:
+                f = frag_by_sid[sid]
+                path = f["path"]
+                base_mag = f.get("baseMagnification")
+                img_w = f.get("imageWidth", 1)
+                img_h = f.get("imageHeight", 1)
+                bands, scheme_used = m.magband_labels_for_scheme(
+                    path, base_mag, img_w, magbands, magband_scheme,
+                )
+                if scheme_used != "canonical" or not bands:
+                    continue
+                n_canonical_sessions += 1
+                gw, gh = native_grid[sid][1], native_grid[sid][2]
+                bands_arr_pt4 = np.asarray(bands)
+                for band in range(CANONICAL_MAGBAND_COUNT):
+                    band_step_mask = (bands_arr_pt4 == band)
+                    if not band_step_mask.any():
+                        continue
+                    raster_b = m.raster_from_path(
+                        path, img_w, img_h, gw, gh, step_mask=band_step_mask,
+                    )
+                    if raster_b is None:
+                        continue
+                    resampled_b = m.resample_nn(raster_b, gw, gh, tw, th)
+                    if not np.any(resampled_b > 0):
+                        continue
+                    canonical_band_grids[band].append(resampled_b)
+            if n_canonical_sessions >= 2:
+                magband_agreement_rows = []
+                for band in range(CANONICAL_MAGBAND_COUNT):
+                    grids_b = canonical_band_grids[band]
+                    if len(grids_b) < 2:
+                        continue
+                    magband_agreement_rows.append({
+                        "band": m.MAG_BAND_LABELS[band],
+                        "nSessions": len(grids_b),
+                        "meanPairwiseCC": m.mean_pairwise_cc(grids_b),
+                        "coincidenceLevel": m.coincidence_level(grids_b, IOU_THRESH),
+                    })
+                _write_csv(
+                    os.path.join(out_dir, f"magband_agreement_{slide_slug}.csv"),
+                    magband_agreement_rows,
+                    ["band", "nSessions", "meanPairwiseCC", "coincidenceLevel"],
                 )
 
         # ------------------------------------------------------------------

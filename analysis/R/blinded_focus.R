@@ -3942,6 +3942,83 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
+    # PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): per-magnification-band
+    # cross-reader agreement -- "do readers agree more at overview vs cell power" (Chakraborty).
+    # For each of the 7 canonical magnification bands (MAG_BAND_LABELS), build every
+    # CANONICAL-scheme session's own dwell-time-restricted raster for that band (reusing
+    # raster_from_path's step_mask mechanism -- idle-excluded automatically, same mechanism the
+    # magband_rows/figures blocks above already use), resample it to the slide's common (tw, th)
+    # grid (same resampler compare_<slug>.csv/mouse_<slug>.csv use), then
+    # mean_pairwise_cc/coincidence_level across the sessions that actually dwelled in that band.
+    #
+    # "Canonical-scheme session" is determined by RE-DERIVING (bands, scheme) via
+    # magband_labels_for_scheme -- the SAME per-step band assignment the magband_rows loop above
+    # already computes (recomputed here, not cached -- mirrors the recompute-don't-cache convention
+    # elsewhere in this module) -- rather than calling canonical_mag_band_labels directly, so that a
+    # slide run under `--magband-scheme tercile` transitively yields 0 canonical sessions (every
+    # session's scheme comes back "tercile") and the file is skipped, exactly like a session whose
+    # own baseMagnification/dsMilli are individually not computable (per-session tercile fallback)
+    # is excluded from this file's population -- the filtered-population approach PT2's mouseICC
+    # established for schema-gated sessions, not an all-or-nothing block.
+    #
+    # File-level gate: written iff >=2 sessions are canonical-scheme -- this single condition
+    # subsumes both "--magband-scheme tercile" (0 canonical sessions) and "null baseMagnification"
+    # (<2 canonical-capable sessions on this slide), both of which the spec says should skip the
+    # file entirely. "Has any dwell in this band" is checked on the POST-resample grid (consistent
+    # with what mean_pairwise_cc/coincidence_level actually consume) -- a session whose dwell in
+    # this band falls entirely into a grid cell dropped by nearest-neighbour resampling is
+    # (correctly) excluded from that band's row. Written (possibly with zero data rows, mirroring
+    # consensus_count_<slug>.csv's own "header-only is fine" convention) whenever the file-level
+    # gate passes, regardless of whether any individual band clears its own >=2-dwelling-sessions
+    # per-row threshold.
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      canonical_band_grids <- vector("list", CANONICAL_MAGBAND_COUNT)
+      for (band in 0:(CANONICAL_MAGBAND_COUNT - 1)) canonical_band_grids[[band + 1]] <- list()
+      n_canonical_sessions <- 0L
+      for (sid in scan_sids) {
+        f <- by_session[[sid]]
+        path <- f$path
+        base_mag <- f$baseMagnification
+        img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
+        img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
+        result_pt4 <- magband_labels_for_scheme(path, base_mag, img_w, magbands, magband_scheme)
+        bands_pt4 <- result_pt4$bands
+        scheme_used_pt4 <- result_pt4$scheme
+        if (!identical(scheme_used_pt4, "canonical") || length(bands_pt4) == 0) next
+        n_canonical_sessions <- n_canonical_sessions + 1L
+        ng <- native_grid[[sid]]
+        gw <- ng$gw; gh <- ng$gh
+        for (band in 0:(CANONICAL_MAGBAND_COUNT - 1)) {
+          band_step_mask <- (bands_pt4 == band)
+          if (!any(band_step_mask)) next
+          raster_b <- raster_from_path(path, img_w, img_h, gw, gh, step_mask = band_step_mask)
+          if (is.null(raster_b)) next
+          resampled_b <- resample_nn(raster_b, gw, gh, tw, th)
+          if (!any(resampled_b > 0)) next
+          canonical_band_grids[[band + 1]][[length(canonical_band_grids[[band + 1]]) + 1]] <- resampled_b
+        }
+      }
+      if (n_canonical_sessions >= 2) {
+        magband_agreement_rows <- list()
+        for (band in 0:(CANONICAL_MAGBAND_COUNT - 1)) {
+          grids_b <- canonical_band_grids[[band + 1]]
+          if (length(grids_b) < 2) next
+          magband_agreement_rows[[length(magband_agreement_rows) + 1]] <- list(
+            band = MAG_BAND_LABELS[band + 1],
+            nSessions = length(grids_b),
+            meanPairwiseCC = mean_pairwise_cc(grids_b),
+            coincidenceLevel = coincidence_level(grids_b, IOU_THRESH)
+          )
+        }
+        write_csv_tidy(
+          magband_agreement_rows, file.path(out_dir, paste0("magband_agreement_", slide_slug, ".csv")),
+          c("band", "nSessions", "meanPairwiseCC", "coincidenceLevel")
+        )
+      }
+    }
+
+    # ------------------------------------------------------------------
     # figures
     # ------------------------------------------------------------------
     if (make_figures) {
