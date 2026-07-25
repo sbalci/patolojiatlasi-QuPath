@@ -3291,7 +3291,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$activeSpanMs <- active_span_ms(path)
         row$avgZoomLog2W <- avg_zoom_log2_w(path, base_mag, img_w)
         row$drillingRateOctavesPerMin <- drilling_rate_octaves_per_min(path, base_mag, img_w)
-        row$magnificationSource <- if (!is.null(base_mag)) "true" else "proxy-downsample"
+        row$magnificationSource <- if (!is.null(base_mag) && !is.na(as.numeric(base_mag)) && as.numeric(base_mag) > 0) {
+          "true"
+        } else {
+          "proxy-downsample"
+        }
         # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
         # deterministic dispersion-threshold detector over the viewport centers. Computed once here
         # for metrics.csv's summary columns; the per-fixation fixations_<slug>.csv rows are built

@@ -70,6 +70,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from blinded_focus.analyze import analyze, rasterize_feature_collection, annotations_area_px  # noqa: E402
 from blinded_focus import io as bf_io  # noqa: E402
 from blinded_focus import metrics as bf_metrics  # noqa: E402
+from blinded_focus import analyze as bf_analyze  # noqa: E402 -- module alias for direct-unit access to private helpers (e.g. _calibration_stats)
 
 GW, GH = 8, 8
 IMG_W, IMG_H = 2000, 1500
@@ -2311,6 +2312,162 @@ def check_finalfix_idle_fixation_fixture(tmp):
     assert f2["nPoints"] == 2
 
 
+# ---------------------------------------------------------------------------
+# P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md): logged Minors
+# from the enrichment-cycle final review -- consensus_count_<slug>.csv only ever exercised at 2
+# sessions, meanDiff's n>=2-per-group guard only ever exercised at n=0 (avgZoom) and zero-variance
+# (dwellInAnnotationPct) -- never the n=1 boundary -- and the calibration summary
+# (calibrationGap/brierScore/confidenceAccuracyR) never independently value-asserted at all.
+# ---------------------------------------------------------------------------
+
+CONSENSUS3_SLIDE_KEY = "sha256:selftest-slide-consensus3-0001"
+#: consensus_count_<slug>.csv 3-SESSION fixture (the Tier 3 C6 fixture above only covers 2). A
+#: minimal 2x2 grid (gw=gh=2 for all 3 sessions -> _target_grid_dims picks (tw,th)=(2,2) too, so
+#: resampled==native -- no resample-interaction to reason about). Every session's cell(0,0) is its
+#: own per-session maximum (normalise_max -> 1.0 > HOTSPOT_THRESH_FRAC=0.5), so all 3 dwell on it;
+#: each session ALSO has one other cell at norm value 0.6 (> 0.5, clear of the strict-> boundary),
+#: unique to that session: d3a -> cell(0,1), d3b -> cell(1,0), d3c -> cell(1,1). Hand-derived
+#: nReaders: (0,0) -> 3 (every session), (0,1) -> 1 (d3a only), (1,0) -> 1 (d3b only), (1,1) -> 1
+#: (d3c only) -- exactly 4 rows.
+def build_consensus3_fixture():
+    grid_a = [100.0, 60.0, 0.0, 0.0]
+    grid_b = [100.0, 0.0, 60.0, 0.0]
+    grid_c = [100.0, 0.0, 0.0, 60.0]
+    return [
+        _finalfix_fragment("d3a", 2, grid_a, 2, 2, 200, 200, 3000, 5, slide_key=CONSENSUS3_SLIDE_KEY),
+        _finalfix_fragment("d3b", 2, grid_b, 2, 2, 200, 200, 3000, 5, slide_key=CONSENSUS3_SLIDE_KEY),
+        _finalfix_fragment("d3c", 2, grid_c, 2, 2, 200, 200, 3000, 5, slide_key=CONSENSUS3_SLIDE_KEY),
+    ]
+
+
+def check_consensus3_fixture(tmp):
+    """P1 selftest coverage gap: runs :func:`build_consensus3_fixture` (3 sessions, not just the
+    Tier 3 C6 fixture's 2) through the full ``analyze()`` pipeline and asserts
+    ``consensus_count_<slug>.csv``'s per-cell reader counts reach ``nReaders==3`` for the one cell
+    every session dwells on, plus the exact 4-row set (see the fixture's own docstring for the hand
+    derivation)."""
+    fragments = build_consensus3_fixture()
+    in_dir = os.path.join(tmp, "in_consensus3")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    out_dir = os.path.join(tmp, "out_consensus3")
+    analyze([in_dir], out_dir)
+
+    cc_files = [f for f in os.listdir(out_dir) if f.startswith("consensus_count_")]
+    assert len(cc_files) == 1, cc_files
+    cc = pd.read_csv(os.path.join(out_dir, cc_files[0]))
+    assert list(cc.columns) == ["cellRow", "cellCol", "nReaders"], cc.columns.tolist()
+    got = {(int(r.cellRow), int(r.cellCol)): int(r.nReaders) for _, r in cc.iterrows()}
+    assert got == {(0, 0): 3, (0, 1): 1, (1, 0): 1, (1, 1): 1}, got
+    assert got[(0, 0)] == 3, (
+        f"expected nReaders==3 for the cell all 3 sessions dwell on, got {got.get((0, 0))}"
+    )
+
+
+MEANDIFF_N1_SLIDE_KEY = "sha256:selftest-slide-meandiff-n1-0001"
+#: meanDiff n=1-per-group BOUNDARY fixture: 3 graded sessions on their own slide -- ONE graded
+#: correct=1 (n=1 in that group), TWO graded correct=0 (n=2). ``_nav_stat_row``'s meanDiff guard
+#: (analyze.py) requires ``len(correct_vals) >= 2 AND len(incorrect_vals) >= 2`` -- with only 1
+#: correct-group session this must render BLANK even though meanCorrect/meanIncorrect/medianCorrect/
+#: medianIncorrect (which only need >= 1 value each) stay populated. Uses ``coveragePct``
+#: (grid-only, always populated -- same metric ``check_nav_accuracy``'s existing n=3-per-group case
+#: uses) with hand-derivable coverage fractions on the module's GW=GH=8 (64-cell) grid:
+#: md1(correct=1)=56/64=87.5%, md2(correct=0)=6/64=9.375%, md3(correct=0)=8/64=12.5% ->
+#: meanCorrect=87.5 (n=1), meanIncorrect=(9.375+12.5)/2=10.9375 (n=2), medianCorrect=87.5,
+#: medianIncorrect=10.9375 (n=2 median == mean here).
+def build_meandiff_n1_fragments():
+    def _grid(n_nonzero, value=100.0):
+        g = [0.0] * (GW * GH)
+        for i in range(n_nonzero):
+            g[i] = value
+        return g
+
+    spec = [
+        ("md1", 56, 1),
+        ("md2", 6, 0),
+        ("md3", 8, 0),
+    ]
+    fragments, graded_rows = [], []
+    for i, (sid, n_nonzero, correct) in enumerate(spec):
+        f = _fragment(
+            sid, 2, _grid(n_nonzero), 3000, 10,
+            slide_key=MEANDIFF_N1_SLIDE_KEY,
+            decision=_decision("tumor", 3, 4000 + i * 50),
+        )
+        fragments.append(f)
+        graded_rows.append((MEANDIFF_N1_SLIDE_KEY, sid, correct))
+    return fragments, graded_rows
+
+
+def check_meandiff_n1_boundary(tmp):
+    """P1 selftest coverage gap: the ``meanDiff`` n>=2-per-group guard (analyze.py's
+    ``_nav_stat_row``) at the n=1 boundary -- distinct from :func:`check_nav_accuracy`'s existing
+    n=0 (``avgZoom``) and zero-variance (``dwellInAnnotationPct``) blank-guard cases. With only 1
+    graded-correct session, ``meanDiff`` must render BLANK while ``meanCorrect``/``meanIncorrect``/
+    ``medianCorrect``/``medianIncorrect`` (needing only n>=1 each) stay populated -- and asserts
+    their exact hand-derived values (see :func:`build_meandiff_n1_fragments`'s docstring)."""
+    fragments, graded_rows = build_meandiff_n1_fragments()
+    in_dir = os.path.join(tmp, "in_meandiff_n1")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    graded_csv_path = os.path.join(tmp, "meandiff_n1_graded.csv")
+    _write_simple_csv(graded_csv_path, ["slideKey", "sessionId", "correct"], graded_rows)
+    out_dir = os.path.join(tmp, "out_meandiff_n1")
+    analyze([in_dir], out_dir, graded_csv=graded_csv_path)
+
+    nav_path = os.path.join(out_dir, "nav_accuracy.csv")
+    assert os.path.isfile(nav_path), "nav_accuracy.csv missing for the meanDiff n=1 fixture"
+    with open(nav_path, newline="", encoding="utf-8") as fh:
+        nav_rows = list(csv.DictReader(fh))
+    by_metric = {r["metric"]: r for r in nav_rows}
+    cov = by_metric["coveragePct"]
+    assert cov["n"] == "3", cov
+    assert cov["meanDiff"] == "", (
+        f"expected BLANK meanDiff at the n=1-per-group boundary (1 correct, 2 incorrect), got {cov}"
+    )
+    assert cov["meanCorrect"] != "", "meanCorrect should stay populated with n=1 in that group"
+    assert cov["meanIncorrect"] != "", "meanIncorrect should stay populated with n=2 in that group"
+    assert cov["medianCorrect"] != "", "medianCorrect should stay populated with n=1 in that group"
+    assert cov["medianIncorrect"] != "", "medianIncorrect should stay populated with n=2 in that group"
+    assert abs(float(cov["meanCorrect"]) - 87.5) < 1e-9, cov["meanCorrect"]
+    assert abs(float(cov["meanIncorrect"]) - 10.9375) < 1e-9, cov["meanIncorrect"]
+    assert abs(float(cov["medianCorrect"]) - 87.5) < 1e-9, cov["medianCorrect"]
+    assert abs(float(cov["medianIncorrect"]) - 10.9375) < 1e-9, cov["medianIncorrect"]
+
+
+def check_calibration_direct_unit_asserts():
+    """P1 selftest coverage gap: independent hand-derived value asserts on ``_calibration_stats``'s
+    three summary numbers (``calibrationGap``/``brierScore``/``confidenceAccuracyR``) -- previously
+    only reachable indirectly via ``summary.md``'s rounded-to-3-decimals text line, never asserted
+    against a hand-derived value at all. 5 hand-built decision rows (``n == MIN_CORRELATION_N``
+    exactly, the r-guard's own boundary): ``confidenceScaled = [1.0, 0.75, 0.5, 0.25, 0.0]`` paired
+    with ``correct = [1, 1, 1, 0, 0]`` ->
+    ``calibrationGap = mean(conf) - mean(correct) = 0.5 - 0.6 = -0.1``;
+    ``brierScore = mean((conf-correct)**2) = 0.375/5 = 0.075``;
+    ``confidenceAccuracyR`` (Pearson r, both sides non-degenerate variance) works out to exactly
+    ``sqrt(0.75) == sqrt(3)/2`` (deviation cross-product 0.75, deviation-sum-of-squares product
+    0.625*1.2=0.75, so ``r = 0.75/sqrt(0.75) = sqrt(0.75)`` -- a clean closed form, hand-verified
+    independently of the implementation before this fixture was written)."""
+    rows = [
+        {"correct": 1, "confidenceScaled": 1.0},
+        {"correct": 1, "confidenceScaled": 0.75},
+        {"correct": 1, "confidenceScaled": 0.5},
+        {"correct": 0, "confidenceScaled": 0.25},
+        {"correct": 0, "confidenceScaled": 0.0},
+    ]
+    gap, brier, r, n = bf_analyze._calibration_stats(rows)
+    assert n == 5, n
+    assert abs(gap - (-0.1)) < 1e-9, gap
+    assert abs(brier - 0.075) < 1e-9, brier
+    assert abs(r - math.sqrt(0.75)) < 1e-9, r
+
+    # Degenerate zero-eligible-rows case: all three stay NaN, n=0 (documented in the function's own
+    # docstring but never previously asserted).
+    gap0, brier0, r0, n0 = bf_analyze._calibration_stats([])
+    assert n0 == 0, n0
+    assert math.isnan(gap0) and math.isnan(brier0) and math.isnan(r0), (gap0, brier0, r0)
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="bfa-selftest-")
     try:
@@ -3112,6 +3269,13 @@ def run():
         check_finalfix_zerogrid_mouse_fixture(tmp)
         check_finalfix_topk_sparse_fixture(tmp)
         check_finalfix_idle_fixation_fixture(tmp)
+
+        # --- P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md):
+        # consensus_count_<slug>.csv at 3 sessions, meanDiff's n=1-per-group boundary, and
+        # independent calibration-summary value asserts ---
+        check_consensus3_fixture(tmp)
+        check_meandiff_n1_boundary(tmp)
+        check_calibration_direct_unit_asserts()
 
         print("OK: all selftest assertions passed")
     finally:

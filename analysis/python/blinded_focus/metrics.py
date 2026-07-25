@@ -521,7 +521,7 @@ def scanpath_length_px(path):
     for i in range(1, len(path)):
         x0, y0 = float(path[i - 1][1]), float(path[i - 1][2])
         x1, y1 = float(path[i][1]), float(path[i][2])
-        total += math.hypot(x1 - x0, y1 - y0)
+        total += math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
     return total
 
 
@@ -857,7 +857,7 @@ def scanning_rate_px_per_min(path, base_mag=None, img_w=None):
         if not changed[i]:
             x0, y0 = float(path[i][1]), float(path[i][2])
             x1, y1 = float(path[i + 1][1]), float(path[i + 1][2])
-            pan += math.hypot(x1 - x0, y1 - y0)
+            pan += math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
     return pan / duration_min
 
 
@@ -1073,7 +1073,7 @@ def _step_velocities_px_per_sec(path):
             continue
         x0, y0 = float(path[i][1]), float(path[i][2])
         x1, y1 = float(path[i + 1][1]), float(path[i + 1][2])
-        out.append(math.hypot(x1 - x0, y1 - y0) / (dt / 1000.0))
+        out.append(math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2) / (dt / 1000.0))
     return out
 
 
@@ -1099,7 +1099,7 @@ def linearity(path):
         return 0.0
     x0, y0 = float(path[0][1]), float(path[0][2])
     x1, y1 = float(path[-1][1]), float(path[-1][2])
-    net = math.hypot(x1 - x0, y1 - y0)
+    net = math.sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
     total = scanpath_length_px(path)
     return net / total if total > 0 else 0.0
 
@@ -1352,7 +1352,7 @@ def mouse_viewport_coupling_px(path):
     if not path:
         return float("nan")
     dists = [
-        math.hypot(float(p[6]) - float(p[1]), float(p[7]) - float(p[2]))
+        math.sqrt((float(p[6]) - float(p[1])) ** 2 + (float(p[7]) - float(p[2])) ** 2)
         for p in path
         if len(p) >= 8 and (p[6] != -1 or p[7] != -1)
     ]

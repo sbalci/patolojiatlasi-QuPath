@@ -2277,6 +2277,172 @@ check_finalfix_idle_fixation_fixture <- function(tmp) {
   stopifnot(f2$nPoints == 2)
 }
 
+# ---------------------------------------------------------------------------
+# P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md): logged Minors
+# from the enrichment-cycle final review -- consensus_count_<slug>.csv only ever exercised at 2
+# sessions, meanDiff's n>=2-per-group guard only ever exercised at n=0 (avgZoom) and zero-variance
+# (dwellInAnnotationPct) -- never the n=1 boundary -- and the calibration summary
+# (calibrationGap/brierScore/confidenceAccuracyR) never independently value-asserted at all. Mirrors
+# the Python toolkit's selftest.py exactly (same fixtures, same hand-derived numbers).
+# ---------------------------------------------------------------------------
+
+CONSENSUS3_SLIDE_KEY <- "sha256:selftest-slide-consensus3-0001"
+#' consensus_count_<slug>.csv 3-SESSION fixture (the Tier 3 C6 fixture above only covers 2). A
+#' minimal 2x2 grid (gw=gh=2 for all 3 sessions -> `.target_grid_dims` picks (tw,th)=(2,2) too, so
+#' resampled==native -- no resample-interaction to reason about). Every session's cell(0,0) is its
+#' own per-session maximum (normalise_max -> 1.0 > HOTSPOT_THRESH_FRAC=0.5), so all 3 dwell on it;
+#' each session ALSO has one other cell at norm value 0.6 (> 0.5, clear of the strict-> boundary),
+#' unique to that session: d3a -> cell(0,1), d3b -> cell(1,0), d3c -> cell(1,1). Hand-derived
+#' nReaders: (0,0) -> 3 (every session), (0,1) -> 1 (d3a only), (1,0) -> 1 (d3b only), (1,1) -> 1
+#' (d3c only) -- exactly 4 rows.
+build_consensus3_fixture <- function() {
+  grid_a <- c(100.0, 60.0, 0.0, 0.0)
+  grid_b <- c(100.0, 0.0, 60.0, 0.0)
+  grid_c <- c(100.0, 0.0, 0.0, 60.0)
+  list(
+    .finalfix_fragment("d3a", 2, grid_a, 2, 2, 200, 200, 3000, 5, slide_key = CONSENSUS3_SLIDE_KEY),
+    .finalfix_fragment("d3b", 2, grid_b, 2, 2, 200, 200, 3000, 5, slide_key = CONSENSUS3_SLIDE_KEY),
+    .finalfix_fragment("d3c", 2, grid_c, 2, 2, 200, 200, 3000, 5, slide_key = CONSENSUS3_SLIDE_KEY)
+  )
+}
+
+#' P1 selftest coverage gap: runs `build_consensus3_fixture` (3 sessions, not just the Tier 3 C6
+#' fixture's 2) through the full `analyze()` pipeline and asserts `consensus_count_<slug>.csv`'s
+#' per-cell reader counts reach `nReaders==3` for the one cell every session dwells on, plus the
+#' exact 4-row set (see the fixture's own docstring for the hand derivation).
+check_consensus3_fixture <- function(tmp) {
+  fragments <- build_consensus3_fixture()
+  in_dir <- file.path(tmp, "in_consensus3")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_consensus3")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  cc_files <- out_files[startsWith(out_files, "consensus_count_")]
+  stopifnot(length(cc_files) == 1)
+  cc <- utils::read.csv(file.path(out_dir, cc_files[1]), stringsAsFactors = FALSE)
+  stopifnot(identical(colnames(cc), c("cellRow", "cellCol", "nReaders")))
+  stopifnot(nrow(cc) == 4)
+  got <- setNames(as.numeric(cc$nReaders), paste(cc$cellRow, cc$cellCol))
+  expected <- c("0 0" = 3, "0 1" = 1, "1 0" = 1, "1 1" = 1)
+  stopifnot(setequal(names(got), names(expected)))
+  stopifnot(all(abs(got[names(expected)] - expected) < 1e-9))
+  stopifnot(
+    "expected nReaders==3 for the cell all 3 sessions dwell on" =
+      abs(got[["0 0"]] - 3) < 1e-9
+  )
+}
+
+MEANDIFF_N1_SLIDE_KEY <- "sha256:selftest-slide-meandiff-n1-0001"
+#' meanDiff n=1-per-group BOUNDARY fixture: 3 graded sessions on their own slide -- ONE graded
+#' correct=1 (n=1 in that group), TWO graded correct=0 (n=2). `.nav_stat_row`'s meanDiff guard
+#' (blinded_focus.R) requires `length(correct_vals) >= 2 AND length(incorrect_vals) >= 2` -- with
+#' only 1 correct-group session this must render BLANK even though
+#' meanCorrect/meanIncorrect/medianCorrect/medianIncorrect (which only need >= 1 value each) stay
+#' populated. Uses `coveragePct` (grid-only, always populated -- same metric
+#' `check_nav_accuracy`'s existing n=3-per-group case uses) with hand-derivable coverage fractions
+#' on the module's GW=GH=8 (64-cell) grid: md1(correct=1)=56/64=87.5%, md2(correct=0)=6/64=9.375%,
+#' md3(correct=0)=8/64=12.5% -> meanCorrect=87.5 (n=1), meanIncorrect=(9.375+12.5)/2=10.9375 (n=2),
+#' medianCorrect=87.5, medianIncorrect=10.9375 (n=2 median == mean here).
+build_meandiff_n1_fragments <- function() {
+  .grid <- function(n_nonzero, value = 100.0) {
+    g <- rep(0.0, GW * GH)
+    if (n_nonzero > 0) {
+      g[seq_len(n_nonzero)] <- value
+    }
+    g
+  }
+
+  spec <- list(
+    list(sid = "md1", n_nonzero = 56, correct = 1),
+    list(sid = "md2", n_nonzero = 6, correct = 0),
+    list(sid = "md3", n_nonzero = 8, correct = 0)
+  )
+  fragments <- list()
+  graded_rows <- list()
+  for (i in seq_along(spec)) {
+    s <- spec[[i]]
+    f <- .fragment(
+      s$sid, 2, .grid(s$n_nonzero), 3000, 10,
+      slide_key = MEANDIFF_N1_SLIDE_KEY,
+      decision = .decision("tumor", 3, 4000 + (i - 1) * 50)
+    )
+    fragments[[length(fragments) + 1]] <- f
+    graded_rows[[length(graded_rows) + 1]] <- c(MEANDIFF_N1_SLIDE_KEY, s$sid, as.character(s$correct))
+  }
+  list(fragments = fragments, graded_rows = graded_rows)
+}
+
+#' P1 selftest coverage gap: the `meanDiff` n>=2-per-group guard (blinded_focus.R's
+#' `.nav_stat_row`) at the n=1 boundary -- distinct from `check_nav_accuracy`'s existing n=0
+#' (`avgZoom`) and zero-variance (`dwellInAnnotationPct`) blank-guard cases. With only 1
+#' graded-correct session, `meanDiff` must render BLANK while
+#' `meanCorrect`/`meanIncorrect`/`medianCorrect`/`medianIncorrect` (needing only n>=1 each) stay
+#' populated -- and asserts their exact hand-derived values (see `build_meandiff_n1_fragments`'s
+#' docstring).
+check_meandiff_n1_boundary <- function(tmp) {
+  fixture <- build_meandiff_n1_fragments()
+  in_dir <- file.path(tmp, "in_meandiff_n1")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fixture$fragments, in_dir)
+  graded_csv_path <- file.path(tmp, "meandiff_n1_graded.csv")
+  .write_simple_csv(graded_csv_path, c("slideKey", "sessionId", "correct"), fixture$graded_rows)
+  out_dir <- file.path(tmp, "out_meandiff_n1")
+  analyze(list(in_dir), out_dir, graded_csv = graded_csv_path)
+
+  nav_path <- file.path(out_dir, "nav_accuracy.csv")
+  stopifnot("nav_accuracy.csv missing for the meanDiff n=1 fixture" = file.exists(nav_path))
+  nav_rows <- utils::read.csv(nav_path, stringsAsFactors = FALSE, colClasses = "character")
+  cov <- nav_rows[nav_rows$metric == "coveragePct", ][1, ]
+  stopifnot(cov$n == "3")
+  stopifnot(
+    "expected BLANK meanDiff at the n=1-per-group boundary (1 correct, 2 incorrect)" =
+      cov$meanDiff == ""
+  )
+  stopifnot("meanCorrect should stay populated with n=1 in that group" = cov$meanCorrect != "")
+  stopifnot("meanIncorrect should stay populated with n=2 in that group" = cov$meanIncorrect != "")
+  stopifnot("medianCorrect should stay populated with n=1 in that group" = cov$medianCorrect != "")
+  stopifnot("medianIncorrect should stay populated with n=2 in that group" = cov$medianIncorrect != "")
+  stopifnot(abs(as.numeric(cov$meanCorrect) - 87.5) < 1e-9)
+  stopifnot(abs(as.numeric(cov$meanIncorrect) - 10.9375) < 1e-9)
+  stopifnot(abs(as.numeric(cov$medianCorrect) - 87.5) < 1e-9)
+  stopifnot(abs(as.numeric(cov$medianIncorrect) - 10.9375) < 1e-9)
+}
+
+#' P1 selftest coverage gap: independent hand-derived value asserts on `.calibration_stats`'s three
+#' summary numbers (`calibrationGap`/`brierScore`/`confidenceAccuracyR`) -- previously only
+#' reachable indirectly via `summary.md`'s rounded-to-3-decimals text line, never asserted against
+#' a hand-derived value at all. 5 hand-built decision rows (`n == MIN_CORRELATION_N` exactly, the
+#' r-guard's own boundary): `confidenceScaled = c(1.0, 0.75, 0.5, 0.25, 0.0)` paired with
+#' `correct = c(1, 1, 1, 0, 0)` -> `calibrationGap = mean(conf) - mean(correct) = 0.5 - 0.6 = -0.1`;
+#' `brierScore = mean((conf-correct)^2) = 0.375/5 = 0.075`; `confidenceAccuracyR` (Pearson r, both
+#' sides non-degenerate variance) works out to exactly `sqrt(0.75) == sqrt(3)/2` (deviation
+#' cross-product 0.75, deviation-sum-of-squares product 0.625*1.2=0.75, so
+#' `r = 0.75/sqrt(0.75) = sqrt(0.75)` -- a clean closed form, hand-verified independently of the
+#' implementation before this fixture was written). Mirrors the Python toolkit's
+#' `check_calibration_direct_unit_asserts` exactly.
+check_calibration_direct_unit_asserts <- function() {
+  rows <- list(
+    list(correct = 1, confidenceScaled = 1.0),
+    list(correct = 1, confidenceScaled = 0.75),
+    list(correct = 1, confidenceScaled = 0.5),
+    list(correct = 0, confidenceScaled = 0.25),
+    list(correct = 0, confidenceScaled = 0.0)
+  )
+  calib <- .calibration_stats(rows)
+  stopifnot(calib$n == 5)
+  stopifnot(abs(calib$gap - (-0.1)) < 1e-9)
+  stopifnot(abs(calib$brier - 0.075) < 1e-9)
+  stopifnot(abs(calib$conf_acc_r - sqrt(0.75)) < 1e-9)
+
+  # Degenerate zero-eligible-rows case: all three stay NaN, n=0 (documented in the function's own
+  # docstring but never previously asserted).
+  calib0 <- .calibration_stats(list())
+  stopifnot(calib0$n == 0)
+  stopifnot(is.nan(calib0$gap) && is.nan(calib0$brier) && is.nan(calib0$conf_acc_r))
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -3195,6 +3361,13 @@ run <- function() {
   check_finalfix_zerogrid_mouse_fixture(tmp)
   check_finalfix_topk_sparse_fixture(tmp)
   check_finalfix_idle_fixation_fixture(tmp)
+
+  # --- P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md):
+  # consensus_count_<slug>.csv at 3 sessions, meanDiff's n=1-per-group boundary, and independent
+  # calibration-summary value asserts ---
+  check_consensus3_fixture(tmp)
+  check_meandiff_n1_boundary(tmp)
+  check_calibration_direct_unit_asserts()
 
   cat("OK: all selftest assertions passed\n")
 }

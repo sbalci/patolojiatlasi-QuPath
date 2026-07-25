@@ -881,7 +881,9 @@ def analyze(
                 row["activeSpanMs"] = m.active_span_ms(path)
                 row["avgZoomLog2W"] = m.avg_zoom_log2_w(path, base_mag, img_w)
                 row["drillingRateOctavesPerMin"] = m.drilling_rate_octaves_per_min(path, base_mag, img_w)
-                row["magnificationSource"] = "true" if base_mag is not None else "proxy-downsample"
+                row["magnificationSource"] = (
+                    "true" if (base_mag is not None and float(base_mag) > 0) else "proxy-downsample"
+                )
                 # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
                 # deterministic dispersion-threshold detector over the viewport centers. Computed
                 # once here for metrics.csv's summary columns; the per-fixation
