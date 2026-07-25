@@ -34,8 +34,8 @@ Additive to the existing add/edit-question dialog:
 - **"Geri gitmeye izin ver"** checkbox on the outer author window (quiz-level `allowBack`, default checked).
 - Reused unchanged: reorder/edit/delete, bind-current-slide, title, description, save/load (`AtlasQuizIO`), the `Stage`+VBox house style.
 
-## Play — unified player (refines brainstorming decision #3)
-**Recommended:** extend the existing **`QuizRunnerWindow`** into the single player for both self-check and guided tour, rather than build a separate window. Rationale: the runner already does slide-open + viewport-apply (`afterSlideReady`) + per-type render + reveal overlay + **Önceki/Sonraki** + **progress** — a guided tour is just a quiz that also contains `NARRATION` stops, captured viewports, and highlights, so a separate player would duplicate most of it. This aligns with the user's "build on the Quiz, no duplication" choice. (Trade-off vs. my earlier "separate player, runner untouched" idea: this touches the working runner — but only additively, and every change is guarded to leave existing self-check behavior identical. **Flagged for the user to confirm at spec review; a separate `TourPlayerWindow` reusing the same helpers is the fallback if runner-regression risk is unwanted.**)
+## Play — unified player (user-confirmed 2026-07-25)
+**Extend the existing `QuizRunnerWindow`** into the single player for both self-check and guided tour (user-confirmed). The runner already does slide-open + viewport-apply (`afterSlideReady`) + per-type render + reveal overlay + **Önceki/Sonraki** + **progress** — a guided tour is just a quiz that also contains `NARRATION` stops, captured viewports, and highlights, so a separate window would duplicate most of it. All changes below are **additive and guarded so existing self-check behavior stays byte-for-byte identical** for a quiz that has no narration/highlight/viewport and `allowBack=true`.
 
 Additive changes to the runner:
 - **`NARRATION` render case** — show `prompt` as the narration text + (on "Göster") `explanation`; no answer widgets; "Sonraki" advances. Existing types render exactly as today.
@@ -45,7 +45,7 @@ Additive changes to the runner:
 - **Local slides** — route slide opens through the new `openSlideAsync` dispatcher (graceful-missing).
 
 ## Menu (`AtlasExtension`, the "Sınav / Quiz" submenu)
-- Keep **"Çöz…"** (play any quiz/tour file) + **"Hazırla…"** (the extended author). Optionally add **"Rehberli tur oynat…"** as a second entry into the same player pre-framed as a tour (cosmetic) — or leave the single "Çöz" that plays both. Menu label wording to confirm at spec review; no new mechanism.
+- Keep **"Çöz…"** (self-check, quiz-framed: progress "Soru X / N") + **"Hazırla…"** (the extended author, now tour-capable). **Add "Rehberli tur oynat…"** — launches the same extended runner in **tour presentation** (progress "Durak X / N", narration-first framing). One player, two entry points differing only in presentation wording — no new play mechanism. (Exact Turkish label wording is easily adjusted later.)
 
 ## Error handling / invariants
 - All slide opens are off-FX-thread + `Platform.runLater` + `stillWanted`-cancellable (reuse `QuizSlide`'s discipline); a stale in-flight open for a closed/advanced player is dropped.
