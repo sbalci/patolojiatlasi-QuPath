@@ -79,6 +79,19 @@ SCHEMAS <- c(
 #' make later `matrix(..., nrow=gh, ncol=gw)` / reshape calls throw (too few values) or silently
 #' misalign rows/cols (too many, matrix() just recycles), so it must be caught here at load time
 #' rather than downstream.
+#'
+#' **Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md):**
+#' `gw > 0 && gh > 0` is now ALSO required. A fragment recording `gridWidth==0` or `gridHeight==0`
+#' (`grid=[]`, or `grid=list()`) used to pass this check -- `length(list())==0==0*5` -- despite
+#' carrying no spatial grid at all. That degenerate-but-schema-valid shape is exactly what kept
+#' resurfacing as a recurring "schema-valid input crashes the whole analyze() batch" class deep in
+#' this file's grid functions (see the final-review report's Findings 2/3 fixture history).
+#' Rejecting it here, at load, is the single choke point that makes every one of those downstream
+#' crashes unreachable in the first place -- a zero-dimension fragment is simply never handed to
+#' `analyze()` at all, degrading exactly like any other malformed fragment (a skipped file, not a
+#' crashed batch). The per-function guards added to `resample_nn`/`raster_from_path` below are kept
+#' anyway, as defense-in-depth for any DIRECT caller of those functions that bypasses
+#' `load_fragments` entirely.
 .is_valid_fragment <- function(d) {
   if (!(is.list(d) &&
     !is.null(d$schema) && length(d$schema) == 1 && d$schema %in% SCHEMAS &&
@@ -90,7 +103,7 @@ SCHEMAS <- c(
   }
   gw <- suppressWarnings(as.integer(d$gridWidth))
   gh <- suppressWarnings(as.integer(d$gridHeight))
-  if (length(gw) != 1 || length(gh) != 1 || is.na(gw) || is.na(gh)) {
+  if (length(gw) != 1 || length(gh) != 1 || is.na(gw) || is.na(gh) || gw <= 0 || gh <= 0) {
     return(FALSE)
   }
   length(d$grid) == gw * gh
@@ -403,8 +416,23 @@ normalise_sum <- function(grid) {
 #' Nearest-neighbour resample a row-major `(gh, gw)` grid to `(th, tw)`. Returns a flat
 #' `(tw*th,)` row-major vector. Same algorithm as `blinded_focus.metrics.resample_nn` in the
 #' Python toolkit.
+#'
+#' **Zero-size-grid guard (polish final-review Finding 2, defense-in-depth):** the root cause -- a
+#' schema-valid fragment recording `gridWidth`/`gridHeight` of `0` -- is now rejected at load by
+#' `.is_valid_fragment`, so `analyze()` never calls this function with a degenerate `(gw, gh)` or
+#' `(tw, th)`. This guard exists purely for a DIRECT caller that bypasses `load_fragments` (e.g. a
+#' script or test constructing a grid by hand): without it, `matrix(..., nrow=gh, ncol=gw)` at
+#' `gw<=0`/`gh<=0` errors ("invalid 'nrow' value"), or (if `gw`/`gh` are valid but
+#' `tw<=0`/`th<=0`) the `0:(th-1L)`/`0:(tw-1L)` index sequences count DOWNWARD from 0 (R's `:`
+#' operator has no empty-range form), producing a wrongly-shaped/garbage result instead of the
+#' well-defined "nothing to resample" callers expect. Returns an all-zero vector of the
+#' (clamped-non-negative) target size instead. Matches the Python port's `resample_nn` guard
+#' exactly.
 resample_nn <- function(grid, gw, gh, tw, th) {
   gw <- as.integer(gw); gh <- as.integer(gh); tw <- as.integer(tw); th <- as.integer(th)
+  if (gw <= 0 || gh <= 0 || tw <= 0 || th <= 0) {
+    return(rep(0.0, max(tw, 0L) * max(th, 0L)))
+  }
   g <- matrix(as.numeric(grid), nrow = gh, ncol = gw, byrow = TRUE)
   if (gw == tw && gh == th) {
     return(as.numeric(t(g)))
@@ -972,6 +1000,19 @@ active_span_ms <- function(path) {
 #'
 #' Returns `NULL` for a 0/1-point path (a `dt` requires two points). Exact port of
 #' `blinded_focus.metrics.raster_from_path`.
+#'
+#' **Zero-size-grid guard (polish final-review Finding 3, defense-in-depth):** also returns `NULL`
+#' for `gw<=0`/`gh<=0`. The root cause -- a schema-valid fragment recording
+#' `gridWidth`/`gridHeight` of `0` -- is now rejected at load by `.is_valid_fragment`, so
+#' `analyze()` never reaches this function with a degenerate grid; this guard is defense-in-depth
+#' for a direct caller. Without it, `matrix(0.0, nrow=gh, ncol=gw)` at `gw==0`/`gh==0` is a
+#' genuinely empty matrix, and every cell-index clamp below (`min(max(...), gw-1L)`, `gw-1L==-1L`)
+#' resolves to `-1L`; R's `grid[row+1L, col+1L]` with `col+1L==0L` is a documented silent no-op
+#' rather than an error (unlike the Python port's `IndexError` on the same input), so this guard is
+#' about Python<->R PARITY of the "nothing measurable" contract, not preventing an R crash -- same
+#' rationale as `mouse_raster_from_path`'s existing zero-size-grid guard above. Matches the Python
+#' port's `raster_from_path` exactly (callers already null-check this function's return, e.g. the
+#' magband-split export's `if (is.null(raster_b)) next`).
 raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
@@ -979,6 +1020,9 @@ raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
     return(NULL)
   }
   gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(NULL)
+  }
   img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
   img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
   dts <- step_durations_ms(path)
@@ -1031,13 +1075,30 @@ raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
 #' 3. Point has no `dsMilli` (5-element): width-proxy `img_w/w`.
 #'
 #' `dsMilli<=0`/`w<=0` are treated defensively as full-resolution/1px respectively.
+#'
+#' **Non-numeric `base_mag` guard (polish final-review Finding 1, completing the fix):** a
+#' fragment-level `baseMagnification` that is present but not numeric (e.g. the string
+#' `"unknown"` -- schema-valid, since the field is typed loosely) degrades to branch 2 (the
+#' `base_mag`-unknown zoom level), identical to `base_mag=NULL`, rather than erroring. Before this
+#' guard, `is.na(base_mag)` ran on the PRE-conversion value: `is.na("unknown")` is `FALSE` (it's a
+#' valid non-NA string), so the check fell through to `as.numeric(base_mag) > 0`, which coerces to
+#' `NA` (with a warning) -- and `if (NA)` is a fatal R error ("missing value where TRUE/FALSE
+#' needed"). Since every one of `avg_zoom`/`zoom_variance`/`zoom_range`/
+#' `magnification_percentage`/`scanning_rate_px_per_min`/`drilling_rate_per_min`/
+#' `avg_zoom_log2_w`/`drilling_rate_octaves_per_min` calls this per scanpath point, this was
+#' reachable on the very first `dsMilli`-carrying path point (`row$avgZoom <- avg_zoom(path,
+#' base_mag, img_w)`, well before the `magnificationSource` assignment separately guarded) --
+#' aborting the whole batch the instant any real schema/4+ session recorded a non-numeric
+#' `baseMagnification`. Fixed by coercing FIRST (`suppressWarnings(as.numeric(base_mag))`), then
+#' checking `is.na()` on the coerced value -- mirrors `true_magnification`'s fix below exactly.
 point_zoom <- function(point, base_mag = NULL, img_w = NULL) {
   has_ds <- length(point) >= 6
   if (has_ds) {
     ds_milli <- as.numeric(point[6])
     if (is.na(ds_milli) || ds_milli <= 0) ds_milli <- 1000.0
-    if (!is.null(base_mag) && !is.na(base_mag) && as.numeric(base_mag) > 0) {
-      return(as.numeric(base_mag) / (ds_milli / 1000.0))
+    bm <- if (!is.null(base_mag)) suppressWarnings(as.numeric(base_mag)) else NA_real_
+    if (!is.na(bm) && bm > 0) {
+      return(bm / (ds_milli / 1000.0))
     }
     return(1000.0 / ds_milli)
   }
@@ -1290,12 +1351,22 @@ MAG_BAND_LABELS <- c("<1x", "1-2x", "2-4x", "4-10x", "10-20x", "20-40x", ">=40x"
 #' `dsMilli` at all (schema/3, 5-element points) -- callers fall back to the existing tercile
 #' scheme (`zoom_band_labels`) in that case, per B3's auto-fallback rule. `dsMilli <= 0` is treated
 #' defensively as full-resolution (matches `point_zoom`'s own guard).
+#' **Non-numeric `base_mag` guard (polish final-review Finding 1):** fixed the same pre-conversion
+#' `is.na()` bug `point_zoom` had -- `is.na(base_mag)` on a non-numeric string like `"unknown"` is
+#' `FALSE`, so it used to fall through to `bm <- as.numeric(base_mag)` (`NA` with a warning) and
+#' then `if (bm <= 0)`, i.e. `if (NA)` -- a fatal R error. Since this function is called once per
+#' STEP from `canonical_mag_band_labels` (used by `magband_labels_for_scheme`, the default
+#' `--magband-scheme canonical` path), a non-numeric `baseMagnification` used to abort the
+#' `magbands_<slug>.csv`/per-band-figure export for the whole slide. Fixed by coercing FIRST
+#' (`suppressWarnings(as.numeric(base_mag))`), then checking `is.na()` on the coerced value -- `NA`
+#' correctly degrades to the documented "not computable" `NULL` sentinel, so callers auto-fall-back
+#' to the tercile scheme exactly as they already do for a `NULL`/absent `baseMagnification`.
 true_magnification <- function(point, base_mag) {
-  if (is.null(base_mag) || length(base_mag) == 0 || is.na(base_mag)) {
+  if (is.null(base_mag) || length(base_mag) == 0) {
     return(NULL)
   }
-  bm <- as.numeric(base_mag)
-  if (bm <= 0) {
+  bm <- suppressWarnings(as.numeric(base_mag))
+  if (is.na(bm) || bm <= 0) {
     return(NULL)
   }
   if (length(point) < 6) {
@@ -3260,7 +3331,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         linearity = NA,
         searchFocusRatio = NA,
         # Passthrough fragment-level fields (schema/4+; NA -> blank for /1,/2,/3 which lack them).
-        baseMagnification = if (!is.null(base_mag)) as.numeric(base_mag) else NA,
+        baseMagnification = if (!is.null(base_mag)) suppressWarnings(as.numeric(base_mag)) else NA,
         pathTruncated = if (!is.null(f$pathTruncated)) as.logical(f$pathTruncated) else NA,
         # Phase 2 annotation metrics: nAnnotations/annotatedAreaPx/dwellInAnnotationPct only need
         # the grid + this session's own annotation mask (no path required), so they're always
@@ -3377,7 +3448,16 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$activeSpanMs <- active_span_ms(path)
         row$avgZoomLog2W <- avg_zoom_log2_w(path, base_mag, img_w)
         row$drillingRateOctavesPerMin <- drilling_rate_octaves_per_min(path, base_mag, img_w)
-        row$magnificationSource <- if (!is.null(base_mag) && !is.na(as.numeric(base_mag)) && as.numeric(base_mag) > 0) {
+        # Polish final-review Finding 1 (docs/superpowers/sdd/polish-finalfix-report.md): coerce
+        # with suppressWarnings() FIRST, then test is.na()/> 0 on the already-coerced value -- the
+        # bare `as.numeric(base_mag)` calls below previously ran twice (once inside is.na(), once
+        # for the comparison) and each emitted an "NAs introduced by coercion" warning for a
+        # non-numeric baseMagnification; this was never a crash here (`&&` short-circuits on
+        # `is.na(...)==TRUE` before the second call), but is fixed for cleanliness/consistency with
+        # the point_zoom/true_magnification guards above, which fix the same pattern where it DOES
+        # crash.
+        bm_src <- if (!is.null(base_mag)) suppressWarnings(as.numeric(base_mag)) else NA_real_
+        row$magnificationSource <- if (!is.na(bm_src) && bm_src > 0) {
           "true"
         } else {
           "proxy-downsample"

@@ -2788,51 +2788,270 @@ def check_tier6_c6_fixture(tmp):
 
 
 def check_finalfix_zerogrid_path_fixture(tmp):
-    """Final-review Finding 1 pipeline-level check: a schema-valid ``gridWidth=0``/``gridHeight=5``
-    fragment WITH a path must run through the full ``analyze()`` pipeline to completion (no
-    crash), with ``visitCountJaccard`` blank (NaN) for the degenerate zero-size grid."""
+    """Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md): a
+    schema-valid ``gridWidth=0``/``gridHeight=5`` fragment WITH a path is now REJECTED AT LOAD by
+    :func:`blinded_focus.io._is_valid_fragment`'s ``gw>0 and gh>0`` guard -- it never enters the
+    batch at all, so the ``visit_count_grid`` ``IndexError`` this fixture used to trigger (via
+    :func:`blinded_focus.metrics.visited_sequence` clamping every point to cell index ``-1`` at
+    this degenerate resolution) is unreachable by construction, not merely caught downstream.
+    Confirms both the direct load-time rejection and that a batch consisting ONLY of this
+    fragment completes with zero rows (no crash, no metrics.csv row -- exactly the degrade a
+    malformed/unreadable fragment already gets)."""
     frag = build_zerogrid_path_fragment()
     in_dir = os.path.join(tmp, "in_zerogrid_path")
     os.makedirs(in_dir, exist_ok=True)
     write_fragments_to_dir([frag], in_dir)
+
+    loaded = bf_io.load_fragments([in_dir])
+    assert loaded == [], (
+        f"a gridWidth=0 fragment must be rejected at load, got {len(loaded)} fragment(s)"
+    )
+
     out_dir = os.path.join(tmp, "out_zerogrid_path")
     rows = analyze([in_dir], out_dir)  # must not raise
-    assert len(rows) == 1, len(rows)
-    row = rows[0]
-    assert row["pathPoints"] == 10, "the path must still have been processed (not skipped)"
-    assert pd.isna(row["visitCountJaccard"]), (
-        f"expected blank visitCountJaccard for a zero-size grid, got {row['visitCountJaccard']}"
-    )
+    assert rows == [], f"a batch with only a zero-dim-grid fragment must yield 0 rows, got {len(rows)}"
     metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
-    assert len(metrics) == 1, len(metrics)
-    assert pd.isna(metrics.iloc[0]["visitCountJaccard"])
+    assert len(metrics) == 0, len(metrics)
 
 
 def check_finalfix_zerogrid_mouse_fixture(tmp):
-    """Final-review Finding 2 pipeline-level check: a schema/5 ``gridWidth=0``/``gridHeight=5``
-    fragment WITH on-slide mouse data must run through the full ``analyze()`` pipeline to
-    completion (no crash), with ``mouseCoveragePct``/``mouseEntropy`` blank (NaN)."""
+    """Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md): a
+    schema/5 ``gridWidth=0``/``gridHeight=5`` fragment WITH on-slide mouse data is now REJECTED AT
+    LOAD by the same ``gw>0 and gh>0`` guard -- the ``mouse_raster_from_path`` ``IndexError`` this
+    fixture used to trigger is unreachable by construction. Mirrors
+    :func:`check_finalfix_zerogrid_path_fixture`'s two-level assert (direct load rejection + a
+    solo-fragment batch completing with zero rows)."""
     frag = build_zerogrid_mouse_fragment()
     in_dir = os.path.join(tmp, "in_zerogrid_mouse")
     os.makedirs(in_dir, exist_ok=True)
     write_fragments_to_dir([frag], in_dir)
+
+    loaded = bf_io.load_fragments([in_dir])
+    assert loaded == [], (
+        f"a gridWidth=0 fragment must be rejected at load, got {len(loaded)} fragment(s)"
+    )
+
     out_dir = os.path.join(tmp, "out_zerogrid_mouse")
+    rows = analyze([in_dir], out_dir)  # must not raise
+    assert rows == [], f"a batch with only a zero-dim-grid fragment must yield 0 rows, got {len(rows)}"
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 0, len(metrics)
+
+
+DEGENERATE_PLUS_NORMAL_SLIDE_KEY = "sha256:selftest-slide-polish-degenerate-plus-normal-0001"
+#: Polish final-review fixture (Finding 2's realistic trigger): ONE ``gridWidth=0`` fragment (same
+#: shape as :func:`build_zerogrid_path_fragment`, but sharing a slideKey with a normal session
+#: instead of being alone on its own slide) + ONE normal, full-grid session -- exercises the
+#: partial-skip path through :func:`blinded_focus.io.group_by_slide`/``analyze()``'s per-slide
+#: loop: the degenerate fragment is silently dropped at :func:`blinded_focus.io.load_fragments`
+#: time (never reaches ``by_session``/``sessions``), while the normal session on the SAME slide
+#: processes completely unaffected -- a single-slide batch that is partly, not wholly, degenerate.
+def build_degenerate_plus_normal_fragments():
+    degenerate = _finalfix_fragment(
+        "degen1", 3, [], 0, 5, 2000, 1500, 2250, 10,
+        path=[[t * 250, 100 + t, 100 + t, 400, 300] for t in range(10)],
+        slide_key=DEGENERATE_PLUS_NORMAL_SLIDE_KEY,
+    )
+    normal_grid = _n_nonzero_grid(10)
+    normal = _finalfix_fragment(
+        "normal1", 3, normal_grid, GW, GH, IMG_W, IMG_H, 2500, 10,
+        path=[[t * 250, 100 + t, 100 + t, 400, 300] for t in range(10)],
+        slide_key=DEGENERATE_PLUS_NORMAL_SLIDE_KEY,
+    )
+    return [degenerate, normal]
+
+
+def check_polish_degenerate_plus_normal_fixture(tmp):
+    """Polish final-review pipeline-level check: a slide carrying ONE degenerate
+    (``gridWidth=0``) fragment ALONGSIDE one normal fragment must complete with exactly 1 row (the
+    normal session) -- the degenerate fragment is dropped at load (never even reaches the slide's
+    session grouping), and its presence must not perturb or abort processing of its normal slide-
+    mate."""
+    frags = build_degenerate_plus_normal_fragments()
+    in_dir = os.path.join(tmp, "in_degenerate_plus_normal")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(frags, in_dir)
+
+    loaded = bf_io.load_fragments([in_dir])
+    assert len(loaded) == 1 and loaded[0]["sessionId"] == "normal1", (
+        f"expected only the normal session to survive load, got "
+        f"{[f['sessionId'] for f in loaded]}"
+    )
+
+    out_dir = os.path.join(tmp, "out_degenerate_plus_normal")
+    rows = analyze([in_dir], out_dir)  # must not raise
+    assert len(rows) == 1, f"expected exactly 1 row (normal session only), got {len(rows)}"
+    assert rows[0]["session"] == "normal1", rows[0]["session"]
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 1, len(metrics)
+    assert metrics.iloc[0]["session"] == "normal1", metrics.iloc[0]["session"]
+    assert metrics.iloc[0]["pathPoints"] == 10, metrics.iloc[0]["pathPoints"]
+
+
+CANONICAL_DEGENERATE_SLIDE_KEY = "sha256:selftest-slide-polish-canonical-degenerate-0001"
+#: Polish final-review fixture (Finding 3's realistic trigger, now moot post-root-fix but locked in
+#: as a regression guard): ONE ``gridWidth=0`` fragment sharing a slide with TWO normal,
+#: canonical-scheme-computable sessions (known ``baseMagnification`` + ``dsMilli``-carrying path,
+#: same recipe :func:`build_pt4_magband_agreement_fixture`-style fixtures use) -- exercises PT4's
+#: ``magband_agreement_<slug>.csv`` (needs >=2 canonical-scheme sessions) alongside a degenerate
+#: slide-mate that never reaches that computation at all (dropped at load).
+def build_canonical_degenerate_fragments():
+    degenerate = _finalfix_fragment(
+        "cdegen1", 4, [], 0, 5, 2000, 1500, 10000, 40,
+        path=_make_path_v4(2, 2, n=40, seed=501),
+        slide_key=CANONICAL_DEGENERATE_SLIDE_KEY,
+    )
+    f1 = _fragment(
+        "cnorm1", 4, _n_nonzero_grid(10), 10000, 40,
+        path=_make_path_v4(2, 2, n=40, seed=601), base_magnification=40.0,
+        slide_key=CANONICAL_DEGENERATE_SLIDE_KEY,
+    )
+    f2 = _fragment(
+        "cnorm2", 4, _n_nonzero_grid(10), 10000, 40,
+        path=_make_path_v4(2, 2, n=40, seed=602), base_magnification=40.0,
+        slide_key=CANONICAL_DEGENERATE_SLIDE_KEY,
+    )
+    return [degenerate, f1, f2]
+
+
+def check_polish_canonical_degenerate_fixture(tmp):
+    """Polish final-review pipeline-level check: a slide with a degenerate (``gridWidth=0``)
+    fragment PLUS two normal canonical-scheme sessions must complete, write
+    ``magband_agreement_<slug>.csv`` from the two normal sessions alone (the degenerate one never
+    reaches the per-band raster/resample step -- dropped at load), and not crash."""
+    frags = build_canonical_degenerate_fragments()
+    in_dir = os.path.join(tmp, "in_canonical_degenerate")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(frags, in_dir)
+    out_dir = os.path.join(tmp, "out_canonical_degenerate")
+    rows = analyze([in_dir], out_dir)  # must not raise
+    assert len(rows) == 2, f"expected 2 rows (degenerate session dropped at load), got {len(rows)}"
+    sessions = sorted(r["session"] for r in rows)
+    assert sessions == ["cnorm1", "cnorm2"], sessions
+
+    slug = bf_io.slug(CANONICAL_DEGENERATE_SLIDE_KEY)
+    agreement_path = os.path.join(out_dir, f"magband_agreement_{slug}.csv")
+    assert os.path.isfile(agreement_path), (
+        f"expected magband_agreement_{slug}.csv (2 canonical-scheme sessions), not found"
+    )
+    agreement = pd.read_csv(agreement_path)
+    assert len(agreement) >= 1, "expected at least one band row"
+    assert (agreement["nSessions"] == 2).all(), (
+        f"every emitted band should reflect exactly the 2 normal sessions, got "
+        f"{agreement['nSessions'].tolist()}"
+    )
+
+
+NONNUMERIC_BASEMAG_SLIDE_KEY = "sha256:selftest-slide-polish-nonnumeric-basemag-0001"
+#: Polish final-review fixture (Finding 1): a schema/4 session with a VALID grid, a real
+#: ``dsMilli``-carrying path (so ``point_zoom``'s ``has_ds`` branch is exercised, the actual crash
+#: path -- see :func:`blinded_focus.metrics.point_zoom`'s docstring), and a
+#: ``baseMagnification`` that is present but NON-NUMERIC (``"unknown"``) -- schema-valid, since the
+#: field is typed loosely by the recorder. Must process exactly like ``base_magnification=None``:
+#: ``magnificationSource=="proxy-downsample"``, canonical scheme not computable -> tercile
+#: fallback, no crash anywhere in the ``avgZoom``/.../``magnificationSource`` chain.
+def build_nonnumeric_basemag_fragment():
+    return _fragment(
+        "nonnum1", 4, _n_nonzero_grid(10), 10000, 40,
+        path=_make_path_v4(2, 2, n=40, seed=701), base_magnification="unknown",
+        slide_key=NONNUMERIC_BASEMAG_SLIDE_KEY,
+    )
+
+
+def check_polish_nonnumeric_basemag_fixture(tmp):
+    """Polish final-review Finding 1 pipeline-level check: a fragment with a valid grid and a
+    ``dsMilli``-carrying path but a non-numeric ``baseMagnification`` ("unknown") must complete
+    the full ``analyze()`` pipeline (no crash anywhere in the ``point_zoom``-derived metric chain
+    or the ``magnificationSource``/canonical-band assignment), with
+    ``magnificationSource=="proxy-downsample"`` and the canonical scheme auto-falling back to
+    ``"tercile"`` (mirrors the existing null-``baseMagnification`` degrade exactly)."""
+    frag = build_nonnumeric_basemag_fragment()
+    in_dir = os.path.join(tmp, "in_nonnumeric_basemag")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_nonnumeric_basemag")
     rows = analyze([in_dir], out_dir)  # must not raise
     assert len(rows) == 1, len(rows)
     row = rows[0]
-    # `analyze()`'s in-memory row dict uses "" (not NaN) as its own blank sentinel for columns
-    # that stay at their pre-initialized default (see analyze.py's row-building block) --
-    # `metrics.csv` re-reads that same "" as a genuine blank/NaN cell via pandas below.
-    assert row["mouseCoveragePct"] == "", (
-        f"expected blank mouseCoveragePct for a zero-size grid, got {row['mouseCoveragePct']}"
+    assert row["magnificationSource"] == "proxy-downsample", row["magnificationSource"]
+    assert row["baseMagnification"] == "unknown", (
+        f"baseMagnification passthrough should be untouched (still the raw string), "
+        f"got {row['baseMagnification']!r}"
     )
-    assert row["mouseEntropy"] == "", (
-        f"expected blank mouseEntropy for a zero-size grid, got {row['mouseEntropy']}"
-    )
+
     metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
     assert len(metrics) == 1, len(metrics)
-    assert pd.isna(metrics.iloc[0]["mouseCoveragePct"])
-    assert pd.isna(metrics.iloc[0]["mouseEntropy"])
+    assert metrics.iloc[0]["magnificationSource"] == "proxy-downsample", (
+        metrics.iloc[0]["magnificationSource"]
+    )
+
+    slug = bf_io.slug(NONNUMERIC_BASEMAG_SLIDE_KEY)
+    magbands_path = os.path.join(out_dir, f"magbands_{slug}.csv")
+    assert os.path.isfile(magbands_path), f"expected magbands_{slug}.csv, not found"
+    magbands = pd.read_csv(magbands_path)
+    assert (magbands["bandScheme"] == "tercile").all(), (
+        f"a non-numeric baseMagnification is not canonical-computable -> must fall back to "
+        f"tercile for every row, got {magbands['bandScheme'].unique().tolist()}"
+    )
+
+
+MOUSE_ICC_ALLZERO_SLIDE_KEY = "sha256:selftest-slide-polish-mouse-icc-allzero-0001"
+#: Polish final-review fixture (refuted-but-worth-a-guard, per
+#: docs/superpowers/sdd/polish-finalfix-report.md): 2 schema/5 sessions on one slide -- one whose
+#: cursor is the off-viewer sentinel ``(-1, -1)`` at EVERY tick (so its point-based mouse-dwell
+#: grid, :func:`blinded_focus.metrics.mouse_raster_from_path`, is a legitimate ALL-ZERO array, not
+#: ``None`` -- there IS on-slide viewport data, just no on-slide CURSOR data) alongside one normal
+#: session with real on-slide mouse movement. Locks in that ``icc()``'s two-way-ANOVA formula
+#: handles a constant (all-zero) column without dividing by zero / returning NaN, and -- the actual
+#: point of this fixture -- that Python and R compute the IDENTICAL ``mouseICC`` value for this
+#: input (both close to 0, since one "rater" contributes zero variance and zero covariance with
+#: the other).
+def build_mouse_icc_allzero_fixture():
+    grid = _n_nonzero_grid(10)
+    real_path = [
+        [0, 500, 400, 400, 300, 1000, 60, 50],
+        [1000, 600, 450, 400, 300, 1000, 90, 80],
+        [2000, 700, 500, 400, 300, 1000, 120, 110],
+        [3000, 650, 470, 400, 300, 1000, 100, 90],
+    ]
+    offslide_path = [
+        [0, 500, 400, 400, 300, 1000, -1, -1],
+        [1000, 600, 450, 400, 300, 1000, -1, -1],
+        [2000, 700, 500, 400, 300, 1000, -1, -1],
+        [3000, 650, 470, 400, 300, 1000, -1, -1],
+    ]
+    f_real = _fragment(
+        "micc-real", 5, grid, 3000, 4, path=[list(p) for p in real_path],
+        slide_key=MOUSE_ICC_ALLZERO_SLIDE_KEY,
+    )
+    f_zero = _fragment(
+        "micc-zero", 5, grid, 3000, 4, path=[list(p) for p in offslide_path],
+        slide_key=MOUSE_ICC_ALLZERO_SLIDE_KEY,
+    )
+    return [f_real, f_zero]
+
+
+def check_polish_mouse_icc_allzero_fixture(tmp):
+    """Polish final-review pipeline-level check: a slide with one all-off-slide-cursor session
+    (all-zero mouse-dwell grid) and one normal-mouse session must complete without crash, and
+    ``mouse_<slug>.csv``'s ``mouseICC`` (diagonal-reuse row) must be a finite number close to 0.0
+    (numerically compared against R's output separately, in the cross-language parity check)."""
+    frags = build_mouse_icc_allzero_fixture()
+    in_dir = os.path.join(tmp, "in_mouse_icc_allzero")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(frags, in_dir)
+    out_dir = os.path.join(tmp, "out_mouse_icc_allzero")
+    analyze([in_dir], out_dir)  # must not raise
+
+    slug = bf_io.slug(MOUSE_ICC_ALLZERO_SLIDE_KEY)
+    mouse_path = os.path.join(out_dir, f"mouse_{slug}.csv")
+    assert os.path.isfile(mouse_path), f"expected mouse_{slug}.csv, not found"
+    mouse_df = pd.read_csv(mouse_path)
+    diag_rows = mouse_df[mouse_df["mouseICC"].notna()]
+    assert len(diag_rows) == 1, f"expected exactly 1 non-blank mouseICC row, got {len(diag_rows)}"
+    icc_val = float(diag_rows.iloc[0]["mouseICC"])
+    assert math.isfinite(icc_val), f"mouseICC should be finite, got {icc_val}"
+    assert abs(icc_val) < 0.5, f"expected mouseICC near 0.0 for one all-zero + one real grid, got {icc_val}"
 
 
 def check_finalfix_topk_sparse_fixture(tmp):
@@ -3908,6 +4127,15 @@ def run():
         check_finalfix_zerogrid_mouse_fixture(tmp)
         check_finalfix_topk_sparse_fixture(tmp)
         check_finalfix_idle_fixation_fixture(tmp)
+
+        # --- Polish final-review (docs/superpowers/sdd/polish-finalfix-report.md): root-cause
+        # zero-dim-grid rejection at load (io._is_valid_fragment), resample_nn/raster_from_path
+        # defense-in-depth guards, and the non-numeric baseMagnification crash (point_zoom /
+        # magnificationSource / true_magnification) ---
+        check_polish_degenerate_plus_normal_fixture(tmp)
+        check_polish_canonical_degenerate_fixture(tmp)
+        check_polish_nonnumeric_basemag_fixture(tmp)
+        check_polish_mouse_icc_allzero_fixture(tmp)
 
         # --- P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md):
         # consensus_count_<slug>.csv at 3 sessions, meanDiff's n=1-per-group boundary, and

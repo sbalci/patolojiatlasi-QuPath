@@ -151,8 +151,21 @@ def resample_nn(grid, gw, gh, tw, th):
 
     Returns a flat ``(tw*th,)`` array. Identical algorithm to ``tools/aggregate-focus.py``'s
     ``nearest_resample`` (independently re-implemented here in numpy; no import between them).
-    """
+
+    **Zero-size-grid guard (polish final-review Finding 2, defense-in-depth):** the root cause --
+    a schema-valid fragment recording ``gridWidth``/``gridHeight`` of ``0`` -- is now rejected at
+    load by :func:`blinded_focus.io._is_valid_fragment`, so ``analyze()`` never calls this function
+    with a degenerate ``(gw, gh)`` or ``(tw, th)``. This guard exists purely for a DIRECT caller of
+    ``resample_nn`` that bypasses ``load_fragments`` (e.g. a script or test constructing a grid by
+    hand): without it, ``g.reshape(gh, gw)`` on a ``gw<=0``/``gh<=0`` shape raises immediately, or
+    (if ``gw``/``gh`` are valid but ``tw<=0``/``th<=0``) the ``np.arange(th)``/``np.arange(tw)``
+    index arrays collapse to empty and the ``g[np.ix_(ys, xs)]`` fancy-index either raises or
+    silently returns a wrongly-shaped empty array -- neither of which is the well-defined "nothing
+    to resample" result callers expect. Returns an all-zero flat array of the (clamped-non-negative)
+    target size instead."""
     gw, gh, tw, th = int(gw), int(gh), int(tw), int(th)
+    if gw <= 0 or gh <= 0 or tw <= 0 or th <= 0:
+        return np.zeros(max(tw, 0) * max(th, 0), dtype=float)
     g = np.asarray(grid, dtype=float).reshape(gh, gw)
     if gw == tw and gh == th:
         return g.flatten()
@@ -682,10 +695,24 @@ def raster_from_path(path, img_w, img_h, gw, gh, step_mask=None):
 
     Returns a flat ``(gw*gh,)`` float array (dwell-ms per cell), or **``None``** if ``path`` has
     fewer than 2 points (a Δt requires two points; single-point/empty paths carry no raster).
-    """
+
+    **Zero-size-grid guard (polish final-review Finding 3, defense-in-depth):** also returns
+    ``None`` for ``gw<=0``/``gh<=0``. The root cause -- a schema-valid fragment recording
+    ``gridWidth``/``gridHeight`` of ``0`` -- is now rejected at load by
+    :func:`blinded_focus.io._is_valid_fragment`, so ``analyze()`` never reaches this function with
+    a degenerate grid; this guard is defense-in-depth for a direct caller. Without it,
+    ``np.zeros((gh, gw))`` at ``gw==0``/``gh==0`` is a genuinely empty array, and every cell-index
+    clamp below (``min(max(...), gw - 1)``, ``gw - 1 == -1``) resolves to ``-1`` -- so
+    ``grid[row, -1] += dt`` (or the fallback single-cell branch's identical clamp) raises
+    ``IndexError`` the moment any step has a positive, non-idle Δt, aborting the whole batch run
+    (callers already null-check this function's return, e.g. the magband-split export's
+    ``if raster_b is None: continue``, so folding this into the same ``None`` sentinel the
+    <2-point case already uses costs nothing at any call site)."""
     if not path or len(path) < 2:
         return None
     gw, gh = int(gw), int(gh)
+    if gw <= 0 or gh <= 0:
+        return None
     img_w = float(img_w) if img_w else 1.0
     img_h = float(img_h) if img_h else 1.0
     dts = step_durations_ms(path)
@@ -748,14 +775,34 @@ def point_zoom(point, base_mag=None, img_w=None):
 
     ``dsMilli <= 0`` or ``w <= 0`` are treated defensively as full-resolution / 1px respectively
     (malformed-data guard; should not occur with a well-behaved recorder).
+
+    **Non-numeric ``base_mag`` guard (polish final-review Finding 1, completing the fix):** a
+    fragment-level ``baseMagnification`` that is present but not numeric (e.g. the string
+    ``"unknown"`` -- schema-valid, since the field is typed loosely) degrades to branch 2 (the
+    ``base_mag``-unknown zoom level), identical to ``base_mag=None``, rather than raising. Before
+    this guard, ``float(base_mag) > 0`` on a non-numeric ``base_mag`` raised ``ValueError``
+    directly out of this function -- and since every one of :func:`avg_zoom`/:func:`zoom_variance`/
+    :func:`zoom_range`/:func:`magnification_percentage`/:func:`scanning_rate_px_per_min`/
+    :func:`drilling_rate_per_min`/:func:`avg_zoom_log2_w`/:func:`drilling_rate_octaves_per_min`
+    calls this per scanpath point, this was reachable on the very first ``dsMilli``-carrying path
+    point (``analyze.py``'s ``row["avgZoom"] = m.avg_zoom(path, base_mag, img_w)``, well before the
+    ``magnificationSource`` assignment PT1 separately guarded) -- aborting the whole batch the
+    instant any real schema/4+ session recorded a non-numeric ``baseMagnification``. Mirrors
+    :func:`true_magnification`'s existing ``try/except (TypeError, ValueError)`` pattern exactly.
     """
     has_ds = len(point) >= 6
     if has_ds:
         ds_milli = float(point[5])
         if ds_milli <= 0:
             ds_milli = 1000.0
-        if base_mag is not None and float(base_mag) > 0:
-            return float(base_mag) / (ds_milli / 1000.0)
+        bm = None
+        if base_mag is not None:
+            try:
+                bm = float(base_mag)
+            except (TypeError, ValueError):
+                bm = None
+        if bm is not None and bm > 0:
+            return bm / (ds_milli / 1000.0)
         return 1000.0 / ds_milli
     w = float(point[3])
     if w <= 0:

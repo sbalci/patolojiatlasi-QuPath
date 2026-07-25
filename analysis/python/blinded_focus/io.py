@@ -97,11 +97,25 @@ def _is_valid_fragment(d):
     # A `grid` whose length doesn't match `gridWidth*gridHeight` would make the later
     # `np.reshape(gh, gw)` calls (metrics.py) throw ValueError, aborting the whole run instead of
     # just skipping this one malformed fragment -- so validate the size here, at load time.
+    #
+    # **Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md):**
+    # `gw > 0 and gh > 0` is now ALSO required. A fragment recording `gridWidth==0` or
+    # `gridHeight==0` (`grid=[]`) used to pass this check -- `len([]) == 0 == 0*5` -- despite
+    # carrying no spatial grid at all. That degenerate-but-schema-valid shape is exactly what kept
+    # resurfacing as a recurring "schema-valid input crashes the whole analyze() batch" class deep
+    # in metrics.py (`visit_count_grid`'s `counts[-1]` IndexError, `mouse_raster_from_path`'s
+    # `grid[row, -1]` IndexError -- see the final-review report's Findings 2/3 fixture history).
+    # Rejecting it here, at load, is the single choke point that makes every one of those
+    # downstream crashes unreachable in the first place -- a zero-dimension fragment is simply
+    # never handed to `analyze()` at all, degrading exactly like any other malformed fragment (a
+    # skipped file, not a crashed batch). The per-function guards added to `resample_nn`/
+    # `raster_from_path` (metrics.py) are kept anyway, as defense-in-depth for any DIRECT caller of
+    # those functions that bypasses `load_fragments` entirely.
     try:
         gw = int(d["gridWidth"])
         gh = int(d["gridHeight"])
         grid = d["grid"]
-        return hasattr(grid, "__len__") and len(grid) == gw * gh
+        return hasattr(grid, "__len__") and len(grid) == gw * gh and gw > 0 and gh > 0
     except (TypeError, ValueError):
         return False
 

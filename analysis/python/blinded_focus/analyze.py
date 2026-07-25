@@ -913,9 +913,16 @@ def analyze(
                 row["activeSpanMs"] = m.active_span_ms(path)
                 row["avgZoomLog2W"] = m.avg_zoom_log2_w(path, base_mag, img_w)
                 row["drillingRateOctavesPerMin"] = m.drilling_rate_octaves_per_min(path, base_mag, img_w)
-                row["magnificationSource"] = (
-                    "true" if (base_mag is not None and float(base_mag) > 0) else "proxy-downsample"
-                )
+                # Polish final-review Finding 1 (docs/superpowers/sdd/polish-finalfix-report.md): a
+                # fragment-level baseMagnification that is present but non-numeric (e.g. "unknown"
+                # -- schema-valid, the field is typed loosely) must still degrade to
+                # "proxy-downsample", not crash -- mirrors metrics.true_magnification's existing
+                # try/except (TypeError, ValueError) pattern.
+                try:
+                    is_true = base_mag is not None and float(base_mag) > 0
+                except (TypeError, ValueError):
+                    is_true = False
+                row["magnificationSource"] = "true" if is_true else "proxy-downsample"
                 # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
                 # deterministic dispersion-threshold detector over the viewport centers. Computed
                 # once here for metrics.csv's summary columns; the per-fixation

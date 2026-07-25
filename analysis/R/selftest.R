@@ -2800,39 +2800,249 @@ check_tier6_c6_fixture <- function(tmp) {
   stopifnot(all(abs(got[names(expected)] - expected) < 1e-9))
 }
 
-#' Final-review Finding 1 pipeline-level check: a schema-valid gridWidth=0/gridHeight=5 fragment
-#' WITH a path must run through the full `analyze()` pipeline to completion (no crash), with
-#' `visitCountJaccard` blank (NA) for the degenerate zero-size grid.
+#' Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md): a
+#' schema-valid gridWidth=0/gridHeight=5 fragment WITH a path is now REJECTED AT LOAD by
+#' `.is_valid_fragment`'s `gw>0 && gh>0` guard -- it never enters the batch at all, so the
+#' `visit_count_grid` crash this fixture used to trigger is unreachable by construction. Confirms
+#' both the direct load-time rejection and that a batch consisting ONLY of this fragment completes
+#' with zero rows (no crash, no metrics.csv row).
 check_finalfix_zerogrid_path_fixture <- function(tmp) {
   frag <- build_zerogrid_path_fragment()
   in_dir <- file.path(tmp, "in_zerogrid_path")
   dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
   write_fragments_to_dir(list(frag), in_dir)
+
+  loaded <- load_fragments(list(in_dir))
+  stopifnot("a gridWidth=0 fragment must be rejected at load" = length(loaded) == 0)
+
   out_dir <- file.path(tmp, "out_zerogrid_path")
   metrics <- analyze(list(in_dir), out_dir)  # must not raise
-  stopifnot(nrow(metrics) == 1)
-  stopifnot("path must still have been processed" = metrics$pathPoints[1] == 10)
   stopifnot(
-    "expected blank visitCountJaccard for a zero-size grid" = is.na(metrics$visitCountJaccard[1])
+    "a batch with only a zero-dim-grid fragment must yield 0 rows" = nrow(metrics) == 0
   )
 }
 
-#' Final-review Finding 2 pipeline-level check: a schema/5 gridWidth=0/gridHeight=5 fragment WITH
-#' on-slide mouse data must run through the full `analyze()` pipeline to completion (no crash),
-#' with `mouseCoveragePct`/`mouseEntropy` blank (NA).
+#' Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md): a schema/5
+#' gridWidth=0/gridHeight=5 fragment WITH on-slide mouse data is now REJECTED AT LOAD by the same
+#' `gw>0 && gh>0` guard -- the `mouse_raster_from_path` zero-size-grid crash this fixture used to
+#' trigger (Python-only; R's own matrix indexing silently no-ops on this shape, see
+#' `mouse_raster_from_path`'s docstring) is unreachable by construction. Mirrors
+#' `check_finalfix_zerogrid_path_fixture`'s two-level assert.
 check_finalfix_zerogrid_mouse_fixture <- function(tmp) {
   frag <- build_zerogrid_mouse_fragment()
   in_dir <- file.path(tmp, "in_zerogrid_mouse")
   dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
   write_fragments_to_dir(list(frag), in_dir)
+
+  loaded <- load_fragments(list(in_dir))
+  stopifnot("a gridWidth=0 fragment must be rejected at load" = length(loaded) == 0)
+
   out_dir <- file.path(tmp, "out_zerogrid_mouse")
   metrics <- analyze(list(in_dir), out_dir)  # must not raise
-  stopifnot(nrow(metrics) == 1)
   stopifnot(
-    "expected blank mouseCoveragePct for a zero-size grid" = is.na(metrics$mouseCoveragePct[1])
+    "a batch with only a zero-dim-grid fragment must yield 0 rows" = nrow(metrics) == 0
   )
+}
+
+DEGENERATE_PLUS_NORMAL_SLIDE_KEY <- "sha256:selftest-slide-polish-degenerate-plus-normal-0001"
+#' Polish final-review fixture (Finding 2's realistic trigger): ONE gridWidth=0 fragment sharing a
+#' slideKey with ONE normal, full-grid session -- exercises the partial-skip path: the degenerate
+#' fragment is silently dropped at `load_fragments` time, while the normal session on the SAME
+#' slide processes completely unaffected. Mirrors the Python toolkit's
+#' `build_degenerate_plus_normal_fragments` exactly.
+build_degenerate_plus_normal_fragments <- function() {
+  path <- do.call(rbind, lapply(0:9, function(t) c(t * 250, 100 + t, 100 + t, 400, 300)))
+  degenerate <- .finalfix_fragment(
+    "degen1", 3, numeric(0), 0L, 5L, 2000, 1500, 2250, 10, path = path,
+    slide_key = DEGENERATE_PLUS_NORMAL_SLIDE_KEY
+  )
+  normal_grid <- .n_nonzero_grid(10)
+  normal <- .finalfix_fragment(
+    "normal1", 3, normal_grid, GW, GH, IMG_W, IMG_H, 2500, 10, path = path,
+    slide_key = DEGENERATE_PLUS_NORMAL_SLIDE_KEY
+  )
+  list(degenerate, normal)
+}
+
+#' Polish final-review pipeline-level check: a slide carrying ONE degenerate (gridWidth=0)
+#' fragment ALONGSIDE one normal fragment must complete with exactly 1 row (the normal session) --
+#' the degenerate fragment is dropped at load, and its presence must not perturb or abort
+#' processing of its normal slide-mate.
+check_polish_degenerate_plus_normal_fixture <- function(tmp) {
+  frags <- build_degenerate_plus_normal_fragments()
+  in_dir <- file.path(tmp, "in_degenerate_plus_normal")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(frags, in_dir)
+
+  loaded <- load_fragments(list(in_dir))
   stopifnot(
-    "expected blank mouseEntropy for a zero-size grid" = is.na(metrics$mouseEntropy[1])
+    "expected only the normal session to survive load" =
+      length(loaded) == 1 && loaded[[1]]$sessionId == "normal1"
+  )
+
+  out_dir <- file.path(tmp, "out_degenerate_plus_normal")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot("expected exactly 1 row (normal session only)" = nrow(metrics) == 1)
+  stopifnot(metrics$session[1] == "normal1")
+  stopifnot(metrics$pathPoints[1] == 10)
+}
+
+CANONICAL_DEGENERATE_SLIDE_KEY <- "sha256:selftest-slide-polish-canonical-degenerate-0001"
+#' Polish final-review fixture (Finding 3's realistic trigger, now moot post-root-fix but locked in
+#' as a regression guard): ONE gridWidth=0 fragment sharing a slide with TWO normal,
+#' canonical-scheme-computable sessions. Mirrors the Python toolkit's
+#' `build_canonical_degenerate_fragments` exactly.
+build_canonical_degenerate_fragments <- function() {
+  degenerate <- .finalfix_fragment(
+    "cdegen1", 4, numeric(0), 0L, 5L, 2000, 1500, 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 501),
+    slide_key = CANONICAL_DEGENERATE_SLIDE_KEY
+  )
+  f1 <- .fragment(
+    "cnorm1", 4, .n_nonzero_grid(10), 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 601), base_magnification = 40.0,
+    slide_key = CANONICAL_DEGENERATE_SLIDE_KEY
+  )
+  f2 <- .fragment(
+    "cnorm2", 4, .n_nonzero_grid(10), 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 602), base_magnification = 40.0,
+    slide_key = CANONICAL_DEGENERATE_SLIDE_KEY
+  )
+  list(degenerate, f1, f2)
+}
+
+#' Polish final-review pipeline-level check: a slide with a degenerate (gridWidth=0) fragment PLUS
+#' two normal canonical-scheme sessions must complete, write `magband_agreement_<slug>.csv` from
+#' the two normal sessions alone, and not crash.
+check_polish_canonical_degenerate_fixture <- function(tmp) {
+  frags <- build_canonical_degenerate_fragments()
+  in_dir <- file.path(tmp, "in_canonical_degenerate")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(frags, in_dir)
+  out_dir <- file.path(tmp, "out_canonical_degenerate")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot(
+    "expected 2 rows (degenerate session dropped at load)" = nrow(metrics) == 2
+  )
+  stopifnot(setequal(metrics$session, c("cnorm1", "cnorm2")))
+
+  slug <- slug(CANONICAL_DEGENERATE_SLIDE_KEY)
+  agreement_path <- file.path(out_dir, paste0("magband_agreement_", slug, ".csv"))
+  stopifnot("expected magband_agreement_<slug>.csv" = file.exists(agreement_path))
+  agreement <- utils::read.csv(agreement_path, stringsAsFactors = FALSE)
+  stopifnot(nrow(agreement) >= 1)
+  stopifnot(
+    "every emitted band should reflect exactly the 2 normal sessions" =
+      all(agreement$nSessions == 2)
+  )
+}
+
+NONNUMERIC_BASEMAG_SLIDE_KEY <- "sha256:selftest-slide-polish-nonnumeric-basemag-0001"
+#' Polish final-review fixture (Finding 1): a schema/4 session with a VALID grid, a real
+#' dsMilli-carrying path (the actual crash path -- see `point_zoom`'s docstring), and a
+#' `baseMagnification` that is present but NON-NUMERIC (`"unknown"`). Mirrors the Python toolkit's
+#' `build_nonnumeric_basemag_fragment` exactly.
+build_nonnumeric_basemag_fragment <- function() {
+  .fragment(
+    "nonnum1", 4, .n_nonzero_grid(10), 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 701), base_magnification = "unknown",
+    slide_key = NONNUMERIC_BASEMAG_SLIDE_KEY
+  )
+}
+
+#' Polish final-review Finding 1 pipeline-level check: a fragment with a valid grid and a
+#' dsMilli-carrying path but a non-numeric `baseMagnification` ("unknown") must complete the full
+#' `analyze()` pipeline (no crash anywhere in the `point_zoom`-derived metric chain or the
+#' `magnificationSource`/canonical-band assignment), with `magnificationSource=="proxy-downsample"`
+#' and the canonical scheme auto-falling back to `"tercile"`.
+check_polish_nonnumeric_basemag_fixture <- function(tmp) {
+  frag <- build_nonnumeric_basemag_fragment()
+  in_dir <- file.path(tmp, "in_nonnumeric_basemag")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_nonnumeric_basemag")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot(nrow(metrics) == 1)
+  stopifnot(metrics$magnificationSource[1] == "proxy-downsample")
+  # NOTE (pre-existing, not introduced by this fix): unlike the Python toolkit, which passes
+  # `baseMagnification` through to metrics.csv AS-IS (so a non-numeric value like "unknown"
+  # renders as that literal string), the R toolkit's row-building numerically coerces it
+  # (`suppressWarnings(as.numeric(base_mag))`) for the CSV passthrough column -- so a non-numeric
+  # baseMagnification renders as blank/NA in R's metrics.csv, not the original string. This is a
+  # cosmetic passthrough-column divergence only; it does not affect magnificationSource/bandScheme,
+  # which both toolkits compute identically (see the cross-language parity check).
+  stopifnot(
+    "R's baseMagnification passthrough numerically coerces a non-numeric value to NA" =
+      is.na(metrics$baseMagnification[1])
+  )
+
+  slug <- slug(NONNUMERIC_BASEMAG_SLIDE_KEY)
+  magbands_path <- file.path(out_dir, paste0("magbands_", slug, ".csv"))
+  stopifnot("expected magbands_<slug>.csv" = file.exists(magbands_path))
+  magbands <- utils::read.csv(magbands_path, stringsAsFactors = FALSE)
+  stopifnot(
+    "a non-numeric baseMagnification is not canonical-computable -> must fall back to tercile" =
+      all(magbands$bandScheme == "tercile")
+  )
+}
+
+MOUSE_ICC_ALLZERO_SLIDE_KEY <- "sha256:selftest-slide-polish-mouse-icc-allzero-0001"
+#' Polish final-review fixture (refuted-but-worth-a-guard): 2 schema/5 sessions on one slide --
+#' one whose cursor is the off-viewer sentinel (-1, -1) at EVERY tick (a legitimate ALL-ZERO
+#' point-based mouse-dwell grid, not NULL) alongside one normal session with real on-slide mouse
+#' movement. Locks in that Python and R compute the IDENTICAL `mouseICC` for this input. Mirrors
+#' the Python toolkit's `build_mouse_icc_allzero_fixture` exactly.
+build_mouse_icc_allzero_fixture <- function() {
+  grid <- .n_nonzero_grid(10)
+  real_path <- matrix(
+    c(
+      0, 500, 400, 400, 300, 1000, 60, 50,
+      1000, 600, 450, 400, 300, 1000, 90, 80,
+      2000, 700, 500, 400, 300, 1000, 120, 110,
+      3000, 650, 470, 400, 300, 1000, 100, 90
+    ),
+    nrow = 4, ncol = 8, byrow = TRUE
+  )
+  offslide_path <- matrix(
+    c(
+      0, 500, 400, 400, 300, 1000, -1, -1,
+      1000, 600, 450, 400, 300, 1000, -1, -1,
+      2000, 700, 500, 400, 300, 1000, -1, -1,
+      3000, 650, 470, 400, 300, 1000, -1, -1
+    ),
+    nrow = 4, ncol = 8, byrow = TRUE
+  )
+  f_real <- .fragment(
+    "micc-real", 5, grid, 3000, 4, path = real_path, slide_key = MOUSE_ICC_ALLZERO_SLIDE_KEY
+  )
+  f_zero <- .fragment(
+    "micc-zero", 5, grid, 3000, 4, path = offslide_path, slide_key = MOUSE_ICC_ALLZERO_SLIDE_KEY
+  )
+  list(f_real, f_zero)
+}
+
+#' Polish final-review pipeline-level check: a slide with one all-off-slide-cursor session
+#' (all-zero mouse-dwell grid) and one normal-mouse session must complete without crash, and
+#' `mouse_<slug>.csv`'s `mouseICC` (diagonal-reuse row) must be a finite number close to 0.0
+#' (numerically compared against Python's output separately, in the cross-language parity check).
+check_polish_mouse_icc_allzero_fixture <- function(tmp) {
+  frags <- build_mouse_icc_allzero_fixture()
+  in_dir <- file.path(tmp, "in_mouse_icc_allzero")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(frags, in_dir)
+  out_dir <- file.path(tmp, "out_mouse_icc_allzero")
+  analyze(list(in_dir), out_dir)  # must not raise
+
+  slug <- slug(MOUSE_ICC_ALLZERO_SLIDE_KEY)
+  mouse_path <- file.path(out_dir, paste0("mouse_", slug, ".csv"))
+  stopifnot("expected mouse_<slug>.csv" = file.exists(mouse_path))
+  mouse_df <- utils::read.csv(mouse_path, stringsAsFactors = FALSE)
+  diag_rows <- mouse_df[!is.na(mouse_df$mouseICC), ]
+  stopifnot("expected exactly 1 non-blank mouseICC row" = nrow(diag_rows) == 1)
+  icc_val <- as.numeric(diag_rows$mouseICC[1])
+  stopifnot("mouseICC should be finite" = is.finite(icc_val))
+  stopifnot(
+    "expected mouseICC near 0.0 for one all-zero + one real grid" = abs(icc_val) < 0.5
   )
 }
 
@@ -4038,6 +4248,15 @@ run <- function() {
   check_finalfix_zerogrid_mouse_fixture(tmp)
   check_finalfix_topk_sparse_fixture(tmp)
   check_finalfix_idle_fixation_fixture(tmp)
+
+  # --- Polish final-review (docs/superpowers/sdd/polish-finalfix-report.md): root-cause
+  # zero-dim-grid rejection at load (.is_valid_fragment), resample_nn/raster_from_path
+  # defense-in-depth guards, and the non-numeric baseMagnification crash (point_zoom /
+  # magnificationSource / true_magnification) ---
+  check_polish_degenerate_plus_normal_fixture(tmp)
+  check_polish_canonical_degenerate_fixture(tmp)
+  check_polish_nonnumeric_basemag_fixture(tmp)
+  check_polish_mouse_icc_allzero_fixture(tmp)
 
   # --- P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md):
   # consensus_count_<slug>.csv at 3 sessions, meanDiff's n=1-per-group boundary, and independent
