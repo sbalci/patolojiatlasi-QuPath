@@ -83,6 +83,36 @@ def difference(grid, consensus_grid, gw, gh, title, out):
     plt.close(fig)
 
 
+def scanpath_multi_overlay(sessions, title, out):
+    """Tier 1 A6: every session's viewport-center path (image px) on one shared axis -- distinct
+    color per session, alpha 0.5, start=o/end=x markers, legend. ``sessions`` is a list of
+    ``(label, path)`` tuples; a session with an empty/falsy ``path`` contributes no line (still
+    counted for color-cycle indexing, matching the other multi-series figures in this module,
+    e.g. :func:`scanpath_overlay`'s ``plt.cm.cool`` usage).
+
+    Not part of the pinned numeric-parity contract (a PNG, not a CSV) -- only existence + valid
+    PNG magic are asserted by the selftests; the R port need not reproduce this pixel-for-pixel."""
+    fig, ax = plt.subplots(figsize=(7, 6))
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(sessions), 1)))
+    for i, (label, path) in enumerate(sessions):
+        if not path:
+            continue
+        xs = [float(p[1]) for p in path]
+        ys = [float(p[2]) for p in path]
+        color = colors[i]
+        ax.plot(xs, ys, color=color, alpha=0.5, linewidth=1.2, label=label)
+        ax.scatter([xs[0]], [ys[0]], color=color, marker="o", s=60, zorder=5)
+        ax.scatter([xs[-1]], [ys[-1]], color=color, marker="x", s=60, zorder=5)
+    ax.invert_yaxis()
+    ax.set_title(title)
+    ax.set_xlabel("image x (px)")
+    ax.set_ylabel("image y (px)")
+    ax.legend(loc="upper right", fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out, dpi=110)
+    plt.close(fig)
+
+
 def coverage_over_time(path, gw, gh, img_w, img_h, title, out):
     """Cumulative fraction of grid cells visited so far, plotted against relative time (ms)."""
     gw, gh = int(gw), int(gh)

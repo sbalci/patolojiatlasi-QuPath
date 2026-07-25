@@ -164,8 +164,14 @@ Bir okuyucuya, tam işe başlarken izlendiğini söylemek **nasıl baktığını
   kişi-başı ölçütler, okuyucular-arası uyum/konsensüs, referans (uzman/ROI) karşılaştırması, gezinme
   yolu; hızlı bakış için `tools/quicklook-blinded-focus.py`. Etiketlerde ad değil **koşul kodu**
   (`--labels sessionId,label`) kullanın.
-- Kayıt üç ekseni yakalar: **uzamsal** (odak ızgarası), **zamansal** (bekleme-ms + toplam süre) ve
-  **yönsel** (sıralı gezinme yolu, şema/3).
+- Kayıt beş boyutu yakalar: **uzamsal** (odak ızgarası, sıcak noktalar, örtüşme), **zamansal**
+  (bekleme-ms + toplam süre, boşta-geçen süre), **yakınlaştırma** (büyütme bantları, tarama vs.
+  delme), **yörünge** (sıralı gezinme yolu, şema/3: dönüş açısı, fiksasyon, DTW) ve **fare/imleç**
+  (şema/5: imleç eşleşmesi, fare-bekleme uyumu). Zenginleştirilmiş ölçüt kümesi (boşta-süre-hariç-
+  tutma uyarıları, fiksasyon/DTW/fare-uyum çıktıları, kanonik-vs-tersil büyütme-bandı anahtarı vb.)
+  [`analysis/python/README.md`](analysis/python/README.md) /
+  [`analysis/R/README.md`](analysis/R/README.md) içinde "Phase 3 enrichment" bölümünde
+  belgelenmiştir — eski çıktıyla yeni çıktıyı karşılaştırmadan önce okuyun.
 
 #### Çalışmanız slayt-başı tanı kaydediyorsa — iki geçişli elle-notlandırma iş akışı
 

@@ -4,7 +4,7 @@ Usage::
 
     python -m blinded_focus.analyze <input...> --out DIR [--reference SESSIONID]
         [--roi geojson] [--labels csv] [--key csv] [--graded csv] [--figures]
-        [--res 512] [--magbands 3]
+        [--res 512] [--magbands 3] [--magband-scheme canonical|tercile]
 
 ``<input...>`` may be fragment JSON files, directories (recursed for ``*.json``), and/or
 ``.zip`` archives, in any mix. See ``../README.md`` for the full output-file contract.
@@ -21,34 +21,120 @@ Output files (written to ``--out DIR``):
   0/0.0 when a session has no ``annotations``; ``annotationReentryCount`` blank without a
   ``path``; ``enrichmentRatio`` blank when its mask has no in/out split to compare) plus cursor
   metrics ``cursorOverSlidePct``, ``mouseViewportCouplingPx`` (blank unless the session's ``path``
-  carries schema/5 8-element points with ``mouseX``/``mouseY``).
+  carries schema/5 8-element points with ``mouseX``/``mouseY``) plus (Tier 1, additive) turn-angle
+  directionality ``meanAbsTurnAngleDeg``/``turnAngleEntropy`` (path-only, blank for <3 points),
+  mouse kinematics ``mousePathLengthPx``/``mouseVelocityPxPerSec`` (schema/5 only), and
+  ``activeFractionPct`` (path-only, ``100*durationMs/(tRel_last-tRel_first)``, not clamped >100%)
+  plus (Tier 2, docs/superpowers/specs/2026-07-23-...) B1 idle-exclusion transparency columns
+  ``idleMs``/``activeSpanMs`` (path-only; ``0.0`` when the path has no >60s gap -- see
+  :data:`blinded_focus.metrics.IDLE_GAP_MS`), B2 Drew-fidelity zoom ``avgZoomLog2W``/
+  ``drillingRateOctavesPerMin`` (ADD-alongside the untouched ``avgZoom``/``drillingRatePerMin``;
+  blank when the underlying weighted mean/rate is undefined, e.g. an all-idle path), and B4
+  ``magnificationSource`` (``"true"``/``"proxy-downsample"``, path-only). **B1 CHANGES**
+  ``scanningRatePxPerMin``/``drillingRatePerMin``/``pathVelocityPxPerSec``/``searchFocusRatio``
+  numbers for any session with a >60s idle gap (byte-identical to before for sessions without one).
+  (Tier 3 C1, additive) ``nFixations``, ``meanFixationMs``, ``medianFixationMs``, ``sdFixationMs``,
+  ``fixationsPerMin`` -- a deterministic I-DT (dispersion-threshold, Salvucci & Goldberg 2000)
+  fixation-extraction summary over the scanpath, path-only (blank without a path); see
+  :func:`blinded_focus.metrics.fixations_idt` for the pinned algorithm. (Tier 3 C2, additive)
+  ``mouseCoveragePct``/``mouseEntropy`` -- coverage/entropy of a point-based mouse-dwell grid (see
+  :func:`blinded_focus.metrics.mouse_raster_from_path`), schema/5 only, blank when there's no mouse
+  data or zero on-slide points. (Tier 3 C4, additive) ``meanSegmentLinearity`` -- mean
+  :func:`blinded_focus.metrics.linearity` over sub-paths split at the session's own top-hotspot
+  cells, path-only (blank if fewer than 2 hotspots or fewer than 2 boundary points are found).
+  (Tier 3 C6, additive) ``annotatedAreaUnionPx`` -- area of the UNIONED rasterized annotation mask
+  (see :func:`blinded_focus.metrics.annotated_area_union_px`), always populated (``0.0`` with no
+  annotations) — the overlap-correct companion to the sum-based ``annotatedAreaPx`` above (which
+  double-counts overlapping/nested annotation Features); and ``visitCountJaccard`` -- Jaccard
+  similarity between the session's dwell-time top hotspots and its visit-count top hotspots (see
+  :func:`blinded_focus.metrics.visit_count_jaccard`), path-only (blank without a path). Both
+  columns are appended at the END of the CSV (after ``meanSegmentLinearity``), not interleaved
+  with the columns they conceptually relate to, per the additive/append-only column-order
+  invariant.
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
-  per-session ``regionCoveragePct`` (vs the slide consensus).
-- per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``.
-- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv``, and (Phase 1)
-  ``magbands_<slug>.csv`` — per-session dwell time in each of ``--magbands`` (default 3)
-  within-path zoom bands (tidy long format; see :func:`blinded_focus.metrics.zoom_band_labels`).
+  per-session ``regionCoveragePct`` (vs the slide consensus). (Tier 3 C6, appended) ``jsDivergence``
+  -- Jensen-Shannon divergence (base-2, symmetric, bounded ``[0, 1]``; see
+  :func:`blinded_focus.metrics.js_divergence`) of every pairwise row (not diagonal-only — unlike
+  ``diffFromConsensus``/``coincidenceLevel``, this is a genuine pairwise quantity), exactly ``0.0``
+  on the diagonal.
+- per slide, when ``--reference``/``--roi`` given: ``reference_<slug>.csv``. (Tier 3 C6, appended)
+  ``precisionAtTopK``/``recall`` -- the reader's top-:data:`blinded_focus.metrics.PRECISION_K_FRAC`
+  (10%) highest-dwell cells vs the SAME reference mask this file already compares against (whichever
+  of ``--roi``/``--reference`` built it — see :func:`blinded_focus.metrics.precision_recall_at_topk`),
+  separating "missed target" (low recall) from "wasted attention" (low precision). Blank if the
+  reference mask or the top-K set is empty.
+- per slide, when the slide has >=2 sessions (Tier 3 C6): ``consensus_count_<slug>.csv`` — the
+  spatial structure ``coincidenceLevel`` collapses to one scalar: for every grid cell (on the
+  slide's common resampled grid) with ``nReaders`` (count of sessions whose own
+  :func:`blinded_focus.metrics.normalise_max`-normalized dwell exceeds
+  :data:`HOTSPOT_THRESH_FRAC`, the SAME threshold :func:`blinded_focus.metrics.count_hotspots`
+  already uses for ``nHotspots`` — a different, coarser threshold than ``IOU_THRESH`` used by
+  ``coincidenceLevel`` itself) ``>= 1``: ``cellRow``, ``cellCol``, ``nReaders``. Cells with
+  ``nReaders == 0`` are omitted (not written). Written (possibly with zero data rows) for every
+  slide with >=2 sessions, regardless of whether any cell clears the threshold.
+- per slide, when any session has a schema/3+ ``path``: ``scanpath_<slug>.csv`` (``sessionA``,
+  ``sessionB``, ``levenshteinSim``, ``transitionEntropy`` (diagonal-only), plus (Tier 3 C3,
+  additive) ``dtwDistance`` -- Dynamic Time Warping between the two sessions' z-normalized
+  viewport-center sequences, standard DP (NOT Frechet distance), raw accumulated cost (not
+  path-length-normalized); see :func:`blinded_focus.metrics.dtw_distance` for the pinned
+  algorithm -- always exactly ``0.0`` on the diagonal), and (Phase 1; Tier 2 B1/B3)
+  ``magbands_<slug>.csv`` — per-session dwell time (Tier 2 B1: idle-excluded) in
+  each zoom band, plus a ``bandScheme`` column (``"canonical"``/``"tercile"``, Tier 2 B3): by
+  default (``--magband-scheme canonical``) sessions with a computable true magnification
+  (``baseMagnification`` + per-point ``dsMilli``) get 7 fixed bands via
+  :data:`blinded_focus.metrics.MAG_BAND_CUTS`; every other session (or every session, under
+  ``--magband-scheme tercile``) falls back to the pre-B3 ``--magbands`` (default 3) within-path
+  quantile scheme (tidy long format; see :func:`blinded_focus.metrics.magband_labels_for_scheme`).
+  **B3 CHANGES** the scheme (and band count) for any session whose true magnification is
+  computable (unchanged for null-``baseMagnification`` sessions, which keep terciles).
 - per slide, when any session has at least one annotation: (Phase 2) ``annotations_<slug>.csv`` —
   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
   diagonal-reuse convention as ``compare_<slug>.csv``) plus a slide-level ``coincidenceLevel``
   over those same regions.
+- per slide, when at least one session carries schema/5 mouse data (Tier 3 C2):
+  ``mouse_<slug>.csv`` — pairwise ``sessionA``, ``sessionB``, ``cc``, ``iou`` of each session's
+  own point-based mouse-dwell grid (resampled to the slide's common grid; a session without mouse
+  data contributes an all-zero grid, same convention ``annotations_<slug>.csv`` uses for a
+  session with no annotations), plus a slide-level ``coincidenceLevel`` (same diagonal-reuse
+  convention as ``compare_<slug>.csv``/``annotations_<slug>.csv``).
 - (Phase 3) ``decisions.csv`` — one row per (slide, session) with a hand-entered ``decision``
   object (``diagnosis``, ``confidence``, ``decisionMs``): ``slide``, ``sessionId`` (stable join
   key), ``session`` (display label), ``diagnosis``, ``confidence``, ``confidenceScaled``
   (``(confidence-1)/4``, blank if ``confidence`` isn't numeric), ``decisionMs``,
-  ``decisionLatencyMs`` (currently ``== decisionMs``), ``correctDx`` (DISPLAY-ONLY, from
+  ``decisionLatencyMs`` (``== decisionMs``, i.e. time-from-slide-open — this is now permanently
+  distinct from ``responseLatencyMs`` below, not a placeholder), ``correctDx`` (DISPLAY-ONLY, from
   ``--key``), ``correct`` (HAND-GRADED ONLY, from ``--graded`` — blank otherwise; never
-  auto-derived by comparing ``diagnosis`` to ``correctDx``). Written only if at least one
-  fragment carries a decision; otherwise a stderr warning and no file.
+  auto-derived by comparing ``diagnosis`` to ``correctDx``), (Tier 3 C5, appended) ``promptShownMs``
+  (passthrough of the recorder's dialog-shown timestamp, relative to slide-record start; blank for
+  a fragment recorded before the recorder gained this field) and ``responseLatencyMs`` (=
+  ``decisionMs - promptShownMs``, the true once-prompted deliberation time; blank unless BOTH are
+  numeric). Written only if at least one fragment carries a decision; otherwise a stderr warning
+  and no file.
 - (Phase 3) ``nav_accuracy.csv`` — written only when ``--graded`` supplies at least one graded
-  decision: one row per :data:`NAV_ACCURACY_COLS` navigation metric, joined to ``correct`` by
-  ``(slide, sessionId)`` — ``metric``, ``n``, ``pointBiserialR`` (plain Pearson, blank unless
-  ``n >= 5`` and both sides have non-zero variance — see :func:`_pearson_guarded`),
-  ``meanCorrect``, ``meanIncorrect``, ``medianCorrect``, ``medianIncorrect``, ``meanDiff``
-  (blank unless both groups have ``n >= 2``). No p-values or confidence intervals at this
-  pilot scale.
-- ``summary.md`` — counts, per-slide agreement, reference ranking, headline zoom/scanning numbers,
+  decision: one row per :data:`NAV_ACCURACY_COLS` navigation metric (Tier 1 A1: extended with
+  ``durationMs``, ``cursorOverSlidePct``, ``mouseViewportCouplingPx``) plus one row for
+  ``decisionLatencyMs`` (Tier 1 A1, sourced directly from ``decision_rows``, not ``metrics_rows``),
+  joined to ``correct`` by ``(slide, sessionId)`` — ``metric``, ``n``, ``pointBiserialR`` (plain
+  Pearson, blank unless ``n >= 5`` and both sides have non-zero variance — see
+  :func:`_pearson_guarded`), ``meanCorrect``, ``meanIncorrect``, ``medianCorrect``,
+  ``medianIncorrect``, ``meanDiff`` (blank unless both groups have ``n >= 2``). No p-values or
+  confidence intervals at this pilot scale.
+- per slide (Tier 1 A5): ``hotspots_<slug>.csv`` — top-:data:`HOTSPOT_TOP_N` dwell cells per
+  session (every session, at its own native grid resolution): ``session``, ``rank``, ``cellRow``,
+  ``cellCol``, ``centerImageX``, ``centerImageY``, ``dwellMs``, ``dwellFrac``. Ties broken
+  deterministically (value descending, flat index ascending — see
+  :func:`blinded_focus.metrics.top_hotspots`).
+- per slide, when any session has a schema/3+ ``path`` (Tier 1 A5): ``transitions_<slug>.csv`` —
+  top-:data:`TRANSITIONS_TOP_N` directed cell-to-cell transitions per session: ``session``,
+  ``fromCell``, ``toCell``, ``count`` (ties broken deterministically — see
+  :func:`blinded_focus.metrics.top_transitions`).
+- per slide, when any session has a schema/3+ ``path`` AND at least one fixation was found on this
+  slide (Tier 3 C1): ``fixations_<slug>.csv`` — one row per I-DT fixation, per session: ``session``,
+  ``idx`` (1-based, in scanpath order), ``startMs``, ``durationMs``, ``centerImageX``,
+  ``centerImageY``, ``nPoints`` — see :func:`blinded_focus.metrics.fixations_idt`.
+- ``summary.md`` — counts, (Tier 2 B4, when any path-carrying session exists) a magnification-
+  source caveat line, per-slide agreement, reference ranking, headline zoom/scanning numbers,
   (Phase 2) headline annotation-coverage + cursor-coupling numbers, and (Phase 3, gated on
   ``--graded``) a "Navigation ↔ diagnostic accuracy" section — overall accuracy, per-metric r/n/
   group means, and a calibration summary (``calibrationGap``, ``brierScore``,
@@ -57,10 +143,15 @@ Output files (written to ``--out DIR``):
   ``<out>/<slug>/``, plus (Phase 1, when a path exists) a scanpath-rasterized fine heatmap at
   ``--res`` resolution (``..._scanpath_raster.png`` — the trustworthy high-magnification map,
   independent of the recorded grid) and one heatmap per magnification band
-  (``..._magband<N>.png``).
+  (``..._magband<N>.png``); (Tier 3 C2, when the session carries schema/5 mouse data)
+  ``..._mousemap.png`` — a heatmap of the point-based mouse-dwell grid at ``--res`` resolution
+  (reuses the same heatmap plotting helper; not part of the numeric-parity contract); plus, per
+  slide when any session has a path (Tier 1 A6): ``overlay_<slug>_scanpaths.png`` — every
+  path-carrying session's viewport-center path on one shared axis (not part of the numeric-parity
+  contract — a PNG, existence/valid-magic only).
 
 Design note on "matrices" (``compare_<slug>.csv`` / ``scanpath_<slug>.csv`` / ``magbands_<slug>.csv``
-/ ``annotations_<slug>.csv``): these are written as *tidy long-format* tables (one row per pair or
+/ ``annotations_<slug>.csv`` / ``mouse_<slug>.csv``): these are written as *tidy long-format* tables (one row per pair or
 per (session, band)) rather than 2D matrix-shaped CSVs, so a single file can carry multiple metrics
 and stays trivial to `pivot()`/parse in either Python or R. As a compact way to attach per-session
 (not per-pair) values, the *diagonal* row of each pair table also carries extra columns
@@ -68,9 +159,9 @@ and stays trivial to `pivot()`/parse in either Python or R. As a compact way to 
 ``scanpath_<slug>.csv``) — off-diagonal rows leave them blank. ``coincidenceLevel`` is a
 slide-level (not per-session) statistic; by convention it is written on exactly one row per
 slide — the diagonal row of the *first* session in insertion order (``session_ids[0]``) — all
-other rows leave it blank. ``annotations_<slug>.csv`` reuses this exact same diagonal-reuse
-convention for its own (annotation-region) ``coincidenceLevel``. An R port must place it
-identically for the two toolkits' CSVs to diff-match.
+other rows leave it blank. ``annotations_<slug>.csv`` and ``mouse_<slug>.csv`` reuse this exact
+same diagonal-reuse convention for their own (annotation-region / mouse-dwell) ``coincidenceLevel``.
+An R port must place it identically for the two toolkits' CSVs to diff-match.
 """
 import argparse
 import csv
@@ -97,6 +188,19 @@ DEFAULT_RES = 512
 #: Default number of within-path zoom bands (terciles) for the magnification-split analysis,
 #: overridable via ``--magbands``.
 DEFAULT_MAGBANDS = 3
+#: Tier 1 A5: number of top-dwell cells exported per session to ``hotspots_<slug>.csv``.
+HOTSPOT_TOP_N = 5
+#: Tier 1 A5: number of top directed cell-transitions exported per session to
+#: ``transitions_<slug>.csv``.
+TRANSITIONS_TOP_N = 15
+#: Tier 2 B3: default ``--magband-scheme`` -- canonical (true-magnification) bands, auto-falling
+#: back to the tercile scheme per-session when a session's baseMagnification/dsMilli aren't
+#: computable (see :func:`blinded_focus.metrics.magband_labels_for_scheme`).
+DEFAULT_MAGBAND_SCHEME = "canonical"
+#: Tier 2 B3: number of canonical magnification bands (fixed by
+#: :data:`blinded_focus.metrics.MAG_BAND_CUTS`'s 6 cut points -- NOT overridable via
+#: ``--magbands``, which only sizes the tercile fallback scheme).
+CANONICAL_MAGBAND_COUNT = len(m.MAG_BAND_LABELS)
 
 
 def _res_grid_dims(img_w, img_h, res):
@@ -363,10 +467,17 @@ def _fmt(x, nd=3):
 #: Navigation-metric columns (from ``metrics.csv``) correlated against graded diagnostic accuracy
 #: in :func:`_nav_accuracy_rows`. All are grid/path-level per-session metrics already present as
 #: ``row`` keys in the main loop above.
+#:
+#: Tier 1 A1 extension: ``durationMs``, ``cursorOverSlidePct``, ``mouseViewportCouplingPx`` close
+#: the "recorded-but-uncorrelated" gap identified by the data-dimension audit -- they were already
+#: written to ``metrics.csv`` but never joined against graded accuracy. (``decisionLatencyMs``, the
+#: fourth recorded-but-uncorrelated dimension, is sourced directly from ``decision_rows`` rather
+#: than this metrics.csv-backed list -- see :func:`_nav_accuracy_rows`'s dedicated block below.)
 NAV_ACCURACY_COLS = [
     "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
     "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
     "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
+    "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx",
 ]
 #: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or
 #: with zero variance on either side) :func:`_pearson_guarded` returns blank, never a numerically
@@ -385,10 +496,43 @@ def _pearson_guarded(xs, ys, min_n=MIN_CORRELATION_N):
     return float(np.corrcoef(xs, ys)[0, 1])
 
 
+def _nav_stat_row(metric_name, xs, ys):
+    """Shared point-biserial-r + group mean/median/meanDiff computation for one navigation metric,
+    given already-filtered/zipped ``(xs, ys)`` pairs (``xs`` = the metric's value, ``ys`` = the
+    matching 0/1 graded ``correct``). Factored out of :func:`_nav_accuracy_rows`'s per-column loop
+    so the Tier 1 A1 ``decisionLatencyMs`` row (sourced directly from ``decision_rows``, not via
+    the ``metrics_rows`` column loop) computes its stats identically, not via a parallel
+    reimplementation that could silently drift from the original."""
+    r = _pearson_guarded(ys, xs)
+    correct_vals = [x for x, y in zip(xs, ys) if y == 1]
+    incorrect_vals = [x for x, y in zip(xs, ys) if y == 0]
+    mean_correct = float(statistics.mean(correct_vals)) if correct_vals else float("nan")
+    mean_incorrect = float(statistics.mean(incorrect_vals)) if incorrect_vals else float("nan")
+    median_correct = float(statistics.median(correct_vals)) if correct_vals else float("nan")
+    median_incorrect = float(statistics.median(incorrect_vals)) if incorrect_vals else float("nan")
+    mean_diff = (
+        (mean_correct - mean_incorrect)
+        if (len(correct_vals) >= 2 and len(incorrect_vals) >= 2)
+        else float("nan")
+    )
+    return {
+        "metric": metric_name,
+        "n": len(xs),
+        "pointBiserialR": r,
+        "meanCorrect": mean_correct,
+        "meanIncorrect": mean_incorrect,
+        "medianCorrect": median_correct,
+        "medianIncorrect": median_incorrect,
+        "meanDiff": mean_diff,
+    }
+
+
 def _nav_accuracy_rows(metrics_rows, decision_rows):
     """Join decisions' hand-graded ``correct`` (0/1) onto ``metrics_rows`` by the stable
     ``(slide, sessionId)`` key (never the display label), then compute a guarded point-biserial r
-    plus group means/medians per navigation column in :data:`NAV_ACCURACY_COLS`.
+    plus group means/medians per navigation column in :data:`NAV_ACCURACY_COLS` (via
+    :func:`_nav_stat_row`), plus (Tier 1 A1) a ``decisionLatencyMs`` row sourced directly from
+    ``decision_rows``.
 
     Returns ``(rows, had_any_graded)`` -- ``had_any_graded`` gates whether ``nav_accuracy.csv`` and
     the summary section get written at all (only when at least one ``--graded`` row was supplied).
@@ -420,28 +564,27 @@ def _nav_accuracy_rows(metrics_rows, decision_rows):
                 continue
             xs.append(float(v))
             ys.append(correct_by[key])
-        r = _pearson_guarded(ys, xs)
-        correct_vals = [x for x, y in zip(xs, ys) if y == 1]
-        incorrect_vals = [x for x, y in zip(xs, ys) if y == 0]
-        mean_correct = float(statistics.mean(correct_vals)) if correct_vals else float("nan")
-        mean_incorrect = float(statistics.mean(incorrect_vals)) if incorrect_vals else float("nan")
-        median_correct = float(statistics.median(correct_vals)) if correct_vals else float("nan")
-        median_incorrect = float(statistics.median(incorrect_vals)) if incorrect_vals else float("nan")
-        mean_diff = (
-            (mean_correct - mean_incorrect)
-            if (len(correct_vals) >= 2 and len(incorrect_vals) >= 2)
-            else float("nan")
-        )
-        rows.append({
-            "metric": col,
-            "n": len(xs),
-            "pointBiserialR": r,
-            "meanCorrect": mean_correct,
-            "meanIncorrect": mean_incorrect,
-            "medianCorrect": median_correct,
-            "medianIncorrect": median_incorrect,
-            "meanDiff": mean_diff,
-        })
+        rows.append(_nav_stat_row(col, xs, ys))
+
+    # Tier 1 A1: decisionLatencyMs is sourced directly from decision_rows -- it and `correct`
+    # already live on the SAME (slide, sessionId) decision entry, so there is no cross-table join
+    # to perform here at all (unlike the metrics_rows columns above); iterating decision_rows
+    # directly is itself the (slide, sessionId)-keyed join, with no label bridge in sight.
+    lat_xs, lat_ys = [], []
+    for r in decision_rows:
+        if r["correct"] not in (0, 1):
+            continue
+        lat = r.get("decisionLatencyMs")
+        if lat == "" or lat is None:
+            continue
+        try:
+            lat_val = float(lat)
+        except (TypeError, ValueError):
+            continue
+        lat_xs.append(lat_val)
+        lat_ys.append(r["correct"])
+    rows.append(_nav_stat_row("decisionLatencyMs", lat_xs, lat_ys))
+
     return rows, had_any_graded
 
 
@@ -476,13 +619,15 @@ def _calibration_stats(decision_rows):
 def analyze(
     inputs, out_dir, reference=None, roi=None, labels_csv=None, make_figures=False,
     res=DEFAULT_RES, magbands=DEFAULT_MAGBANDS, key_csv=None, graded_csv=None,
+    magband_scheme=DEFAULT_MAGBAND_SCHEME,
 ):
     """Run the full pipeline over ``inputs`` (files/dirs/zips) into ``out_dir``. Returns the list
     of metrics-row dicts written to ``metrics.csv`` (for programmatic/test use).
 
     ``res`` sets the longest-side resolution of the scanpath-rasterized fine/magband heatmaps
     (see :func:`_res_grid_dims`); ``magbands`` sets the number of within-path zoom bands for the
-    magnification-split analysis (see :func:`blinded_focus.metrics.zoom_band_labels`).
+    tercile-fallback magnification-split analysis (see
+    :func:`blinded_focus.metrics.zoom_band_labels`).
 
     ``key_csv`` (``--key``) is a DISPLAY-ONLY ``slideKey,correctDx`` answer key -- it populates
     ``decisions.csv``'s ``correctDx`` column beside the reader's own ``diagnosis`` for a human to
@@ -490,6 +635,15 @@ def analyze(
     comes only from ``graded_csv`` (``--graded``, a ``slideKey,sessionId,correct`` hand-graded
     sheet); without it every ``correct`` cell is blank and no navigation-accuracy correlation is
     computed (see :func:`_nav_accuracy_rows`).
+
+    ``magband_scheme`` (Tier 2 B3, ``--magband-scheme``) is ``"canonical"`` (default) or
+    ``"tercile"``. ``"canonical"`` uses true-objective-magnification bands
+    (:func:`blinded_focus.metrics.MAG_BAND_CUTS`, 7 bands) for every session whose
+    ``baseMagnification``/``dsMilli`` are computable, auto-falling back to the tercile scheme
+    per-session otherwise (see :func:`blinded_focus.metrics.magband_labels_for_scheme`).
+    ``"tercile"`` forces the pre-B3 within-path quantile scheme for every session regardless of
+    ``baseMagnification`` availability. ``magbands_<slug>.csv`` gains a ``bandScheme`` column
+    recording which scheme was actually used for each session's rows.
     """
     os.makedirs(out_dir, exist_ok=True)
     fragments = bf_io.load_fragments(inputs)
@@ -536,12 +690,19 @@ def analyze(
         path_seq = {}        # sessionId -> visited-cell sequence (schema/3 only)
         common_ann_masks = {}  # sessionId -> this session's own annotated region, resampled to
                                 # (tw, th) boolean -- used only by the cross-user annotations_<slug>.csv
+        mouse_native = {}    # sessionId -> this session's own NATIVE (gw, gh) point-based mouse-
+                             # dwell grid (Tier 3 C2) -- all-zero (never None) for a session with
+                             # no schema/5 mouse data or zero on-slide points, mirroring
+                             # common_ann_masks' all-False convention for annotation-less sessions,
+                             # so mouse_<slug>.csv's cross-session resample/compare never needs a
+                             # None-check.
 
         for sid, f in sessions:
             gw, gh = int(f["gridWidth"]), int(f["gridHeight"])
             grid = [float(v) for v in f["grid"]]
             native_grid[sid] = (grid, gw, gh)
             resampled[sid] = m.resample_nn(grid, gw, gh, tw, th)
+            mouse_native[sid] = np.zeros(gw * gh, dtype=float)
 
             comx, comy = m.center_of_mass(grid, gw, gh)
             base_mag = f.get("baseMagnification")
@@ -561,6 +722,10 @@ def analyze(
             n_ann = len(ann_fc.get("features", []) or [])
             ann_area = annotations_area_px(ann_fc)
             native_ann_mask = rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
+            # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): overlap-correct companion to
+            # ann_area above -- reuses the SAME native_ann_mask (no re-rasterization), so this is
+            # always in sync with dwellInAnnotationPct/enrichmentRatio's mask.
+            ann_area_union = m.annotated_area_union_px(native_ann_mask, gw, gh, img_w, img_h)
             # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the
             # slide's common (tw, th) grid -- resample the already-rasterized native mask (as
             # 0.0/1.0 floats) via the same nearest-neighbour resampler used for dwell grids,
@@ -615,6 +780,48 @@ def analyze(
                 "annotationReentryCount": "",
                 "cursorOverSlidePct": "",
                 "mouseViewportCouplingPx": "",
+                # Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-...): A2 turn-angle
+                # directionality + A4 active fraction are path-only (blank without a path at all,
+                # like the block above); A3 mouse kinematics is additionally gated on schema/5
+                # mouse data (populated in the `has_mouse_data` branch below, alongside the
+                # existing Phase 2 cursor metrics).
+                "meanAbsTurnAngleDeg": "",
+                "turnAngleEntropy": "",
+                "mousePathLengthPx": "",
+                "mouseVelocityPxPerSec": "",
+                "activeFractionPct": "",
+                # Tier 2 (docs/superpowers/specs/2026-07-23-...) additive columns: B1 transparency
+                # (idleMs/activeSpanMs), B2 Drew-fidelity zoom (avgZoomLog2W/
+                # drillingRateOctavesPerMin), B4 magnification-source flag. All path-only (blank
+                # without a path at all, like the Tier 1 block above).
+                "idleMs": "",
+                "activeSpanMs": "",
+                "avgZoomLog2W": "",
+                "drillingRateOctavesPerMin": "",
+                "magnificationSource": "",
+                # Tier 3 C1 (docs/superpowers/specs/2026-07-23-...): I-DT fixation extraction --
+                # path-only (blank without a path at all, like the Tier 1/2 blocks above).
+                "nFixations": "",
+                "meanFixationMs": "",
+                "medianFixationMs": "",
+                "sdFixationMs": "",
+                "fixationsPerMin": "",
+                # Tier 3 C2/C4 (docs/superpowers/specs/2026-07-23-...): mouse-dwell coverage/
+                # entropy (schema/5 only, populated in the `has_mouse_data` branch below) and
+                # segment-level linearity (path-only, populated in the `if path:` block below).
+                "mouseCoveragePct": "",
+                "mouseEntropy": "",
+                "meanSegmentLinearity": "",
+                # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended at the END of
+                # metrics.csv's fieldnames (additive/append-only column order), NOT interleaved
+                # next to annotatedAreaPx/meanSegmentLinearity above despite the conceptual
+                # relation -- see the module docstring's Tier 3 C6 note.
+                # annotatedAreaUnionPx is grid+annotation-mask-only (no path required), so it's
+                # always populated (0.0 with no annotations), like annotatedAreaPx above.
+                "annotatedAreaUnionPx": ann_area_union,
+                # visitCountJaccard is path-only (blank without a path), populated in the `if
+                # path:` block below.
+                "visitCountJaccard": "",
             }
 
             path = f.get("path")
@@ -642,9 +849,68 @@ def analyze(
                 row["annotationReentryCount"] = m.annotation_reentry_count(
                     path, native_ann_mask, gw, gh, img_w, img_h
                 )
+                # Tier 1 A2 (turn-angle directionality) + A4 (active fraction): path-only, no
+                # mouse data or annotation needed -- populated whenever a path exists at all
+                # (blank/NaN internally on their own documented degenerate cases, e.g. <3 points).
+                row["meanAbsTurnAngleDeg"] = m.mean_abs_turn_angle_deg(path)
+                row["turnAngleEntropy"] = m.turn_angle_entropy(path)
+                row["activeFractionPct"] = m.active_fraction_pct(path, f.get("durationMs"))
                 if m.has_mouse_data(path):
                     row["cursorOverSlidePct"] = m.cursor_over_slide_pct(path)
                     row["mouseViewportCouplingPx"] = m.mouse_viewport_coupling_px(path)
+                    # Tier 1 A3: mouse kinematics, schema/5 only (same gate as the two cursor
+                    # metrics above).
+                    row["mousePathLengthPx"] = m.mouse_path_length_px(path)
+                    row["mouseVelocityPxPerSec"] = m.mouse_velocity_px_per_sec(path)
+                    # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): point-based mouse-dwell
+                    # grid at this session's own NATIVE (gw, gh) resolution (same resolution
+                    # convention coveragePct/entropy use for the recorded grid above). `None` (blank
+                    # mouseCoveragePct/mouseEntropy) iff there are zero on-slide points anywhere in
+                    # the path -- see mouse_raster_from_path's docstring; `mouse_native[sid]` stays
+                    # the all-zero default in that case, which is exactly right for the cross-
+                    # session mouse_<slug>.csv comparison below (an all-zero grid, not a missing
+                    # one).
+                    mouse_grid = m.mouse_raster_from_path(path, img_w, img_h, gw, gh)
+                    if mouse_grid is not None:
+                        row["mouseCoveragePct"] = m.coverage(mouse_grid) * 100.0
+                        row["mouseEntropy"] = m.entropy(mouse_grid)
+                        mouse_native[sid] = mouse_grid
+                # Tier 2 B1 transparency columns + B2 Drew-fidelity zoom + B4 magnification-source
+                # flag: path-only (like the Tier 1 block above), populated regardless of mouse data.
+                row["idleMs"] = m.idle_ms(path)
+                row["activeSpanMs"] = m.active_span_ms(path)
+                row["avgZoomLog2W"] = m.avg_zoom_log2_w(path, base_mag, img_w)
+                row["drillingRateOctavesPerMin"] = m.drilling_rate_octaves_per_min(path, base_mag, img_w)
+                row["magnificationSource"] = "true" if base_mag is not None else "proxy-downsample"
+                # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
+                # deterministic dispersion-threshold detector over the viewport centers. Computed
+                # once here for metrics.csv's summary columns; the per-fixation
+                # fixations_<slug>.csv rows are built later (per slide) by recomputing this same
+                # call directly off each path session's own fragment (mirrors the magband-split
+                # export's recompute-don't-cache convention), so no extra per-slide cache dict is
+                # needed here.
+                fx = m.fixations_idt(path)
+                row["nFixations"] = m.n_fixations(fx)
+                row["meanFixationMs"] = m.mean_fixation_ms(fx)
+                row["medianFixationMs"] = m.median_fixation_ms(fx)
+                row["sdFixationMs"] = m.sd_fixation_ms(fx)
+                row["fixationsPerMin"] = m.fixations_per_min(fx, path)
+                # Tier 3 C4 (docs/superpowers/specs/2026-07-23-...): segment-level linearity, split
+                # at this session's own top-hotspot cells -- reuses the session's own NATIVE
+                # (grid, gw, gh) recorded dwell grid (same resolution hotspots_<slug>.csv's
+                # top_hotspots call uses), not the slide's common (tw, th) or a scanpath raster.
+                row["meanSegmentLinearity"] = m.mean_segment_linearity(
+                    path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N
+                )
+                # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the
+                # visit-count grid needs the session's own NATIVE (gw, gh) visited-cell sequence,
+                # recomputed here (NOT `path_seq[sid]`, which is built at the slide's common
+                # (tw, th) resolution for cross-session scanpath_<slug>.csv comparisons) -- same
+                # native-resolution convention meanSegmentLinearity/hotspots_<slug>.csv use.
+                native_seq = m.visited_sequence(path, gw, gh, img_w, img_h)
+                row["visitCountJaccard"] = m.visit_count_jaccard(
+                    grid, gw, gh, native_seq, HOTSPOT_TOP_N
+                )
 
             metrics_rows.append(row)
 
@@ -662,6 +928,18 @@ def analyze(
                 else (float(confidence) - 1.0) / 4.0
             )
             decision_ms = dec.get("decisionMs", "")
+            # Tier 3 C5: promptShownMs is a passthrough, mirroring decisionMs's own handling above
+            # -- absent (older fragment, recorded before the recorder gained this field) degrades
+            # to blank, never a crash. responseLatencyMs = decisionMs - promptShownMs is computed
+            # only when BOTH are real numbers (never bool -- same guard style as confidence below).
+            prompt_shown_ms = dec.get("promptShownMs", "")
+            _decision_ms_numeric = isinstance(decision_ms, (int, float)) and not isinstance(decision_ms, bool)
+            _prompt_shown_ms_numeric = isinstance(prompt_shown_ms, (int, float)) and not isinstance(prompt_shown_ms, bool)
+            response_latency_ms = (
+                decision_ms - prompt_shown_ms
+                if _decision_ms_numeric and _prompt_shown_ms_numeric
+                else ""
+            )
             # Blank iff absent/None or its string form is empty; otherwise the string form -- so a
             # numeric 0 sessionId stably maps to "0" (matches the R toolkit's
             # nzchar(as.character(...)) rule exactly; the prior `f.get("sessionId") or ""` treated
@@ -688,14 +966,22 @@ def analyze(
                 ),
                 "confidenceScaled": conf_scaled,
                 "decisionMs": decision_ms,
-                # == decisionMs (both are relative to the slide's recording start); kept as a
-                # separate column so a future recorder revision that captures a distinct
-                # "time from leave-prompt to submit" value has a column ready to diverge into.
+                # == decisionMs (both relative to the slide's recording start): "time from slide
+                # open to submit". Tier 3 C5 (2026-07-23) added the recorder's promptShownMs, which
+                # made the previously-anticipated "time from leave-prompt to submit" column real --
+                # that's responseLatencyMs below, appended as its own column rather than replacing
+                # this one. decisionLatencyMs itself stays permanently == decisionMs.
                 "decisionLatencyMs": decision_ms,
                 "correctDx": correct_dx,
                 # blank unless --graded supplied a (slideKey, sessionId) row -- NEVER auto-derived
                 # from diagnosis == correctDx string comparison.
                 "correct": graded_val,
+                # Tier 3 C5 (appended, additive): passthrough of the recorder's dialog-shown
+                # timestamp and the derived once-prompted response latency. Blank unless numeric
+                # (same guard as confidence + the R sibling's is.numeric()), so a malformed
+                # non-numeric promptShownMs renders blank identically in both toolkits.
+                "promptShownMs": prompt_shown_ms if _prompt_shown_ms_numeric else "",
+                "responseLatencyMs": response_latency_ms,
             })
 
         # ------------------------------------------------------------------
@@ -706,7 +992,11 @@ def analyze(
         # This slide's just-appended metrics_rows entries (one per session, same order as
         # `sessions`) -- reused below for the zoom/scanning summary aggregates.
         slide_metric_rows = metrics_rows[-len(sessions):]
-        consensus_grid = np.mean([m.normalise_max(resampled[sid]) for sid in session_ids], axis=0)
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): factored out of the consensus_grid
+        # one-liner below so consensus_count_<slug>.csv can reuse the SAME per-session normalized
+        # grids (identical np.mean input as before -- byte-identical consensus_grid, no drift).
+        norm_grids = [m.normalise_max(resampled[sid]) for sid in session_ids]
+        consensus_grid = np.mean(norm_grids, axis=0)
         # Slide-level (not per-session) statistic -- placed on exactly one row below (see module
         # docstring's "coincidenceLevel" convention note).
         coincidence_val = m.coincidence_level([resampled[sid] for sid in session_ids], IOU_THRESH)
@@ -723,6 +1013,10 @@ def analyze(
                     "diffFromConsensus": "",
                     "coincidenceLevel": "",
                     "regionCoveragePct": "",
+                    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): a genuine PAIRWISE
+                    # quantity (unlike diffFromConsensus/coincidenceLevel), so it is computed on
+                    # EVERY row, not diagonal-only -- exactly 0.0 for a==b (self-comparison).
+                    "jsDivergence": m.js_divergence(resampled[a], resampled[b]),
                 }
                 if a == b:
                     row["diffFromConsensus"] = 1.0 - m.cc(resampled[a], consensus_grid)
@@ -736,11 +1030,78 @@ def analyze(
             os.path.join(out_dir, f"compare_{slide_slug}.csv"),
             compare_rows,
             ["sessionA", "sessionB", "cc", "sim", "iou", "diffFromConsensus",
-             "coincidenceLevel", "regionCoveragePct"],
+             "coincidenceLevel", "regionCoveragePct",
+             # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order
+             # above is unchanged.
+             "jsDivergence"],
         )
         fig.heatmap(
             consensus_grid, tw, th, f"Consensus - {slide_key}",
             os.path.join(out_dir, f"consensus_{slide_slug}.png"),
+        )
+
+        # ------------------------------------------------------------------
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): per-cell reader-count "weak
+        # annotation" map -- the spatial structure coincidenceLevel collapses to one scalar.
+        # Reuses norm_grids (same per-session normalise_max arrays as consensus_grid above, at the
+        # slide's common (tw, th) grid) and HOTSPOT_THRESH_FRAC (the SAME threshold
+        # count_hotspots/nHotspots already use -- a coarser per-session-max-relative threshold,
+        # distinct from coincidence_level's own IOU_THRESH). Written whenever the slide has >=2
+        # sessions (a single session's "reader count" is a degenerate/uninformative 0-or-1 map),
+        # regardless of whether any cell actually clears the threshold (possibly a header-only,
+        # zero-row file -- blank-not-crash, not a missing file).
+        # ------------------------------------------------------------------
+        if len(session_ids) >= 2:
+            reader_counts = np.sum(
+                [g > HOTSPOT_THRESH_FRAC for g in norm_grids], axis=0
+            )
+            consensus_count_rows = []
+            for idx in range(tw * th):
+                n_readers = int(reader_counts[idx])
+                if n_readers >= 1:
+                    row_i, col_i = divmod(idx, tw)
+                    consensus_count_rows.append({
+                        "cellRow": row_i, "cellCol": col_i, "nReaders": n_readers,
+                    })
+            _write_csv(
+                os.path.join(out_dir, f"consensus_count_{slide_slug}.csv"),
+                consensus_count_rows,
+                ["cellRow", "cellCol", "nReaders"],
+            )
+
+        # ------------------------------------------------------------------
+        # Tier 1 A5: top-hotspots export -- surfaces the already-implemented
+        # blinded_focus.metrics.top_hotspots at each session's own NATIVE (gw, gh) grid
+        # resolution (per-session metric, not cross-session -- same resolution convention as
+        # annotationReentryCount above). Written for every session unconditionally ("when any
+        # session has a grid, i.e. always" -- every fragment always carries a grid).
+        # ------------------------------------------------------------------
+        hotspot_rows = []
+        for sid in session_ids:
+            grid, gw, gh = native_grid[sid]
+            f = frag_by_sid[sid]
+            img_w = f.get("imageWidth", 1)
+            img_h = f.get("imageHeight", 1)
+            total = float(sum(grid))
+            label = labels.get(sid, sid)
+            for rank, (row_i, col_i, value) in enumerate(
+                m.top_hotspots(grid, gw, gh, HOTSPOT_TOP_N), start=1
+            ):
+                hotspot_rows.append({
+                    "session": label,
+                    "rank": rank,
+                    "cellRow": row_i,
+                    "cellCol": col_i,
+                    "centerImageX": (col_i + 0.5) / gw * img_w,
+                    "centerImageY": (row_i + 0.5) / gh * img_h,
+                    "dwellMs": value,
+                    "dwellFrac": (value / total) if total > 0 else "",
+                })
+        _write_csv(
+            os.path.join(out_dir, f"hotspots_{slide_slug}.csv"),
+            hotspot_rows,
+            ["session", "rank", "cellRow", "cellCol", "centerImageX", "centerImageY",
+             "dwellMs", "dwellFrac"],
         )
 
         # ------------------------------------------------------------------
@@ -775,6 +1136,45 @@ def analyze(
                 os.path.join(out_dir, f"annotations_{slide_slug}.csv"),
                 ann_rows,
                 ["sessionA", "sessionB", "iou", "coincidenceLevel"],
+            )
+
+        # ------------------------------------------------------------------
+        # Tier 3 C2 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+        # cross-reader mouse agreement -- pairwise cc/iou of each session's own point-based
+        # mouse-dwell grid (mouse_native, resampled to the slide's common (tw, th) grid) + a
+        # coincidence level, mirroring annotations_<slug>.csv's tidy-long + diagonal-reuse
+        # convention exactly. Gated on at least one session carrying schema/5 mouse data at all
+        # (NOT on whether that session's mouse grid ended up non-empty -- a session whose mouse
+        # data has zero on-slide points still "has mouse data" in the schema sense and should still
+        # trigger the file, same as the annotations gate is on nAnnotations > 0, not on the mask
+        # being non-empty). A session without mouse data contributes its all-zero mouse_native
+        # placeholder (never None), so every session_ids entry participates in the pairwise matrix.
+        # ------------------------------------------------------------------
+        if any(m.has_mouse_data(f.get("path")) for _, f in sessions):
+            mouse_resampled = {
+                sid: m.resample_nn(mouse_native[sid], native_grid[sid][1], native_grid[sid][2], tw, th)
+                for sid in session_ids
+            }
+            mouse_coincidence_val = m.coincidence_level(
+                [mouse_resampled[sid] for sid in session_ids], IOU_THRESH
+            )
+            mouse_rows = []
+            for idx_a, a in enumerate(session_ids):
+                for b in session_ids:
+                    mouse_row = {
+                        "sessionA": labels.get(a, a),
+                        "sessionB": labels.get(b, b),
+                        "cc": m.cc(mouse_resampled[a], mouse_resampled[b]),
+                        "iou": m.iou(mouse_resampled[a], mouse_resampled[b], IOU_THRESH),
+                        "coincidenceLevel": "",
+                    }
+                    if a == b and idx_a == 0:
+                        mouse_row["coincidenceLevel"] = mouse_coincidence_val
+                    mouse_rows.append(mouse_row)
+            _write_csv(
+                os.path.join(out_dir, f"mouse_{slide_slug}.csv"),
+                mouse_rows,
+                ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel"],
             )
 
         mean_cc = m.mean_pairwise_cc([resampled[sid] for sid in session_ids])
@@ -841,6 +1241,11 @@ def analyze(
                     time_off = float(other[~ref_mask].sum())
                     denom = max(int(ref_mask.sum()), 1)
                     ref_cov = float(np.count_nonzero(other[ref_mask] > 0)) / denom
+                    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): precisionAtTopK/recall vs
+                    # the SAME ref_mask this row already compares against (whichever of
+                    # --roi/--reference built it above) -- see
+                    # blinded_focus.metrics.precision_recall_at_topk's docstring.
+                    precision_at_topk, recall_val = m.precision_recall_at_topk(other, ref_mask)
                     return {
                         "session": labels.get(sid, sid),
                         "nss": m.nss(other, ref_mask),
@@ -850,6 +1255,8 @@ def analyze(
                         "refCoveragePct": ref_cov * 100.0,
                         "timeOnRefMs": time_on,
                         "timeOffRefMs": time_off,
+                        "precisionAtTopK": precision_at_topk,
+                        "recall": recall_val,
                     }
 
                 ref_rows = [_ref_row(sid) for sid in session_ids if sid != reference]
@@ -861,7 +1268,10 @@ def analyze(
                     os.path.join(out_dir, f"reference_{slide_slug}.csv"),
                     ref_rows,
                     ["session", "nss", "aucJudd", "cc", "iou", "refCoveragePct",
-                     "timeOnRefMs", "timeOffRefMs"],
+                     "timeOnRefMs", "timeOffRefMs",
+                     # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column
+                     # order above is unchanged.
+                     "precisionAtTopK", "recall"],
                 )
                 reference_summaries.append({"slide": slide_key, "slug": slide_slug, "rows": ref_rows})
 
@@ -878,6 +1288,13 @@ def analyze(
                         "sessionB": labels.get(b, b),
                         "levenshteinSim": m.levenshtein_sim(path_seq[a], path_seq[b]),
                         "transitionEntropy": "",
+                        # Tier 3 C3 (docs/superpowers/specs/2026-07-23-...): DTW distance between
+                        # the two sessions' raw viewport-center paths (NOT the grid-cell
+                        # path_seq/levenshtein sequence) -- a resolution-independent complement.
+                        # Every scan_sids session has a non-empty path by construction (that's the
+                        # gate for being in scan_sids at all), so this is never blank here; always
+                        # exactly 0.0 on the diagonal (a == b), by construction of the DP itself.
+                        "dtwDistance": m.dtw_distance(frag_by_sid[a]["path"], frag_by_sid[b]["path"]),
                     }
                     if a == b:
                         row["transitionEntropy"] = m.transition_entropy(path_seq[a])
@@ -885,37 +1302,105 @@ def analyze(
             _write_csv(
                 os.path.join(out_dir, f"scanpath_{slide_slug}.csv"),
                 scan_rows,
-                ["sessionA", "sessionB", "levenshteinSim", "transitionEntropy"],
+                ["sessionA", "sessionB", "levenshteinSim", "transitionEntropy", "dtwDistance"],
             )
 
         # ------------------------------------------------------------------
-        # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
+        # Tier 1 A5: top-15 per-session directed cell-transitions (path sessions only) -- surfaces
+        # the already-implemented blinded_focus.metrics.transition_matrix (via top_transitions'
+        # deterministic top-N ranking) on each session's own visited-cell sequence (path_seq,
+        # already computed above at the slide's common (tw, th) grid, same sequence
+        # nRevisits/transitionEntropy use).
+        # ------------------------------------------------------------------
+        if scan_sids:
+            transition_rows = []
+            for sid in scan_sids:
+                label = labels.get(sid, sid)
+                for frm, to, cnt in m.top_transitions(path_seq[sid], TRANSITIONS_TOP_N):
+                    transition_rows.append({
+                        "session": label, "fromCell": frm, "toCell": to, "count": cnt,
+                    })
+            if transition_rows:
+                _write_csv(
+                    os.path.join(out_dir, f"transitions_{slide_slug}.csv"),
+                    transition_rows,
+                    ["session", "fromCell", "toCell", "count"],
+                )
+
+        # ------------------------------------------------------------------
+        # Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): per-session
+        # I-DT fixations (path sessions only), same tidy long-format / gate-on-nonempty-rows
+        # convention as transitions_<slug>.csv above -- the file is only written if at least one
+        # fixation was found across every path-carrying session on this slide (a session
+        # contributing zero rows, e.g. a very short scanpath, is simply absent from the file rather
+        # than emitting an empty per-session block). Recomputes blinded_focus.metrics.fixations_idt
+        # directly off each session's own path (same recompute-don't-cache convention the
+        # magnification-split section below uses for its own per-session band assignment).
+        # ------------------------------------------------------------------
+        if scan_sids:
+            fixation_rows = []
+            for sid in scan_sids:
+                label = labels.get(sid, sid)
+                fx = m.fixations_idt(frag_by_sid[sid]["path"]) or []
+                for idx, fxn in enumerate(fx, start=1):
+                    fixation_rows.append({
+                        "session": label,
+                        "idx": idx,
+                        "startMs": fxn["startMs"],
+                        "durationMs": fxn["durationMs"],
+                        "centerImageX": fxn["centerImageX"],
+                        "centerImageY": fxn["centerImageY"],
+                        "nPoints": fxn["nPoints"],
+                    })
+            if fixation_rows:
+                _write_csv(
+                    os.path.join(out_dir, f"fixations_{slide_slug}.csv"),
+                    fixation_rows,
+                    ["session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY",
+                     "nPoints"],
+                )
+
+        # ------------------------------------------------------------------
+        # magnification-split (Phase 1; Tier 2 B1 idle-exclusion + B3 canonical-band scheme):
+        # per-session dwell time in each zoom band -- band ASSIGNMENT is unaffected by idle
+        # exclusion (matches the tercile scheme's pre-existing behavior: quantile cuts, or the
+        # canonical MAG_BAND_CUTS, are computed/applied over every step regardless of idle), only
+        # the per-band bandTimeMs/bandTimePct SUM excludes idle steps' dt (B1).
         # ------------------------------------------------------------------
         if scan_sids:
             magband_rows = []
             for sid in scan_sids:
                 f = frag_by_sid[sid]
                 path = f["path"]
-                bands = m.zoom_band_labels(path, f.get("baseMagnification"), f.get("imageWidth", 1), magbands)
+                base_mag = f.get("baseMagnification")
+                bands, scheme_used = m.magband_labels_for_scheme(
+                    path, base_mag, f.get("imageWidth", 1), magbands, magband_scheme,
+                )
                 if not bands:
                     continue
                 dts = m.step_durations_ms(path)
+                idle = m.idle_step_mask(path)
                 bands_arr = np.asarray(bands)
-                total_dt = float(sum(dts)) if dts else 0.0
+                n_bands_used = CANONICAL_MAGBAND_COUNT if scheme_used == "canonical" else magbands
+                total_dt = float(sum(dt for dt, is_idle in zip(dts, idle) if not is_idle))
                 label = labels.get(sid, sid)
-                for band in range(magbands):
-                    band_dt = float(sum(dt for dt, b in zip(dts, bands_arr) if b == band))
+                for band in range(n_bands_used):
+                    band_dt = float(sum(
+                        dt for dt, b, is_idle in zip(dts, bands_arr, idle)
+                        if b == band and not is_idle
+                    ))
                     magband_rows.append({
                         "session": label,
                         "band": band,
                         "bandTimeMs": band_dt,
                         "bandTimePct": (band_dt / total_dt * 100.0) if total_dt > 0 else 0.0,
+                        "bandScheme": scheme_used,
                     })
             if magband_rows:
                 _write_csv(
                     os.path.join(out_dir, f"magbands_{slide_slug}.csv"),
                     magband_rows,
-                    ["session", "band", "bandTimeMs", "bandTimePct"],
+                    ["session", "band", "bandTimeMs", "bandTimePct", "bandScheme"],
                 )
 
         # ------------------------------------------------------------------
@@ -955,12 +1440,17 @@ def analyze(
                             os.path.join(slide_out, f"{sess_slug}_scanpath_raster.png"),
                         )
 
-                    # Phase 1: magnification-split heatmaps, one per within-path zoom band.
+                    # Phase 1 (Tier 2 B3: canonical-scheme-aware): magnification-split heatmaps,
+                    # one per zoom band. raster_from_path itself excludes idle steps (Tier 2 B1),
+                    # so an idle step contributes no heat to any band's figure either.
                     base_mag = f.get("baseMagnification")
-                    bands = m.zoom_band_labels(path, base_mag, img_w, magbands)
+                    bands, scheme_used = m.magband_labels_for_scheme(
+                        path, base_mag, img_w, magbands, magband_scheme,
+                    )
                     if bands:
                         bands_arr = np.asarray(bands)
-                        for band in range(magbands):
+                        n_bands_used = CANONICAL_MAGBAND_COUNT if scheme_used == "canonical" else magbands
+                        for band in range(n_bands_used):
                             step_mask = (bands_arr == band)
                             if not step_mask.any():
                                 continue
@@ -973,6 +1463,29 @@ def analyze(
                                     os.path.join(slide_out, f"{sess_slug}_magband{band}.png"),
                                 )
 
+                    # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): mouse-dwell map figure,
+                    # schema/5 only -- reuses the same heatmap plotting helper + --res resolution
+                    # as the scanpath-raster figure above. Not part of the numeric-parity contract
+                    # (a PNG, existence/valid-magic only).
+                    if m.has_mouse_data(path):
+                        mouse_raster_fig = m.mouse_raster_from_path(path, img_w, img_h, res_gw, res_gh)
+                        if mouse_raster_fig is not None:
+                            fig.heatmap(
+                                mouse_raster_fig, res_gw, res_gh, f"{label} mouse dwell",
+                                os.path.join(slide_out, f"{sess_slug}_mousemap.png"),
+                            )
+
+            # Tier 1 A6: multi-reader scanpath overlay -- one PNG per slide, every path-carrying
+            # session's viewport-center path on a shared axis. Gated on scan_sids (same
+            # path-presence gate as scanpath_<slug>.csv/magbands_<slug>.csv) so a slide with no
+            # paths at all doesn't emit a trivially-empty overlay.
+            if scan_sids:
+                overlay_sessions = [(labels.get(sid, sid), frag_by_sid[sid]["path"]) for sid in scan_sids]
+                fig.scanpath_multi_overlay(
+                    overlay_sessions, f"{slide_key} - all scanpaths",
+                    os.path.join(out_dir, f"overlay_{slide_slug}_scanpaths.png"),
+                )
+
     _write_csv(
         os.path.join(out_dir, "metrics.csv"),
         metrics_rows,
@@ -983,14 +1496,35 @@ def analyze(
          "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
          "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
          "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
-         "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"],
+         "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
+         # Tier 1 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above is unchanged.
+         "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx", "mouseVelocityPxPerSec",
+         "activeFractionPct",
+         # Tier 2 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1) is unchanged. B1: idleMs/activeSpanMs. B2:
+         # avgZoomLog2W/drillingRateOctavesPerMin. B4: magnificationSource.
+         "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
+         "magnificationSource",
+         # Tier 3 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1/2) is unchanged. C1: I-DT fixation extraction.
+         "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
+         # Tier 3 C2/C4 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1/2/C1) is unchanged. C2: mouse-dwell coverage/entropy.
+         # C4: segment-level linearity.
+         "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
+         # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+         # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
+         "annotatedAreaUnionPx", "visitCountJaccard"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):
         _write_csv(
             os.path.join(out_dir, "decisions.csv"), decision_rows,
             ["slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
-             "decisionMs", "decisionLatencyMs", "correctDx", "correct"],
+             "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+             # Tier 3 C5 (2026-07-23): appended, existing column order above is unchanged.
+             "promptShownMs", "responseLatencyMs"],
         )
     else:
         print(
@@ -1008,15 +1542,32 @@ def analyze(
 
     _write_summary(
         out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded,
+        metrics_rows,
     )
     return metrics_rows
 
 
 def _write_summary(
     out_dir, groups, slide_summaries, reference_summaries,
-    decision_rows=None, nav_rows=None, had_graded=False,
+    decision_rows=None, nav_rows=None, had_graded=False, metrics_rows=None,
 ):
     lines = ["# Blinded-focus analysis summary", "", f"- Slides analyzed: {len(groups)}", ""]
+    # Tier 2 B4: magnification-source caveat -- how many path-carrying sessions used a proxy
+    # (downsample-relative or w-proxy) magnification rather than the true objective power, so a
+    # reader knows pooled avgZoom-family numbers may mix the two. Only emitted when at least one
+    # path-carrying session exists at all (nothing to caveat otherwise).
+    magsrc = [r["magnificationSource"] for r in (metrics_rows or []) if r.get("magnificationSource")]
+    if magsrc:
+        n_true = sum(1 for v in magsrc if v == "true")
+        n_proxy = sum(1 for v in magsrc if v == "proxy-downsample")
+        lines.append(
+            f"> Magnification source: {n_true}/{len(magsrc)} path-carrying sessions use true "
+            f"objective magnification (baseMagnification present); {n_proxy}/{len(magsrc)} use a "
+            f"proxy (downsample- or window-width-relative) value -- see `magnificationSource` in "
+            f"metrics.csv. Proxy-magnification rows are not directly comparable to true-"
+            f"magnification rows for avgZoom/zoomVariance/zoomRange/avgZoomLog2W."
+        )
+        lines.append("")
     lines.append("## Per-slide agreement")
     lines.append("")
     for s in slide_summaries:
@@ -1146,8 +1697,17 @@ def main(argv=None):
     )
     ap.add_argument(
         "--magbands", type=int, default=DEFAULT_MAGBANDS,
-        help=f"number of within-path zoom bands (terciles by default) for the "
-             f"magnification-split analysis (default {DEFAULT_MAGBANDS})",
+        help=f"number of within-path zoom bands for the tercile-fallback magnification-split "
+             f"analysis (default {DEFAULT_MAGBANDS}) -- canonical-scheme sessions always use "
+             f"{CANONICAL_MAGBAND_COUNT} fixed bands regardless of this value",
+    )
+    ap.add_argument(
+        "--magband-scheme", choices=["canonical", "tercile"], default=DEFAULT_MAGBAND_SCHEME,
+        help="magnification-band scheme for magbands_<slug>.csv (Tier 2 B3): 'canonical' "
+             f"(default) uses true-objective-magnification bands "
+             f"({CANONICAL_MAGBAND_COUNT} fixed bands) for sessions whose baseMagnification/"
+             "dsMilli are computable, auto-falling back to the tercile scheme per-session "
+             "otherwise; 'tercile' forces the within-path quantile scheme for every session",
     )
     args = ap.parse_args(argv)
     analyze(
@@ -1155,6 +1715,7 @@ def main(argv=None):
         labels_csv=args.labels, make_figures=args.figures,
         res=args.res, magbands=args.magbands,
         key_csv=args.key, graded_csv=args.graded,
+        magband_scheme=args.magband_scheme,
     )
 
 

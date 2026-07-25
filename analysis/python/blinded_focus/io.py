@@ -226,7 +226,11 @@ def _empty_decision():
 def get_decision(fragment):
     """Return a fragment's ``decision`` object (a dict with at least a string ``diagnosis``) or
     an empty dict when the field is absent or malformed -- so schema/1-5 fragments recorded
-    without a decision (or with a corrupt one) degrade to blank decision columns, never a crash."""
+    without a decision (or with a corrupt one) degrade to blank decision columns, never a crash.
+    The returned dict is passed through as-is, so an optional ``promptShownMs`` (Tier 3 C5, added
+    2026-07-23) reads normally via ``.get("promptShownMs")`` when present and is simply absent for
+    a decision recorded before the recorder gained that field -- the caller degrades that to a
+    blank ``decisions.csv`` cell, never a crash."""
     dec = fragment.get("decision")
     if isinstance(dec, dict) and isinstance(dec.get("diagnosis"), str):
         return dec

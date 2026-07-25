@@ -12,7 +12,9 @@
 # annotation metrics (schema/4+ `annotations` GeoJSON FeatureCollection: dwell-in-annotation %,
 # enrichment ratio, re-entry count, cross-user annotation IoU/coincidence) plus cursor metrics
 # (schema/5 8-element path points with `mouseX`/`mouseY`: % time on-slide, cursor/viewport
-# coupling distance).
+# coupling distance), and (Tier 1, docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md,
+# purely additive) turn-angle directionality, mouse kinematics (schema/5 only), active fraction,
+# hotspots_<slug>.csv / transitions_<slug>.csv exports, and a multi-reader scanpath overlay figure.
 #
 # This is the R sibling of `analysis/python/blinded_focus/` (io.py + metrics.py + figures.py +
 # analyze.py combined into one sourced file, per this project's R convention). Metric formulas are
@@ -36,6 +38,19 @@ suppressPackageStartupMessages({
 #: Small constant added to denominators/logs to avoid division-by-zero / log(0). Matches
 #: `blinded_focus.metrics.EPS` in the Python toolkit exactly.
 EPS <- 1e-12
+
+#: Tier 2 B1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): a scanpath step
+#: whose dt exceeds this threshold (ms) is "idle" -- the user stepped away from the slide/mouse for
+#: over a minute (Ghezloo's >60s-frozen-viewport idle-time-exclusion rule) -- and is excluded from
+#: every rate/weight computation listed in `idle_step_mask`'s docs. Matches the Python toolkit's
+#: `IDLE_GAP_MS` literal exactly.
+IDLE_GAP_MS <- 60000
+
+#: Tier 3 C6 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): the reader's
+#: "top-K" attended cells for `precisionAtTopK`/`recall` are the cells whose dwell value falls in
+#: the top 10% (by value, tie-inclusive -- see `top_k_frac_mask`). Matches the Python toolkit's
+#: `PRECISION_K_FRAC` literal exactly.
+PRECISION_K_FRAC <- 0.10
 
 #: Accepted fragment schemas. /1 = fixed-weight sample counts (visible "Contribute" mode).
 #: /2, /3, /4, /5 = real dwell-ms (blinded recording, weightUnit="ms"). /3+ additionally have
@@ -353,7 +368,11 @@ get_annotations <- function(fragment) {
 
 #' Return a fragment's `decision` object (a list with at least a single-string `diagnosis`) or an
 #' empty list when the field is absent or malformed -- so schema/1-5 fragments recorded without a
-#' decision (or with a corrupt one) degrade to blank decision columns, never a crash.
+#' decision (or with a corrupt one) degrade to blank decision columns, never a crash. The returned
+#' list is passed through as-is, so an optional `promptShownMs` (Tier 3 C5, added 2026-07-23) reads
+#' normally via `dec$promptShownMs` when present and is simply absent (`NULL`) for a decision
+#' recorded before the recorder gained that field -- the caller degrades that to a blank
+#' `decisions.csv` cell, never a crash.
 get_decision <- function(fragment) {
   dec <- fragment$decision
   if (!is.null(dec) && is.list(dec) && !is.null(dec$diagnosis) &&
@@ -431,13 +450,17 @@ center_of_mass <- function(grid, gw, gh) {
   c(cx / gw, cy / gh)
 }
 
-#' Top-`n` `(row, col, value)` cells by dwell value, descending. Not used by `run_analysis`'s
-#' output pipeline directly (mirrors `blinded_focus.metrics.top_hotspots` in Python for parity /
-#' potential ad-hoc use).
+#' Top-`n` `(row, col, value)` cells by dwell value, descending. Wired into `hotspots_<slug>.csv`
+#' (Tier 1 A5) -- mirrors `blinded_focus.metrics.top_hotspots` in Python exactly, including its
+#' tie-break: value descending, then flat row-major index ascending
+#' (`order(-g, seq_along(g))`, matching Python's `sorted(key=lambda idx: (-flat[idx], idx))`) --
+#' plain `order(g, decreasing=TRUE)` does not guarantee this ascending-index tie-break, so two
+#' cells sharing the same dwell value (common on sparse/all-zero grids) could otherwise come back
+#' in a different order than the Python port, breaking the CSV's exact-match parity.
 top_hotspots <- function(grid, gw, gh, n = 5) {
   gw <- as.integer(gw); gh <- as.integer(gh)
   g <- as.numeric(grid)
-  ord <- order(g, decreasing = TRUE)[seq_len(min(n, length(g)))]
+  ord <- order(-g, seq_along(g))[seq_len(min(n, length(g)))]
   lapply(ord, function(idx0) {
     idx <- idx0 - 1L
     list(row = idx %/% gw, col = idx %% gw, value = g[idx0])
@@ -528,6 +551,47 @@ kld <- function(ref, pred) {
   sum(p * log((p + EPS) / (q + EPS)))
 }
 
+#' Elementwise zero-safe KL contribution `p_i * log2(p_i / q_i)`, with the standard
+#' information-theory convention `0 * log(0/x) = 0` -- a cell where `p_i` is exactly 0 contributes
+#' 0 regardless of `q_i` (never evaluates `log2(0/q_i)`). This is a DIFFERENT convention from
+#' `kld`'s additive-EPS smoothing (which would make even a self-comparison a tiny nonzero number)
+#' -- `js_divergence` needs the zero-safe form specifically so a cell where ONE grid is exactly 0
+#' doesn't force a nonzero floor onto the divergence, and so the diagonal self-pair is exactly 0.0.
+#' Base-2 (`log2`), pinned to match the Python toolkit's `_kl_terms` exactly.
+#'
+#' Contract (relied on by `js_divergence`, not re-checked here): `q_i` is never exactly 0 at a cell
+#' where `p_i` is nonzero -- true when `q = (p + other) / 2`, since then `q_i >= p_i / 2 > 0`
+#' whenever `p_i > 0`.
+.kl_terms <- function(p, q) {
+  p <- as.numeric(p)
+  q <- as.numeric(q)
+  out <- rep(0.0, length(p))
+  nz <- p > 0
+  out[nz] <- p[nz] * log2(p[nz] / q[nz])
+  out
+}
+
+#' Jensen-Shannon divergence (base-2), symmetric and bounded in `[0, 1]`.
+#'
+#' `P = normalise_sum(a)`, `Q = normalise_sum(b)`, `M = (P + Q) / 2`;
+#' `JSD = 0.5*sum(.kl_terms(P, M)) + 0.5*sum(.kl_terms(Q, M))`. Deliberately NOT built on `kld`
+#' (whose additive-EPS convention is the wrong tool here -- see `.kl_terms`'s docs for why). `M`'s
+#' zero-safety contract is satisfied by construction: wherever `P`/`Q` is nonzero, `M` is too, so
+#' `.kl_terms` never divides by zero.
+#'
+#' Exactly `0.0` for two identical grids -- including the both-all-zero case (`P=Q=` all zero, so
+#' both `.kl_terms` sums are 0 by the zero-safe convention, no special-casing needed -- this is the
+#' pinned, deliberate convention for `compare_<slug>.csv`'s diagonal rows and for two grids that
+#' are each entirely empty).
+js_divergence <- function(a, b) {
+  p <- normalise_sum(a)
+  q <- normalise_sum(b)
+  mgrid <- (p + q) / 2.0
+  kl_pm <- sum(.kl_terms(p, mgrid))
+  kl_qm <- sum(.kl_terms(q, mgrid))
+  0.5 * kl_pm + 0.5 * kl_qm
+}
+
 #' Normalized Scanpath Saliency: mean, over `mask==1` cells, of the z-scored `salmap`
 #' (`(salmap - mean(salmap)) / population_sd(salmap)`). `mask` is a binary attended-region vector
 #' (same length as `salmap`). Returns 0.0 if `salmap` is constant or the mask has no positive
@@ -574,6 +638,61 @@ iou <- function(a, b, thresh = 0.1) {
   }
   inter_n <- sum(am & bm)
   inter_n / union_n
+}
+
+#' Tier 3 C6: boolean mask of the top `frac` (fraction, e.g. `0.10` = top 10%) highest-dwell cells
+#' in `grid`: `k = ceiling(frac * n)` (at least 1 for a non-empty grid), `cutoff` = the value of
+#' the `k`-th largest cell (descending order), mask = `grid >= cutoff`.
+#'
+#' Tie-inclusive **by construction**: this returns the full `>= cutoff` set, not a fixed-size
+#' top-`k` slice, so every cell sharing the exact cutoff value is included even when that pushes
+#' the mask's True-count above `k` -- pinned, deterministic, and identical across languages
+#' regardless of a sort's tie-break, since the final mask only depends on the cutoff VALUE, not on
+#' which index a sort happened to rank `k`-th among ties.
+#'
+#' **Strictly-positive guard (final-review fix):** for a sparse/focused grid where fewer than `k`
+#' cells have nonzero dwell (the ORDINARY case for a focused reader on a fine grid), `cutoff` is
+#' `0.0` -- the plain `grid >= cutoff` mask would then select EVERY cell (including every
+#' untouched one), silently degrading "top-K" to "the whole grid" and making downstream recall
+#' report `1.0` for a reader who never touched the reference region at all. The extra `& (grid >
+#' 0)` restricts the tie-inclusive `>=cutoff` set to cells the reader actually dwelled in -- a
+#' no-op whenever `cutoff > 0` (`grid >= cutoff` already implies `grid > 0`), so every
+#' non-degenerate/dense case is numerically unchanged.
+#'
+#' Returns an all-`FALSE` (length-0) mask for an empty (0-length) grid (no cutoff to compute).
+top_k_frac_mask <- function(grid, frac = PRECISION_K_FRAC) {
+  g <- as.numeric(grid)
+  n <- length(g)
+  if (n == 0) {
+    return(logical(0))
+  }
+  k <- max(1L, as.integer(ceiling(frac * n)))
+  cutoff <- sort(g, decreasing = TRUE)[k]
+  (g >= cutoff) & (g > 0)
+}
+
+#' Tier 3 C6: `precisionAtTopK`/`recall` of a reader's top-`frac` highest-dwell cells
+#' (`top_k_frac_mask`) against a reference ROI boolean mask (`roi_mask`, same length as `dwell`) --
+#' separates "missed target" (low recall) from "wasted attention" (low precision).
+#'
+#' `precisionAtTopK = |topK INTERSECT roi_mask| / |topK|` -- fraction of the reader's own
+#' most-attended cells that fall inside the reference region.
+#' `recall = |topK INTERSECT roi_mask| / |roi_mask|` -- fraction of the reference region the
+#' reader's top-attended cells cover.
+#'
+#' Returns `list(precision = NaN, recall = NaN)` (blank in the CSV) if the ROI mask is empty (no
+#' reference region defined at all) OR the top-K set is empty (degenerate zero-size grid only --
+#' `top_k_frac_mask` otherwise always returns >=1 cell for a non-empty grid).
+precision_recall_at_topk <- function(dwell, roi_mask, frac = PRECISION_K_FRAC) {
+  topk <- top_k_frac_mask(dwell, frac)
+  roi <- as.logical(roi_mask)
+  topk_n <- sum(topk)
+  roi_n <- sum(roi)
+  if (topk_n == 0 || roi_n == 0) {
+    return(list(precision = NaN, recall = NaN))
+  }
+  inter <- sum(topk & roi)
+  list(precision = inter / topk_n, recall = inter / roi_n)
 }
 
 # ---------------------------------------------------------------------------
@@ -660,6 +779,36 @@ transition_entropy <- function(seq) {
   -sum(p * log2(p + EPS))
 }
 
+#' Top-`top_n` `(fromCell, toCell, count)` directed transitions -- consecutive-transition pairs
+#' `(seq[i], seq[i+1])` counted and ranked by count descending, ties broken by `(fromCell,
+#' toCell)` ascending -- **deterministic** across languages. Mirrors
+#' `blinded_focus.metrics.top_transitions` in the Python toolkit exactly: `table()`'s and
+#' `Counter.items()`'s iteration order over equal-count entries are not guaranteed to agree
+#' between R and Python, so an unordered tie-break would let the two toolkits'
+#' `transitions_<slug>.csv` (Tier 1 A5) disagree on which transitions make the top-`top_n` cut
+#' whenever counts tie -- common on short scanpaths. Inlines the count directly (via `table()`,
+#' the same idiom `transition_entropy` already uses above) rather than exposing a separate
+#' `transition_matrix` helper, since nothing else in this file needs the raw unordered counts.
+#' `list()` for a sequence with fewer than 2 elements (no transitions).
+top_transitions <- function(seq, top_n = 15) {
+  seq <- as.integer(seq)
+  n <- length(seq)
+  if (n < 2) {
+    return(list())
+  }
+  from_seq <- seq[1:(n - 1)]
+  to_seq <- seq[2:n]
+  key <- paste(from_seq, to_seq, sep = "->")
+  tab <- table(key)
+  counts <- as.integer(tab)
+  parts <- strsplit(names(tab), "->", fixed = TRUE)
+  from_i <- as.integer(vapply(parts, `[`, character(1), 1))
+  to_i <- as.integer(vapply(parts, `[`, character(1), 2))
+  ord <- order(-counts, from_i, to_i)
+  ord <- ord[seq_len(min(top_n, length(ord)))]
+  lapply(ord, function(i) list(fromCell = from_i[i], toCell = to_i[i], count = counts[i]))
+}
+
 #' Sum of consecutive-center Euclidean distances, in image px (`cx`, `cy` of each point).
 scanpath_length_px <- function(path) {
   pm <- as_path_matrix(path)
@@ -689,6 +838,58 @@ n_revisits <- function(seq) {
   revisits
 }
 
+#' Tier 3 C6: +1 per cell ENTRY in a run-length-deduped visited-cell sequence (see
+#' `visited_sequence`) -- NOT per raw path tick, so a long dwell in one cell counts as a single
+#' entry, not one count per sample. `seq` is 0-based (as returned by `visited_sequence`; offset by
+#' +1 for R's 1-based vector indexing here). Returns a flat `(gw*gh,)` numeric vector (every value
+#' is a whole number of dwell-run entries, matching the Python toolkit's float-dtype convention).
+#'
+#' **Zero-size-grid guard (final-review fix):** `gw<=0` or `gh<=0` (a schema-valid fragment with
+#' `gridWidth`/`gridHeight` of `0`, `grid=list()`) returns an EMPTY `numeric(0)` without touching
+#' `seq` at all -- mirrors `visit_count_jaccard`'s own documented "blank for a degenerate zero-size
+#' grid" convention. (Unlike the Python port, R does not actually crash on this input without the
+#' guard -- `seq`'s entries all clamp to index `-1` via `visited_sequence`, so `counts[idx + 1L]`
+#' becomes `counts[0]`, and assigning to R's index `0` is a documented silent no-op, not an error
+#' -- but the guard is added anyway for explicitness and Python<->R parity.)
+visit_count_grid <- function(seq, gw, gh) {
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(numeric(0))
+  }
+  counts <- rep(0.0, gw * gh)
+  for (idx in seq) {
+    counts[idx + 1L] <- counts[idx + 1L] + 1.0
+  }
+  counts
+}
+
+#' Tier 3 C6: Jaccard similarity between the top-`top_n` DWELL-TIME hotspot cells and the
+#' top-`top_n` VISIT-COUNT hotspot cells (`visit_count_grid`) at the same `(gw, gh)` grid
+#' resolution -- disagreement between "where the reader lingered longest" and "which cells the
+#' reader entered most often" is a navigation-style signal (e.g. one long dwell vs many brief
+#' revisits). Both hotspot sets reuse `top_hotspots` (deterministic tie-break) so flat cell indices
+#' align 1:1 between the two grids.
+#'
+#' `NaN` (blank) if either hotspot set is empty (only possible for a degenerate zero-size grid --
+#' `top_hotspots` otherwise always returns >=1 cell for any grid with >=1 cell).
+visit_count_jaccard <- function(dwell_grid, gw, gh, seq, top_n = 5) {
+  gw_i <- as.integer(gw); gh_i <- as.integer(gh)
+  visit_grid <- visit_count_grid(seq, gw_i, gh_i)
+  dwell_top <- top_hotspots(dwell_grid, gw_i, gh_i, top_n)
+  visit_top <- top_hotspots(visit_grid, gw_i, gh_i, top_n)
+  set_a <- vapply(dwell_top, function(h) h$row * gw_i + h$col, numeric(1))
+  set_b <- vapply(visit_top, function(h) h$row * gw_i + h$col, numeric(1))
+  if (length(set_a) == 0 || length(set_b) == 0) {
+    return(NaN)
+  }
+  inter <- length(intersect(set_a, set_b))
+  uni <- length(union(set_a, set_b))
+  if (uni == 0) {
+    return(NaN)
+  }
+  inter / uni
+}
+
 # ---------------------------------------------------------------------------
 # Scanpath -> fine dwell raster (schema/3, /4; independent of the recorded grid resolution)
 # Phase 1 (navigation-research upgrade). Mirrors `blinded_focus.metrics`'s equivalent section in
@@ -709,6 +910,50 @@ step_durations_ms <- function(path) {
   pmax(diff(pm[, 1]), 0)
 }
 
+#' Tier 2 B1: logical vector (length `nrow(as_path_matrix(path))-1`), TRUE iff step i's dt (see
+#' `step_durations_ms`) exceeds `IDLE_GAP_MS` -- a "step-away" gap (Ghezloo's >60s-frozen-viewport
+#' idle-time-exclusion rule) the user was not actively looking at the slide during. Every rate/
+#' weight metric documented as "idle-excluded" (`scanning_rate_px_per_min`,
+#' `drilling_rate_per_min`, `path_velocity_px_per_sec`, `search_focus_ratio`,
+#' `raster_from_path`'s step weight, `avg_zoom_log2_w`, `drilling_rate_octaves_per_min`, and the
+#' `magbands_<slug>.csv` `bandTimeMs` aggregation in `analyze()`) drops steps where this is TRUE
+#' entirely -- not just caps their contribution. `logical(0)` if the path has fewer than 2 points.
+idle_step_mask <- function(path) {
+  dts <- step_durations_ms(path)
+  dts > IDLE_GAP_MS
+}
+
+#' Tier 2 B1: sum of step dt (see `step_durations_ms`) over steps flagged idle by
+#' `idle_step_mask` -- the `idleMs` `metrics.csv` transparency column. `0.0` if the path has fewer
+#' than 2 points (no steps) or no step is idle -- a session with no >60s gap therefore always
+#' reports `idleMs == 0.0`, which is what keeps every idle-excluded rate metric below numerically
+#' identical to its pre-B1 value for such sessions (the exclusion set is empty).
+idle_ms <- function(path) {
+  dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
+  if (length(dts) == 0) {
+    return(0.0)
+  }
+  sum(dts[idle])
+}
+
+#' Tier 2 B1: wall-clock span (`tRel_last - tRel_first`) minus `idle_ms` -- the `activeSpanMs`
+#' `metrics.csv` transparency column, and the denominator every idle-excluded rate metric below
+#' (`scanning_rate_px_per_min`, `drilling_rate_per_min`, `drilling_rate_octaves_per_min`) divides by
+#' (in minutes) in place of the old total-duration denominator. `0.0` if the path has fewer than 2
+#' points (no span at all) -- matches the file's existing "0.0 for an insufficient path" convention
+#' for administrative/passthrough-style fields (as opposed to the NaN-blank convention used for
+#' genuinely undefined statistics like `avg_zoom_log2_w`).
+active_span_ms <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(0.0)
+  }
+  span <- pm[n, 1] - pm[1, 1]
+  span - idle_ms(path)
+}
+
 #' Rebuild a `gh x gw` dwell-ms grid (flat, row-major) directly from the scanpath, independent of
 #' the recorded `grid` resolution. For each step, `dt` (see `step_durations_ms`) is attributed to
 #' the viewport rectangle of point i (`cx +/- w/2, cy +/- h/2`), clamped to `[0,img_w] x
@@ -718,6 +963,13 @@ step_durations_ms <- function(path) {
 #' the single cell containing the clamped center. Steps with `dt<=0` contribute nothing.
 #' `step_mask`, if given, is a logical vector of length `nrow(pm)-1` (steps where it is FALSE are
 #' skipped — used by the magnification-band split to reuse this same raster math per band).
+#'
+#' **Tier 2 B1:** a step flagged idle by `idle_step_mask` (dt > `IDLE_GAP_MS`) is *always* skipped
+#' as well, regardless of `step_mask` -- the user was not looking at that viewport, so it should
+#' contribute no dwell-weight to the raster at any resolution. For a path with no idle step
+#' (`idle_step_mask` all FALSE) this is a no-op, so the raster is numerically identical to the
+#' pre-B1 behavior.
+#'
 #' Returns `NULL` for a 0/1-point path (a `dt` requires two points). Exact port of
 #' `blinded_focus.metrics.raster_from_path`.
 raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
@@ -730,10 +982,12 @@ raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
   img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
   img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
   dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
   grid <- matrix(0.0, nrow = gh, ncol = gw)
   for (i in seq_len(n - 1)) {
     dt <- dts[i]
     if (dt <= 0) next
+    if (idle[i]) next
     if (!is.null(step_mask) && !step_mask[i]) next
     cx <- pm[i, 2]; cy <- pm[i, 3]
     w <- if (pm[i, 4] > 0) pm[i, 4] else 1.0
@@ -871,24 +1125,33 @@ magnification_percentage <- function(path, base_mag = NULL, img_w = NULL) {
 }
 
 #' "Scanning" rate (px/min): total center pan-distance accumulated over steps where zoom is
-#' unchanged (see `.step_zoom_changed`), normalized by the path's **total duration**
-#' (`(t[last]-t[first])/60000`, minutes -- the deliberate denominator choice documented in the
-#' Python `scanning_rate_px_per_min` docstring: total session time, not time-spent-scanning, so the
-#' rate is comparable across sessions with different scanning/drilling mixes). `0.0` if the path
-#' has fewer than 2 points or non-positive total duration.
+#' unchanged (see `.step_zoom_changed`), normalized by the path's **ACTIVE duration** (Tier 2 B1:
+#' `active_span_ms`, minutes, replacing the pre-B1 total-duration denominator
+#' `(t[last]-t[first])/60000` -- the deliberate denominator choice documented in the Python
+#' `scanning_rate_px_per_min` docstring: active session time, not time-spent-scanning, so the rate
+#' is comparable across sessions with different scanning/drilling mixes -- idle "stepped away" time
+#' is neither "scanning" nor "drilling" time and would otherwise dilute the rate). `0.0` if the path
+#' has fewer than 2 points or non-positive active duration.
+#'
+#' **Tier 2 B1:** a step flagged idle by `idle_step_mask` also contributes nothing to the
+#' pan-distance numerator, even if its zoom is unchanged -- an idle "parked at this zoom level for
+#' 5 minutes" step is not scanning. For a path with no idle step this is numerically identical to
+#' the pre-B1 formula (idle set empty, and `active_span_ms` reduces to the total duration).
 scanning_rate_px_per_min <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
     return(0.0)
   }
-  duration_min <- (pm[n, 1] - pm[1, 1]) / 60000.0
+  duration_min <- active_span_ms(path) / 60000.0
   if (duration_min <= 0) {
     return(0.0)
   }
   changed <- .step_zoom_changed(path, base_mag, img_w)
+  idle <- idle_step_mask(path)
   pan <- 0.0
   for (i in seq_len(n - 1)) {
+    if (idle[i]) next
     if (!changed[i]) {
       x0 <- pm[i, 2]; y0 <- pm[i, 3]
       x1 <- pm[i + 1, 2]; y1 <- pm[i + 1, 3]
@@ -899,20 +1162,93 @@ scanning_rate_px_per_min <- function(path, base_mag = NULL, img_w = NULL) {
 }
 
 #' "Drilling" rate (events/min): count of zoom-change steps (see `.step_zoom_changed`) per minute
-#' of the path's total duration (same denominator as `scanning_rate_px_per_min`). `0.0` if the path
-#' has fewer than 2 points or non-positive total duration.
+#' of the path's ACTIVE duration (Tier 2 B1: `active_span_ms`, same denominator as
+#' `scanning_rate_px_per_min`). `0.0` if the path has fewer than 2 points or non-positive active
+#' duration.
+#'
+#' **Tier 2 B1:** a zoom-change step that is *also* idle (see `idle_step_mask` -- e.g. the user
+#' zoomed in right before stepping away for 5+ minutes, so the change is only discovered on
+#' return) does not count as a "drilling event" -- it was not an active navigation action. For a
+#' path with no idle step this is numerically identical to the pre-B1 formula.
 drilling_rate_per_min <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
     return(0.0)
   }
-  duration_min <- (pm[n, 1] - pm[1, 1]) / 60000.0
+  duration_min <- active_span_ms(path) / 60000.0
   if (duration_min <= 0) {
     return(0.0)
   }
   changed <- .step_zoom_changed(path, base_mag, img_w)
-  sum(changed) / duration_min
+  idle <- idle_step_mask(path)
+  sum(changed & !idle) / duration_min
+}
+
+#' Tier 2 B2 (Drew-fidelity zoom, ADD-alongside `avg_zoom` -- does not replace it): dt-weighted
+#' mean of `log2(magnification)` over ACTIVE (non-idle, see `idle_step_mask`) steps:
+#'
+#' `avgZoomLog2W = sum_active(dt_i * log2(zoom_i)) / sum_active(dt_i)`
+#'
+#' where `zoom_i = point_zoom(path[i], base_mag, img_w)` (the step-i-owns-point-i convention used
+#' throughout this file, e.g. `raster_from_path`). `log2()` for Python<->R parity.
+#'
+#' `NaN` (blank in `metrics.csv`) if the path has fewer than 2 points, every step is idle, or the
+#' total active dt weight is otherwise 0 -- a 0/0 weighted mean has no defensible value (unlike
+#' `avg_zoom`'s unweighted `0.0`-for-empty-path convention, `0.0` here would misleadingly read as
+#' "1x magnification", a real, specific claim -- so this uses the same NaN-for-genuinely-undefined
+#' convention as e.g. `enrichment_ratio` instead).
+avg_zoom_log2_w <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
+  total_w <- 0.0
+  total_wl <- 0.0
+  for (i in seq_len(n - 1)) {
+    dt <- dts[i]
+    if (idle[i] || dt <= 0) next
+    z <- point_zoom(pm[i, ], base_mag, img_w)
+    total_w <- total_w + dt
+    total_wl <- total_wl + dt * log2(z)
+  }
+  if (total_w > 0) total_wl / total_w else NaN
+}
+
+#' Tier 2 B2 (Drew-fidelity zoom, ADD-alongside `drilling_rate_per_min` -- does not replace it):
+#' sum of the absolute per-step `log2(zoom)` change over ACTIVE (non-idle, see `idle_step_mask`)
+#' steps, per active minute (`active_span_ms` / 60000, same denominator as
+#' `scanning_rate_px_per_min`/`drilling_rate_per_min`) -- a continuous zoom-change-magnitude
+#' complement to `drilling_rate_per_min`'s discrete event count:
+#'
+#' `drillingRateOctavesPerMin = sum_active(|log2(zoom_{i+1}) - log2(zoom_i)|) / activeDurationMin`
+#'
+#' `log2()` for Python<->R parity. `NaN` (blank in `metrics.csv`) if the path has fewer than 2
+#' points or the active duration is non-positive (all steps idle, or a degenerate zero-span path)
+#' -- same NaN-for-undefined convention as `avg_zoom_log2_w` (as opposed to
+#' `drilling_rate_per_min`'s `0.0`-for-zero-duration convention: a 0/0 rate of continuous change is
+#' undefined, not "no change happened over a real duration").
+drilling_rate_octaves_per_min <- function(path, base_mag = NULL, img_w = NULL) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  duration_min <- active_span_ms(path) / 60000.0
+  if (duration_min <= 0) {
+    return(NaN)
+  }
+  idle <- idle_step_mask(path)
+  zooms <- .zoom_series(path, base_mag, img_w)
+  total <- 0.0
+  for (i in seq_len(n - 1)) {
+    if (idle[i]) next
+    total <- total + abs(log2(zooms[i + 1]) - log2(zooms[i]))
+  }
+  total / duration_min
 }
 
 #' Assign each *step* (`path[i] -> path[i+1]`) to one of `n_bands` zoom bands (band `0` = lowest
@@ -935,6 +1271,98 @@ zoom_band_labels <- function(path, base_mag = NULL, img_w = NULL, n_bands = 3) {
   qs <- (1:(n_bands - 1)) / n_bands
   cuts <- stats::quantile(zooms, probs = qs, names = FALSE, type = 7)
   findInterval(zooms, cuts)
+}
+
+#: Tier 2 B3: canonical magnification-band cut points (objective power, x). 6 cuts -> 7 labeled
+#: bands. Matches the Python toolkit's `MAG_BAND_CUTS` literal exactly.
+MAG_BAND_CUTS <- c(1.0, 2.0, 4.0, 10.0, 20.0, 40.0)
+#: Tier 2 B3: human-readable labels for the 7 canonical bands (index-aligned, 0-based, with the
+#: band index `canonical_mag_band_labels` returns -- not itself written to `magbands_<slug>.csv`).
+MAG_BAND_LABELS <- c("<1x", "1-2x", "2-4x", "4-10x", "10-20x", "20-40x", ">=40x")
+
+#' Tier 2 B3: true objective magnification for one scanpath point vector (`point`, one row of
+#' `as_path_matrix`'s output) -- `base_mag / (dsMilli / 1000.0)` -- requiring BOTH a known, positive
+#' `base_mag` (fragment-level `baseMagnification`, schema/4+) and the point's own `dsMilli` (6th
+#' element, schema/4+).
+#'
+#' Returns `NULL` (a plain sentinel for "not computable" -- checked via `is.null()` at every call
+#' site, never participating in arithmetic) when either is absent/non-positive or the point has no
+#' `dsMilli` at all (schema/3, 5-element points) -- callers fall back to the existing tercile
+#' scheme (`zoom_band_labels`) in that case, per B3's auto-fallback rule. `dsMilli <= 0` is treated
+#' defensively as full-resolution (matches `point_zoom`'s own guard).
+true_magnification <- function(point, base_mag) {
+  if (is.null(base_mag) || length(base_mag) == 0 || is.na(base_mag)) {
+    return(NULL)
+  }
+  bm <- as.numeric(base_mag)
+  if (bm <= 0) {
+    return(NULL)
+  }
+  if (length(point) < 6) {
+    return(NULL)
+  }
+  ds_milli <- as.numeric(point[6])
+  if (is.na(ds_milli) || ds_milli <= 0) ds_milli <- 1000.0
+  bm / (ds_milli / 1000.0)
+}
+
+#' Tier 2 B3: assign each *step* (`path[i] -> path[i+1]`, the same point-i-owns-the-step convention
+#' as `zoom_band_labels`/`raster_from_path`) a canonical magnification-band index in `[0, 6]` via
+#' `MAG_BAND_CUTS` (`findInterval(tm, cuts)`, same convention as `zoom_band_labels`), using
+#' `true_magnification(path[i], base_mag)`.
+#'
+#' Returns `NULL` (not `integer(0)`) the moment any step's true magnification is not computable
+#' (missing/non-positive `base_mag`, or a point with no `dsMilli` at all) -- signalling "the
+#' canonical scheme does not apply to this session at all; use the tercile fallback instead"
+#' (checked via `is.null()`, never truthiness, so a genuinely empty/too-short path -- which returns
+#' `integer(0)` -- is distinguished from "not computable"). `integer(0)` for a <2-point path (no
+#' steps; canonical is trivially inapplicable but not a fallback signal).
+canonical_mag_band_labels <- function(path, base_mag) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(integer(0))
+  }
+  bands <- integer(n - 1)
+  for (i in seq_len(n - 1)) {
+    tm <- true_magnification(pm[i, ], base_mag)
+    if (is.null(tm)) {
+      return(NULL)
+    }
+    idx <- as.integer(findInterval(tm, MAG_BAND_CUTS))
+    bands[i] <- min(idx, length(MAG_BAND_LABELS) - 1L)
+  }
+  bands
+}
+
+#' Tier 2 B3: returns `list(bands=, scheme=)` for one session's path, honoring the
+#' `--magband-scheme` CLI flag:
+#'
+#' - `scheme == "tercile"`: always use the existing within-path quantile bands
+#'   (`zoom_band_labels`); `scheme == "tercile"` in the result.
+#' - `scheme == "canonical"` (default, and the fallback for any other value): try
+#'   `canonical_mag_band_labels` first; if it returns `NULL` (this session's
+#'   `base_mag`/`dsMilli` are not computable -- e.g. an Atlas DZI slide with a null
+#'   `baseMagnification`, or a schema/3 5-element w-proxy path), fall back to
+#'   `zoom_band_labels`, result `scheme == "tercile"`. Otherwise result `scheme == "canonical"`.
+#'
+#' Returns `list(bands=integer(0), scheme="tercile")` for a <2-point path (matches
+#' `zoom_band_labels`'s own `integer(0)`-for-<2-points convention; the scheme label is unused in
+#' that case since no rows are ever emitted for an empty band list).
+magband_labels_for_scheme <- function(path, base_mag, img_w, n_bands, scheme = "canonical") {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(list(bands = integer(0), scheme = "tercile"))
+  }
+  if (identical(scheme, "tercile")) {
+    return(list(bands = zoom_band_labels(path, base_mag, img_w, n_bands), scheme = "tercile"))
+  }
+  bands <- canonical_mag_band_labels(path, base_mag)
+  if (is.null(bands)) {
+    return(list(bands = zoom_band_labels(path, base_mag, img_w, n_bands), scheme = "tercile"))
+  }
+  list(bands = bands, scheme = "canonical")
 }
 
 # ---------------------------------------------------------------------------
@@ -965,14 +1393,19 @@ zoom_band_labels <- function(path, base_mag = NULL, img_w = NULL, n_bands = 3) {
   out
 }
 
-#' Median of per-step velocities (see `.step_velocities_px_per_sec`). `0.0` if the path has fewer
-#' than 2 points.
+#' Median of per-step velocities (see `.step_velocities_px_per_sec`), **Tier 2 B1: excluding steps
+#' flagged idle** by `idle_step_mask` (a step "traversed" during a >60s away-gap is not a real
+#' navigation velocity -- it is dropped from the median entirely, not counted as a near-zero
+#' speed). `0.0` if the path has fewer than 2 points or every step is idle. For a path with no idle
+#' step this is numerically identical to the pre-B1 formula (idle set empty).
 path_velocity_px_per_sec <- function(path) {
   vels <- .step_velocities_px_per_sec(path)
-  if (length(vels) == 0) {
+  idle <- idle_step_mask(path)
+  active_vels <- vels[!idle]
+  if (length(active_vels) == 0) {
     return(0.0)
   }
-  stats::median(vels)
+  stats::median(active_vels)
 }
 
 #' Net displacement (first->last point, straight-line) divided by the total scanpath length
@@ -993,17 +1426,32 @@ linearity <- function(path) {
 
 #' Fraction of dt-weighted steps that are "focused": zoom(i) >= median(per-step zooms) OR
 #' velocity(i) <= median(per-step velocities) -- both thresholds are the path's own median
-#' (session-relative, not a fixed absolute cutoff). `0.0` if the path has fewer than 2 points or
-#' zero total dt.
+#' (session-relative, not a fixed absolute cutoff), **Tier 2 B1: computed entirely over ACTIVE
+#' (non-idle, see `idle_step_mask`) steps** -- idle steps are dropped before either the median
+#' thresholds or the dt-weighted sum are computed, exactly as if they never existed, rather than
+#' being included in `total_dt` (which would otherwise let a single long away-gap dominate the
+#' denominator and dilute the ratio toward whatever its own zoom/velocity happened to be) or in the
+#' threshold computation (which would otherwise let a stale zoom/near-zero velocity from an
+#' away-gap skew the "focused" cutoff for every other step). `0.0` if the path has fewer than 2
+#' points, every step is idle, or zero total active dt. For a path with no idle step this is
+#' numerically identical to the pre-B1 formula (idle set empty, active steps == all steps).
 search_focus_ratio <- function(path, base_mag = NULL, img_w = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
   if (is.null(n) || n < 2) {
     return(0.0)
   }
-  zooms <- vapply(seq_len(n - 1), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
-  dts <- step_durations_ms(path)
-  vels <- .step_velocities_px_per_sec(path)
+  zooms_all <- vapply(seq_len(n - 1), function(i) point_zoom(pm[i, ], base_mag, img_w), numeric(1))
+  dts_all <- step_durations_ms(path)
+  vels_all <- .step_velocities_px_per_sec(path)
+  idle <- idle_step_mask(path)
+  active <- !idle
+  if (!any(active)) {
+    return(0.0)
+  }
+  zooms <- zooms_all[active]
+  dts <- dts_all[active]
+  vels <- vels_all[active]
   zoom_thresh <- stats::median(zooms)
   vel_thresh <- stats::median(vels)
   focused <- (zooms >= zoom_thresh) | (vels <= vel_thresh)
@@ -1119,6 +1567,27 @@ enrichment_ratio <- function(grid, mask) {
   mean_in / mean_out
 }
 
+#' Tier 3 C6: area (image px^2) of the UNIONED rasterized annotation mask
+#' (`rasterize_feature_collection`) -- the overlap-correct companion to the existing sum-based
+#' `annotatedAreaPx` (`annotations_area_px`, which double-counts overlapping/nested Features -- see
+#' its docs).
+#'
+#' `count(mask) * (img_w/gw) * (img_h/gh)` -- each `TRUE` cell contributes its rasterized footprint
+#' area (approximating each grid cell as an `img_w/gw` x `img_h/gh` rectangle), NOT the exact
+#' vector polygon-union area (no polygon-clipping library is used here, consistent with the rest of
+#' this file's dependency-free approach -- the raster resolution is the grid's own `(gw, gh)`, same
+#' as every other per-session native-grid metric).
+#'
+#' `0.0` for an all-`FALSE` (no-annotations, or a degenerate zero-size grid) mask.
+annotated_area_union_px <- function(mask, gw, gh, img_w, img_h) {
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(0.0)
+  }
+  cell_area <- (as.numeric(img_w) / gw) * (as.numeric(img_h) / gh)
+  sum(as.logical(mask)) * cell_area
+}
+
 #' Count of scanpath re-entries into the annotated region (Brunyé 2017's re-entry rate).
 #'
 #' Maps every path point to a grid cell via `visited_sequence` (the same floor-division convention
@@ -1224,6 +1693,583 @@ mouse_viewport_coupling_px <- function(path) {
   }
   dists <- sqrt((mouse_x[on_slide] - cx[on_slide])^2 + (mouse_y[on_slide] - cy[on_slide])^2)
   stats::median(dists)
+}
+
+# ---------------------------------------------------------------------------
+# Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+# A2 turn-angle directionality, A3 mouse kinematics (schema/5 only), A4 active fraction. Mirrors
+# `blinded_focus.metrics`'s equivalent section in the Python toolkit function-for-function. Every
+# function here degrades to `NaN` (blank in `metrics.csv` via `write_csv_tidy`'s `na=""`) on its
+# documented degenerate input -- never a raised error -- matching the file's existing blank-vs-0.0
+# convention for path-only metrics that are genuinely undefined (not "zero") absent enough data.
+# ---------------------------------------------------------------------------
+
+#' `atan2(dy, dx)` heading (radians) for each consecutive segment `path[i] -> path[i+1]`, length
+#' `nrow(pm)-1`. `numeric(0)` if the path has fewer than 2 points.
+.headings_rad <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(numeric(0))
+  }
+  vapply(seq_len(n - 1), function(i) atan2(pm[i + 1, 3] - pm[i, 3], pm[i + 1, 2] - pm[i, 2]), numeric(1))
+}
+
+#' Turn angle (degrees, wrapped to `(-180, 180]`) at each interior point: `phi_i =
+#' wrapToPi(theta_{i+1} - theta_i)` over the per-segment headings from `.headings_rad`, where
+#' `wrapToPi` is computed as `atan2(sin(delta), cos(delta))` (not a hand-rolled modulo -- R's `%%`
+#' and Python's `%` disagree on the sign of a negative dividend, which would silently diverge the
+#' two toolkits' wrap-around behavior right at the `+/-180 deg` boundary).
+#'
+#' `numeric(0)` if the path has fewer than 3 points -- a turn needs two consecutive segments, i.e.
+#' an "interior" point with both a preceding and a following segment.
+.turn_angles_deg <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 3) {
+    return(numeric(0))
+  }
+  heads <- .headings_rad(path)
+  m <- length(heads)
+  if (m < 2) {
+    return(numeric(0))
+  }
+  d <- heads[2:m] - heads[1:(m - 1)]
+  wrapped <- atan2(sin(d), cos(d))
+  # Parity note: multiply by the precomputed constant `(180.0 / pi)` rather than
+  # `wrapped * 180.0 / pi` (left-to-right: multiply then divide) -- floating-point
+  # multiplication/division is not associative, so the two evaluation orders can round to
+  # different doubles. This matches CPython's `math.degrees(x)`, which is implemented as
+  # `x * (180.0 / Py_MATH_PI)` (a single multiply by a precomputed constant), so the pre-`floor()`
+  # value going into turn_angle_entropy's bin assignment stays bit-identical with the Python
+  # toolkit given the same (bit-identical, shared-libm) `wrapped` radians -- turn_angle_entropy's
+  # `floor((deg+180)/45)` bin assignment is a discontinuous step function of this value, so even a
+  # 1-ULP difference right at a 45-degree-multiple boundary (the common case for
+  # exact-integer-pixel diagonal/axis-aligned pans) could otherwise flip a turn into a different
+  # bin and shift the whole entropy histogram by far more than the 1e-6 parity tolerance --
+  # unlike mean_abs_turn_angle_deg, which stays a continuous (1e-6-tolerant) function of the same
+  # value.
+  wrapped * (180.0 / pi)
+}
+
+#' A2: mean of `|turn angle|` (degrees) over every interior point of the ordered viewport centers
+#' (see `.turn_angles_deg`). `NaN` (blank) if the path has fewer than 3 points -- movement-
+#' ecology/visual-search directionality measure, not part of the pinned Bylinskii saliency set.
+mean_abs_turn_angle_deg <- function(path) {
+  turns <- .turn_angles_deg(path)
+  if (length(turns) == 0) {
+    return(NaN)
+  }
+  mean(abs(turns))
+}
+
+#' A2: Shannon entropy (bits) of the turn-angle distribution (see `.turn_angles_deg`), binned into
+#' 8 equal bins over `(-180 deg, 180 deg]` (bin `i` = `[-180+45i, -180+45(i+1))`, with the `+180
+#' deg` edge case folded into the last bin via `min(7, ...)`), normalized by `log2(8)` to `[0, 1]`
+#' (0 = all turns in one bin/perfectly directional, 1 = turns spread evenly across all 8 bins).
+#' `NaN` (blank) if the path has fewer than 3 points.
+turn_angle_entropy <- function(path) {
+  turns <- .turn_angles_deg(path)
+  if (length(turns) == 0) {
+    return(NaN)
+  }
+  bins <- integer(8)
+  for (d in turns) {
+    idx <- min(7L, as.integer(floor((d + 180.0) / 45.0)))
+    idx <- max(0L, idx)
+    bins[idx + 1L] <- bins[idx + 1L] + 1L
+  }
+  total <- length(turns)
+  p <- bins / total
+  ent <- -sum(p * log2(p + EPS))
+  ent / log2(8)
+}
+
+#' A3 (schema/5 only): sum of Euclidean distance (image px) between consecutive **on-slide**
+#' cursor points (`mouseX`, `mouseY`), sentinel-aware -- a segment is skipped entirely (not
+#' bridged) if *either* endpoint is the off-viewer sentinel `(-1, -1)` (see
+#' `cursor_over_slide_pct`'s on-slide test), so a single off-slide sample does not inflate the
+#' path length with a spurious long jump to/from the sentinel coordinate.
+#'
+#' `NaN` (blank) if the path doesn't carry schema/5 mouse data at all (see `has_mouse_data`), or
+#' carries mouse data but has zero valid on-slide consecutive pairs (e.g. every sample is
+#' off-slide) -- distinct from `0.0`, which would misleadingly read as "a measured, stationary
+#' cursor" rather than "nothing measurable".
+mouse_path_length_px <- function(path) {
+  if (!has_mouse_data(path)) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  total <- 0.0
+  n_segments <- 0L
+  if (n >= 2) {
+    for (i in seq_len(n - 1)) {
+      mx0 <- pm[i, 7]; my0 <- pm[i, 8]
+      mx1 <- pm[i + 1, 7]; my1 <- pm[i + 1, 8]
+      if (!((mx0 != -1 || my0 != -1) && (mx1 != -1 || my1 != -1))) next
+      total <- total + sqrt((mx1 - mx0)^2 + (my1 - my0)^2)
+      n_segments <- n_segments + 1L
+    }
+  }
+  if (n_segments == 0L) {
+    return(NaN)
+  }
+  total
+}
+
+#' A3 (schema/5 only): median of (distance / dt_sec) over consecutive **on-slide** cursor point
+#' pairs (same sentinel-aware segment rule as `mouse_path_length_px` -- a segment touching `(-1,
+#' -1)` at either endpoint is skipped, never bridged). A segment with non-positive `dt` is also
+#' skipped (not clamped to 0 velocity like `.step_velocities_px_per_sec` -- an undefined-duration
+#' on-slide segment has no rate to report, so it is dropped from the median rather than counted as
+#' "no motion").
+#'
+#' `NaN` (blank) if the path doesn't carry schema/5 mouse data at all, or carries mouse data but
+#' has zero valid (on-slide, `dt > 0`) segments.
+mouse_velocity_px_per_sec <- function(path) {
+  if (!has_mouse_data(path)) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  vels <- numeric(0)
+  if (n >= 2) {
+    for (i in seq_len(n - 1)) {
+      mx0 <- pm[i, 7]; my0 <- pm[i, 8]
+      mx1 <- pm[i + 1, 7]; my1 <- pm[i + 1, 8]
+      if (!((mx0 != -1 || my0 != -1) && (mx1 != -1 || my1 != -1))) next
+      dt <- pm[i + 1, 1] - pm[i, 1]
+      if (dt <= 0) next
+      dist <- sqrt((mx1 - mx0)^2 + (my1 - my0)^2)
+      vels <- c(vels, dist / (dt / 1000.0))
+    }
+  }
+  if (length(vels) == 0) {
+    return(NaN)
+  }
+  stats::median(vels)
+}
+
+#' A4: `activeFractionPct = 100 * durationMs / (tRel_last - tRel_first)` -- the fragment's
+#' recorded total dwell duration as a percentage of the scanpath's wall-clock span. **Not
+#' clamped** at 100% -- a value above 100% is a real signal (the recorder's dwell-weight
+#' accounting can exceed the raw tick-to-tick span for reasons upstream of this toolkit, e.g.
+#' overlapping dwell attribution), not a data error to be hidden (Mello-Thoms engagement confound).
+#'
+#' `NaN` (blank) if the path has fewer than 2 points, `duration_ms` is missing/not a real number,
+#' or the wall-clock span is zero or negative (degenerate/stationary-timestamp path).
+active_fraction_pct <- function(path, duration_ms) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  if (is.null(duration_ms) || length(duration_ms) == 0) {
+    return(NaN)
+  }
+  d <- suppressWarnings(as.numeric(duration_ms))
+  if (length(d) == 0 || is.na(d)) {
+    return(NaN)
+  }
+  span <- pm[n, 1] - pm[1, 1]
+  if (span <= 0) {
+    return(NaN)
+  }
+  100.0 * d / span
+}
+
+# ---------------------------------------------------------------------------
+# Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): I-DT (dispersion-
+# threshold, Salvucci & Goldberg 2000) fixation extraction over the scanpath's viewport centers.
+# Deterministic and index-based -- deliberately NOT DBSCAN (or any other library clustering
+# routine), whose cluster assignment is not guaranteed identical across languages/library versions
+# and would break the toolkit's 1e-6 Python<->R parity contract. Mirrors
+# `blinded_focus.metrics.fixations_idt` (Python) function-for-function; directional metrics
+# (turn-angle, transitions, etc., above) stay tick-based and are untouched by this section --
+# fixations are an added lens on the scanpath, not a rebase of any existing metric.
+# ---------------------------------------------------------------------------
+
+#: Minimum time span (ms) a candidate fixation window must cover before its dispersion is even
+#: tested -- Salvucci & Goldberg's duration threshold. Matches the Python toolkit's
+#: `MIN_FIXATION_MS` literal exactly.
+MIN_FIXATION_MS <- 250.0
+#: Fraction of the window's starting viewport width used as its dispersion threshold (image px):
+#: `threshold = DISPERSION_FRAC * w_at_window_start`, where `w_at_window_start` is FIXED to the `w`
+#: of the window's first point at the moment step 1 (see `fixations_idt`) finds it, and is never
+#: recomputed as the window later expands. Matches the Python toolkit's `DISPERSION_FRAC` literal
+#: exactly.
+DISPERSION_FRAC <- 0.25
+
+#' `(max(cx)-min(cx)) + (max(cy)-min(cy))` over `pm[start:end, ]` inclusive (1-based row indices,
+#' image px) -- the I-DT dispersion of one candidate fixation window. `pm` is an
+#' `as_path_matrix()`-shaped matrix.
+.window_dispersion <- function(pm, start, end) {
+  cxs <- pm[start:end, 2]
+  cys <- pm[start:end, 3]
+  (max(cxs) - min(cxs)) + (max(cys) - min(cys))
+}
+
+#' Tier 3 C1: the exact original I-DT window-growing loop (Salvucci & Goldberg 2000), factored out
+#' of `fixations_idt` so it can be run independently over each of a path's IDLE-FREE "runs" (see
+#' that function's idle-boundary-splitting docs for why). `pm` is an `as_path_matrix()`-shaped
+#' matrix for THIS run only -- row 1 is this run's own first point, not the original, un-split
+#' path's -- otherwise byte-for-byte the same algorithm as before the final-review idle fix.
+#'
+#' Returns `list()` (never `NULL`) if the run has fewer than 2 points -- a run boundary is not the
+#' same "insufficient path" case `fixations_idt` itself guards with `NULL`; that `NULL`-vs-`list()`
+#' sentinel distinction stays owned entirely by that caller.
+.fixations_idt_run <- function(pm) {
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(list())
+  }
+  out <- list()
+  start <- 1L
+  while (start <= n) {
+    t_start <- pm[start, 1]
+    end <- start
+    while (end <= n && (pm[end, 1] - t_start) < MIN_FIXATION_MS) {
+      end <- end + 1L
+    }
+    if (end > n) {
+      break
+    }
+    w_start <- pm[start, 4]
+    threshold <- DISPERSION_FRAC * w_start
+    disp <- .window_dispersion(pm, start, end)
+    if (disp <= threshold) {
+      cur_end <- end
+      while (cur_end + 1L <= n) {
+        if (.window_dispersion(pm, start, cur_end + 1L) <= threshold) {
+          cur_end <- cur_end + 1L
+        } else {
+          break
+        }
+      }
+      cxs <- pm[start:cur_end, 2]
+      cys <- pm[start:cur_end, 3]
+      out[[length(out) + 1]] <- list(
+        startMs = t_start,
+        durationMs = pm[cur_end, 1] - t_start,
+        centerImageX = mean(cxs),
+        centerImageY = mean(cys),
+        nPoints = cur_end - start + 1L
+      )
+      start <- cur_end + 1L
+    } else {
+      start <- start + 1L
+    }
+  }
+  out
+}
+
+#' Tier 3 C1: I-DT (dispersion-threshold, Salvucci & Goldberg 2000) fixation detector -- exact port
+#' of `blinded_focus.metrics.fixations_idt` (Python); see its docstring for the full algorithm
+#' description (deterministic, index-based, NOT a clustering library, via `.fixations_idt_run`).
+#' Per-point data `(t=pm[i,1], cx=pm[i,2], cy=pm[i,3], w=pm[i,4])`, 1-based R row indices
+#' throughout.
+#'
+#' **Idle-gap hard boundary (final-review fix):** a step flagged idle by `idle_step_mask` (`dt >
+#' IDLE_GAP_MS` -- Tier 2 B1's "reader stepped away, viewport didn't move" gap) is a HARD window
+#' boundary a fixation may never bridge -- before this fix, `.fixations_idt_run`'s loop ran over
+#' the WHOLE path with no idle awareness, so a >60s away-gap (with an otherwise near-stationary
+#' viewport either side of it) got silently bridged into ONE giant fixation spanning the entire
+#' gap. The fix splits `path` at every idle step into maximal idle-free "runs" and calls the
+#' unmodified `.fixations_idt_run` independently on each run in order, concatenating the results --
+#' a window can then never grow across a run boundary, and each run's own "path runs out of
+#' points" termination (already in `.fixations_idt_run`, unchanged) does double duty as "close the
+#' window at the idle boundary: emit it if it already qualified, else discard the never-yet-
+#' qualified partial window" -- exactly the required idle-boundary semantics, with no new
+#' termination logic needed. For a path with NO idle step at all (the common case), this is a
+#' no-op -- the single "run" is the whole path, identical to the pre-fix behavior.
+#'
+#' Returns `NULL` if `path` has fewer than 2 points -- fixation extraction is not computable at
+#' all, distinct from an empty list (see below); every metrics.csv column below (`n_fixations`
+#' etc.) maps this to a blank cell. Returns `list()` (a real, well-defined "zero fixations found" --
+#' NOT blank) if the path has >=2 points but no window ever qualifies. Otherwise a list of
+#' `list(startMs=, durationMs=, centerImageX=, centerImageY=, nPoints=)`, one per fixation, in
+#' start-index/time order.
+fixations_idt <- function(path) {
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NULL)
+  }
+  idle <- idle_step_mask(path)
+  out <- list()
+  run_start <- 1L
+  for (i in seq_len(n - 1L)) {
+    if (idle[i]) {
+      out <- c(out, .fixations_idt_run(pm[run_start:i, , drop = FALSE]))
+      run_start <- i + 1L
+    }
+  }
+  out <- c(out, .fixations_idt_run(pm[run_start:n, , drop = FALSE]))
+  out
+}
+
+#' `length(fixations)` (an integer, including `0` for a genuinely empty-but-computed list), or
+#' `NaN` (blank in `metrics.csv`) if `fixations` is `NULL` (path had fewer than 2 points). Mirrors
+#' `blinded_focus.metrics.n_fixations`.
+n_fixations <- function(fixations) {
+  if (is.null(fixations)) {
+    return(NaN)
+  }
+  length(fixations)
+}
+
+#' Mean `durationMs` over `fixations`. `NaN` (blank) if `fixations` is `NULL` or empty -- the mean
+#' of zero fixations is undefined, not `0.0`. Mirrors `blinded_focus.metrics.mean_fixation_ms`.
+mean_fixation_ms <- function(fixations) {
+  if (is.null(fixations) || length(fixations) == 0) {
+    return(NaN)
+  }
+  mean(vapply(fixations, function(f) f$durationMs, numeric(1)))
+}
+
+#' Median `durationMs` over `fixations`. `NaN` (blank) if `fixations` is `NULL` or empty. Mirrors
+#' `blinded_focus.metrics.median_fixation_ms`.
+median_fixation_ms <- function(fixations) {
+  if (is.null(fixations) || length(fixations) == 0) {
+    return(NaN)
+  }
+  stats::median(vapply(fixations, function(f) f$durationMs, numeric(1)))
+}
+
+#' Sample standard deviation (`sd()`'s default divide-by-`n-1`, matching numpy's `ddof=1`) of
+#' `durationMs` over `fixations`. `NaN` (blank) if `fixations` is `NULL` or has fewer than 2
+#' fixations -- a single fixation (or none) has no defensible sample spread. Mirrors
+#' `blinded_focus.metrics.sd_fixation_ms`.
+sd_fixation_ms <- function(fixations) {
+  if (is.null(fixations) || length(fixations) < 2) {
+    return(NaN)
+  }
+  stats::sd(vapply(fixations, function(f) f$durationMs, numeric(1)))
+}
+
+#' `length(fixations) / active_minutes`, where `active_minutes = active_span_ms(path) / 60000.0`
+#' (Tier 2 B1's idle-excluded active span -- same denominator convention as
+#' `scanning_rate_px_per_min`/`drilling_rate_per_min`). `NaN` (blank) if `fixations` is `NULL`
+#' (path had fewer than 2 points) or the active span is non-positive. `0.0` (not blank) when
+#' `fixations` is a genuinely empty list (zero fixations found) but the active span is positive.
+#' Mirrors `blinded_focus.metrics.fixations_per_min`.
+fixations_per_min <- function(fixations, path) {
+  if (is.null(fixations)) {
+    return(NaN)
+  }
+  active_min <- active_span_ms(path) / 60000.0
+  if (active_min <= 0) {
+    return(NaN)
+  }
+  length(fixations) / active_min
+}
+
+# ---------------------------------------------------------------------------
+# Tier 3 C2/C3/C4 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md):
+# C2 mouse-dwell map (analogous to raster_from_path, but point-based -- deposits a step's dt into
+# the single cell containing the cursor, not the viewport rectangle), C3 DTW trajectory similarity
+# (deterministic DP over z-normalized viewport centers -- NOT Frechet), C4 segment-level linearity
+# (mean linearity() over sub-paths split at the session's own top-hotspot cells). Mirrors
+# `blinded_focus.metrics`'s equivalent section in the Python toolkit function-for-function (R's
+# vectorized on-slide test below is equivalent to, not a literal port of, Python's per-point
+# `mouse_cursor_over_slide` helper -- same rule, idiomatic R shape). All additive; no existing
+# metric's formula or value changes.
+# ---------------------------------------------------------------------------
+
+#' Rebuild a `gh x gw` dwell-ms grid (flat, row-major) from the scanpath's schema/5 cursor
+#' positions (`mouseX`, `mouseY`), analogous to `raster_from_path` but **point-based rather than
+#' rectangle-based** -- the whole step's `dt` (see `step_durations_ms`) is deposited into the
+#' single grid cell containing the cursor position of **point i** (the step's start point; same
+#' step-i-owns-the-interval convention `raster_from_path` uses for the viewport rectangle), via
+#' the SAME floor/clamp cell-mapping `raster_from_path` itself falls back to when a viewport
+#' rectangle collapses entirely off-image.
+#'
+#' A step is skipped entirely (contributes no weight) if: it is flagged idle by
+#' `idle_step_mask` (Tier 2 B1) or its `dt <= 0`; OR *either* endpoint's cursor is off-slide (the
+#' `(-1, -1)` sentinel -- same sentinel-aware rule `mouse_path_length_px`/
+#' `mouse_velocity_px_per_sec` use: a segment touching the sentinel at either point is dropped
+#' whole, never bridged across).
+#'
+#' Returns `NULL` (blank `mouseCoveragePct`/`mouseEntropy` in `metrics.csv`) in three cases: `path`
+#' doesn't carry schema/5 mouse data at all (`has_mouse_data`); `path` carries mouse data but has
+#' **zero on-slide points** anywhere (every sample is the off-viewer sentinel); or `gw<=0`/`gh<=0`
+#' (a schema-valid fragment recording `gridWidth`/`gridHeight` of `0` -- **final-review fix,
+#' Python<->R parity**: the Python port crashes on this input -- its zero-size grid's column clamp
+#' always resolves to `-1`, and `grid[row, -1] += dt` on a genuinely size-`(gh, 0)` numpy array
+#' raises `IndexError`, aborting the whole batch run. R's own `grid[row+1, col+1]` (`col+1L == 0L`
+#' after the same clamp) does NOT crash on this input -- assigning to R's matrix index `0` is a
+#' documented silent no-op -- but the guard is added here anyway so both languages share the same
+#' explicit "nothing measurable" contract rather than relying on an R indexing accident). Otherwise
+#' returns a flat `(gw*gh,)` numeric vector -- all-zero is a legitimate result (not blank) whenever
+#' there is at least one on-slide point but zero valid on-slide *consecutive pairs* to deposit a
+#' step's dt into.
+mouse_raster_from_path <- function(path, img_w, img_h, gw, gh) {
+  if (!has_mouse_data(path)) {
+    return(NULL)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n == 0) {
+    return(NULL)
+  }
+  on_slide <- (pm[, 7] != -1) | (pm[, 8] != -1)
+  if (!any(on_slide)) {
+    return(NULL)
+  }
+  gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(NULL)
+  }
+  img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  grid <- matrix(0.0, nrow = gh, ncol = gw)
+  if (n < 2) {
+    return(as.numeric(t(grid)))
+  }
+  dts <- step_durations_ms(path)
+  idle <- idle_step_mask(path)
+  for (i in seq_len(n - 1)) {
+    dt <- dts[i]
+    if (dt <= 0) next
+    if (idle[i]) next
+    if (!(on_slide[i] && on_slide[i + 1])) next
+    mx <- pm[i, 7]; my <- pm[i, 8]
+    ccx <- min(max(mx, 0.0), img_w - EPS)
+    ccy <- min(max(my, 0.0), img_h - EPS)
+    col <- min(max(as.integer(floor(ccx / img_w * gw)), 0L), gw - 1L)
+    row <- min(max(as.integer(floor(ccy / img_h * gh)), 0L), gh - 1L)
+    grid[row + 1L, col + 1L] <- grid[row + 1L, col + 1L] + dt
+  }
+  as.numeric(t(grid))
+}
+
+#' Tier 3 C3: sample-sd (`ddof=1`, i.e. R's default `sd()`) z-normalization of a 1-D sequence:
+#' `z = (v - mean(v)) / sd(v)`. `sd` is treated as `0.0` (rather than `NA`/erroring) whenever the
+#' sequence has fewer than 2 elements OR is genuinely constant -- mirrors
+#' `blinded_focus.metrics._zscore` exactly (R's `sd()` returns `NA` for a length-1 input, which
+#' this explicitly guards against, and `0/0` for a constant sequence, also guarded).
+.zscore <- function(values) {
+  arr <- as.numeric(values)
+  n <- length(arr)
+  if (n == 0) {
+    return(arr)
+  }
+  mu <- mean(arr)
+  sdv <- if (n >= 2) stats::sd(arr) else 0.0
+  if (is.na(sdv) || sdv == 0.0) {
+    return(rep(0.0, n))
+  }
+  (arr - mu) / sdv
+}
+
+#' Tier 3 C3: Dynamic Time Warping distance between two scanpaths' viewport-center `(cx, cy)`
+#' sequences -- exact port of `blinded_focus.metrics.dtw_distance` (Python); see its docstring for
+#' the full pinned algorithm (z-normalize each axis/sequence independently via `.zscore`; local
+#' cost `sqrt(dx^2+dy^2)`; standard DTW DP; `dtwDistance = D[nA,nB]`, the RAW accumulated cost, NOT
+#' path-length-normalized). A self-comparison is always exactly `0.0` without a special-cased
+#' branch (see the Python docstring for why). `NaN` (blank in `scanpath_<slug>.csv`) if either path
+#' is empty/`NULL`.
+dtw_distance <- function(path_a, path_b) {
+  if (is.null(path_a) || length(path_a) == 0 || is.null(path_b) || length(path_b) == 0) {
+    return(NaN)
+  }
+  pma <- as_path_matrix(path_a)
+  pmb <- as_path_matrix(path_b)
+  ax <- .zscore(pma[, 2]); ay <- .zscore(pma[, 3])
+  bx <- .zscore(pmb[, 2]); by <- .zscore(pmb[, 3])
+  n_a <- length(ax); n_b <- length(bx)
+  cost <- function(i, j) {
+    dx <- ax[i] - bx[j]
+    dy <- ay[i] - by[j]
+    sqrt(dx * dx + dy * dy)
+  }
+  d <- matrix(0.0, nrow = n_a, ncol = n_b)
+  d[1, 1] <- cost(1, 1)
+  if (n_b > 1) {
+    for (j in 2:n_b) {
+      d[1, j] <- d[1, j - 1] + cost(1, j)
+    }
+  }
+  if (n_a > 1) {
+    for (i in 2:n_a) {
+      d[i, 1] <- d[i - 1, 1] + cost(i, 1)
+    }
+  }
+  if (n_a > 1 && n_b > 1) {
+    for (i in 2:n_a) {
+      for (j in 2:n_b) {
+        d[i, j] <- cost(i, j) + min(d[i - 1, j], d[i, j - 1], d[i - 1, j - 1])
+      }
+    }
+  }
+  d[n_a, n_b]
+}
+
+#' Tier 3 C4: mean `linearity` over the sub-paths a scanpath splits into at the session's own
+#' top-`top_n` dwell hotspot cells -- exact port of `blinded_focus.metrics.mean_segment_linearity`
+#' (Python); see its docstring for the full pinned segmentation algorithm (deterministic,
+#' hotspot-based; the ROI-entry variant is intentionally NOT implemented).
+#'
+#' **C4 dedup fix (2026-07-23, docs/superpowers/sdd/t4-report.md "C4 dedup fix" section):**
+#' consecutive samples landing in the SAME hotspot cell are collapsed to a single boundary (its
+#' first path index) -- a "boundary" marks a distinct hotspot VISIT, not every raw sample. Before
+#' this fix every hotspot-cell hit was its own boundary, so a dwell run (several consecutive
+#' samples in one hotspot cell -- the normal shape of real viewing) produced a chain of trivial
+#' 2-point segments with `linearity == 1.0` unconditionally, skewing `meanSegmentLinearity` toward
+#' 1.0 and defeating its purpose (Roa-Pena: measure TRANSIT segments between attended regions, not
+#' within-dwell noise). A hit whose cell matches the immediately-preceding boundary's cell is
+#' skipped (still inside the same dwell run); a hit whose cell differs (a different hotspot, or
+#' the same hotspot re-entered after visiting a different one) becomes a new boundary, keeping its
+#' real path index. Two DIFFERENT hotspot cells adjacent in the path are still two separate
+#' boundaries (a short/zero-length transit segment between them) -- unaffected by this fix.
+#'
+#' `NaN` (blank) if: fewer than 2 hotspot cells are found at all (grid has fewer than 2 cells);
+#' `path` has fewer than 2 points; fewer than 2 DISTINCT-hotspot (deduped) boundary points are
+#' found in the path (zero segments); or every segment found has fewer than 2 points.
+mean_segment_linearity <- function(path, grid, gw, gh, img_w, img_h, top_n = 5) {
+  hotspots <- top_hotspots(grid, gw, gh, top_n)
+  if (length(hotspots) < 2) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  gw_i <- as.integer(gw); gh_i <- as.integer(gh)
+  img_w_f <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h_f <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  hotspot_cells <- vapply(hotspots, function(h) h$row * gw_i + h$col, numeric(1))
+  boundary_idx <- integer(0)
+  last_boundary_cell <- NA_real_
+  for (i in seq_len(n)) {
+    cx <- pm[i, 2]; cy <- pm[i, 3]
+    col <- min(max(as.integer(floor(cx / img_w_f * gw_i)), 0L), gw_i - 1L)
+    row <- min(max(as.integer(floor(cy / img_h_f * gh_i)), 0L), gh_i - 1L)
+    cell <- row * gw_i + col
+    if (!(cell %in% hotspot_cells)) {
+      next
+    }
+    if (is.na(last_boundary_cell) || cell != last_boundary_cell) {
+      boundary_idx <- c(boundary_idx, i)
+    }
+    last_boundary_cell <- cell
+  }
+  if (length(boundary_idx) < 2) {
+    return(NaN)
+  }
+  linearities <- c()
+  for (j in seq_len(length(boundary_idx) - 1)) {
+    seg <- pm[boundary_idx[j]:boundary_idx[j + 1], , drop = FALSE]
+    if (nrow(seg) >= 2) {
+      linearities <- c(linearities, linearity(seg))
+    }
+  }
+  if (length(linearities) == 0) {
+    return(NaN)
+  }
+  mean(linearities)
 }
 
 # ---------------------------------------------------------------------------
@@ -1526,11 +2572,23 @@ annotations_area_px <- function(fc) {
 
 #' Long-format (row, col, value) data frame for a row-major flat `grid`, used by all the raster
 #' plots below. `row`/`col` are 0-based grid indices (as in the Python `_grid2d` reshape).
+#'
+#' **Zero-size-grid fix (incidental, surfaced by the final-review F1 fixture):** built with
+#' `seq_len(...) - 1L` rather than the `0:(n - 1)` idiom -- for `gw` or `gh` equal to `0` (a
+#' schema-valid degenerate grid, the same fragment shape Finding 1/2's zero-grid guards handle),
+#' `0:(0 - 1)` is R's colon operator counting DOWN (`0:-1` == `c(0, -1)`, length 2), producing a
+#' bogus 2-row axis instead of the intended empty one -- `data.frame()` then errors on the
+#' mismatched row count against `value`'s genuinely-empty `numeric(0)`. `seq_len(n) - 1L` is
+#' `integer(0)` for `n <= 0` (never counts down), and `rep(x, each = 0)` / `rep(x, times = 0)` are
+#' always empty regardless of `x` -- so `row`/`col` both come out length-0 whenever either
+#' dimension is `<= 0`, matching `value`'s length and producing a valid, empty (0-row) data frame
+#' instead of an error. A crash-prevention fix, not a plotted-value change, for any non-degenerate
+#' `(gw, gh)`.
 .grid_long_df <- function(grid, gw, gh) {
   gw <- as.integer(gw); gh <- as.integer(gh)
   data.frame(
-    row = rep(0:(gh - 1), each = gw),
-    col = rep(0:(gw - 1), times = gh),
+    row = rep(seq_len(gh) - 1L, each = gw),
+    col = rep(seq_len(gw) - 1L, times = gh),
     value = as.numeric(grid)
   )
 }
@@ -1607,6 +2665,45 @@ plot_difference <- function(grid, consensus_grid, gw, gh, title, out) {
     labs(title = title, x = "grid col", y = "grid row") +
     theme_minimal()
   ggsave(out, plot = p, width = 6, height = 5, dpi = 110)
+}
+
+#' Tier 1 A6: every session's viewport-center path (image px) on one shared axis -- distinct color
+#' per session, alpha 0.5, start=o/end=x markers, legend. `labels_vec`/`paths` are parallel
+#' vectors/lists (one entry per session); a session with an empty/NULL path contributes no line.
+#' Matches `blinded_focus.figures.scanpath_multi_overlay` in the Python toolkit -- not part of the
+#' pinned numeric-parity contract (a PNG, not a CSV); only existence + valid PNG magic are
+#' asserted by the selftests, so this need not reproduce the Python figure pixel-for-pixel.
+plot_scanpath_multi_overlay <- function(labels_vec, paths, title, out) {
+  rows <- list(); start_rows <- list(); end_rows <- list()
+  for (i in seq_along(paths)) {
+    pm <- as_path_matrix(paths[[i]])
+    n <- nrow(pm)
+    if (is.null(n) || n == 0) next
+    lbl <- labels_vec[i]
+    rows[[length(rows) + 1]] <- data.frame(x = pm[, 2], y = pm[, 3], session = lbl, row.names = NULL)
+    start_rows[[length(start_rows) + 1]] <- data.frame(
+      x = pm[1, 2], y = pm[1, 3], session = lbl, row.names = NULL
+    )
+    end_rows[[length(end_rows) + 1]] <- data.frame(
+      x = pm[n, 2], y = pm[n, 3], session = lbl, row.names = NULL
+    )
+  }
+  if (length(rows) == 0) {
+    p <- ggplot() + labs(title = paste0(title, " (no path data)")) + theme_minimal()
+    ggsave(out, plot = p, width = 7, height = 6, dpi = 110)
+    return(invisible(NULL))
+  }
+  df <- do.call(rbind, rows)
+  start_df <- do.call(rbind, start_rows)
+  end_df <- do.call(rbind, end_rows)
+  p <- ggplot(df, aes(x = x, y = y, color = session)) +
+    geom_path(alpha = 0.5, linewidth = 0.8) +
+    geom_point(data = start_df, aes(x = x, y = y, color = session), shape = 16, size = 3) +
+    geom_point(data = end_df, aes(x = x, y = y, color = session), shape = 4, size = 3, stroke = 1.4) +
+    scale_y_reverse() +
+    labs(title = title, x = "image x (px)", y = "image y (px)", color = "session") +
+    theme_minimal()
+  ggsave(out, plot = p, width = 7, height = 6, dpi = 110)
 }
 
 #' Cumulative fraction of grid cells visited so far, plotted against relative time (ms), matching
@@ -1716,6 +2813,18 @@ DEFAULT_RES <- 512
 #: Default number of within-path zoom bands (terciles) for the magnification-split analysis,
 #: overridable via `magbands=`.
 DEFAULT_MAGBANDS <- 3
+#: Tier 1 A5: number of top-dwell cells exported per session to `hotspots_<slug>.csv`.
+HOTSPOT_TOP_N <- 5L
+#: Tier 1 A5: number of top directed cell-transitions exported per session to
+#: `transitions_<slug>.csv`.
+TRANSITIONS_TOP_N <- 15L
+#: Tier 2 B3: default `--magband-scheme` -- canonical (true-magnification) bands, auto-falling
+#: back to the tercile scheme per-session when a session's baseMagnification/dsMilli aren't
+#: computable (see `magband_labels_for_scheme`).
+DEFAULT_MAGBAND_SCHEME <- "canonical"
+#: Tier 2 B3: number of canonical magnification bands (fixed by `MAG_BAND_CUTS`'s 6 cut points --
+#: NOT overridable via `magbands=`, which only sizes the tercile fallback scheme).
+CANONICAL_MAGBAND_COUNT <- length(MAG_BAND_LABELS)
 
 #' Aspect-preserving grid dims with the longest side capped at `res` (mirrors the QuPath
 #' extension's own `GRID_MAX`-style longest-side cap, and `blinded_focus.analyze._res_grid_dims`
@@ -1738,10 +2847,17 @@ DEFAULT_MAGBANDS <- 3
 #: Navigation-metric columns (from `metrics.csv`) correlated against graded diagnostic accuracy in
 #: `.nav_accuracy_rows`. All are grid/path-level per-session metrics already present as `row` keys
 #: in `analyze()`'s main loop.
+#:
+#: Tier 1 A1 extension: `durationMs`, `cursorOverSlidePct`, `mouseViewportCouplingPx` close the
+#: "recorded-but-uncorrelated" gap identified by the data-dimension audit -- they were already
+#: written to `metrics.csv` but never joined against graded accuracy. (`decisionLatencyMs`, the
+#: fourth recorded-but-uncorrelated dimension, is sourced directly from `decision_rows` rather than
+#: this metrics.csv-backed vector -- see `.nav_accuracy_rows`'s dedicated block below.)
 NAV_ACCURACY_COLS <- c(
   "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
   "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
-  "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy"
+  "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
+  "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx"
 )
 #: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or with
 #: zero variance on either side) `.pearson_guarded` returns `NaN` (blank), never a numerically
@@ -1762,9 +2878,41 @@ MIN_CORRELATION_N <- 5
   as.numeric(stats::cor(xs, ys, method = "pearson"))
 }
 
+#' Shared point-biserial-r + group mean/median/meanDiff computation for one navigation metric,
+#' given already-filtered/zipped `xs`/`ys` vectors (`xs` = the metric's value, `ys` = the matching
+#' 0/1 graded `correct`). Factored out of `.nav_accuracy_rows`'s per-column loop so the Tier 1 A1
+#' `decisionLatencyMs` row (sourced directly from `decision_rows`, not via the `metrics_rows`
+#' column loop) computes its stats identically, not via a parallel reimplementation that could
+#' silently drift from the original. Mirrors `blinded_focus.analyze._nav_stat_row` exactly.
+.nav_stat_row <- function(metric_name, xs, ys) {
+  r_val <- .pearson_guarded(ys, xs)
+  correct_vals <- xs[ys == 1]
+  incorrect_vals <- xs[ys == 0]
+  mean_correct <- if (length(correct_vals) > 0) mean(correct_vals) else NaN
+  mean_incorrect <- if (length(incorrect_vals) > 0) mean(incorrect_vals) else NaN
+  median_correct <- if (length(correct_vals) > 0) stats::median(correct_vals) else NaN
+  median_incorrect <- if (length(incorrect_vals) > 0) stats::median(incorrect_vals) else NaN
+  mean_diff <- if (length(correct_vals) >= 2 && length(incorrect_vals) >= 2) {
+    mean_correct - mean_incorrect
+  } else {
+    NaN
+  }
+  list(
+    metric = metric_name,
+    n = length(xs),
+    pointBiserialR = r_val,
+    meanCorrect = mean_correct,
+    meanIncorrect = mean_incorrect,
+    medianCorrect = median_correct,
+    medianIncorrect = median_incorrect,
+    meanDiff = mean_diff
+  )
+}
+
 #' Join decisions' hand-graded `correct` (0/1) onto `metrics_rows` by the stable `(slide,
 #' sessionId)` key (never the display label), then compute a guarded point-biserial r plus group
-#' means/medians per navigation column in `NAV_ACCURACY_COLS`.
+#' means/medians per navigation column in `NAV_ACCURACY_COLS` (via `.nav_stat_row`), plus (Tier 1
+#' A1) a `decisionLatencyMs` row sourced directly from `decision_rows`.
 #'
 #' Direct sessionId join: `metrics_rows` carries the stable `sessionId` (stamped in `analyze()`'s
 #' per-session loop, right next to the human display `label_for` label) -- so no label-based
@@ -1803,29 +2951,23 @@ MIN_CORRELATION_N <- 5
       xs <- c(xs, as.numeric(v))
       ys <- c(ys, cval)
     }
-    r_val <- .pearson_guarded(ys, xs)
-    correct_vals <- xs[ys == 1]
-    incorrect_vals <- xs[ys == 0]
-    mean_correct <- if (length(correct_vals) > 0) mean(correct_vals) else NaN
-    mean_incorrect <- if (length(incorrect_vals) > 0) mean(incorrect_vals) else NaN
-    median_correct <- if (length(correct_vals) > 0) stats::median(correct_vals) else NaN
-    median_incorrect <- if (length(incorrect_vals) > 0) stats::median(incorrect_vals) else NaN
-    mean_diff <- if (length(correct_vals) >= 2 && length(incorrect_vals) >= 2) {
-      mean_correct - mean_incorrect
-    } else {
-      NaN
-    }
-    rows[[length(rows) + 1]] <- list(
-      metric = col,
-      n = length(xs),
-      pointBiserialR = r_val,
-      meanCorrect = mean_correct,
-      meanIncorrect = mean_incorrect,
-      medianCorrect = median_correct,
-      medianIncorrect = median_incorrect,
-      meanDiff = mean_diff
-    )
+    rows[[length(rows) + 1]] <- .nav_stat_row(col, xs, ys)
   }
+
+  # Tier 1 A1: decisionLatencyMs is sourced directly from decision_rows -- it and `correct` already
+  # live on the SAME (slide, sessionId) decision entry, so there is no cross-table join to perform
+  # here at all (unlike the metrics_rows columns above); iterating decision_rows directly is
+  # itself the (slide, sessionId)-keyed join, with no label bridge in sight.
+  lat_xs <- numeric(0); lat_ys <- numeric(0)
+  for (r in decision_rows) {
+    if (is.na(r$correct)) next
+    lat <- r$decisionLatencyMs
+    if (is.null(lat) || is.na(lat)) next
+    lat_xs <- c(lat_xs, as.numeric(lat))
+    lat_ys <- c(lat_ys, r$correct)
+  }
+  rows[[length(rows) + 1]] <- .nav_stat_row("decisionLatencyMs", lat_xs, lat_ys)
+
   list(rows = rows, had_any_graded = had_any_graded)
 }
 
@@ -1866,13 +3008,20 @@ MIN_CORRELATION_N <- 5
 #'   populated for every session — 0/0.0 when a session has no `annotations`;
 #'   `annotationReentryCount` blank without a `path`; `enrichmentRatio` blank when its mask has no
 #'   in/out split to compare) plus cursor metrics `cursorOverSlidePct`, `mouseViewportCouplingPx`
-#'   (blank unless the session's `path` carries schema/5 8-element points with `mouseX`/`mouseY`).
+#'   (blank unless the session's `path` carries schema/5 8-element points with `mouseX`/`mouseY`)
+#'   plus (Tier 3 C1, docs/superpowers/specs/2026-07-23-...) a deterministic I-DT fixation-
+#'   extraction summary: `nFixations`, `meanFixationMs`, `medianFixationMs`, `sdFixationMs`,
+#'   `fixationsPerMin` (path-only, blank without a path) -- see `fixations_idt`.
 #' - per slide: `compare_<slug>.csv` (pairwise cc/sim/iou, tidy long format), `consensus_<slug>.png`.
 #'   Also carries a slide-level `coincidenceLevel` (one row) and a per-session
 #'   `regionCoveragePct` (vs the slide consensus).
 #' - per slide, when `reference`/`roi` given: `reference_<slug>.csv`.
 #' - per slide, when any session has a schema/3+ `path`: `scanpath_<slug>.csv`, and (Phase 1)
 #'   `magbands_<slug>.csv` — per-session dwell time in each of `magbands` within-path zoom bands.
+#' - per slide, when any session has a schema/3+ `path` AND at least one fixation was found on
+#'   this slide (Tier 3 C1): `fixations_<slug>.csv` — one row per I-DT fixation, per session:
+#'   `session`, `idx` (1-based, in scanpath order), `startMs`, `durationMs`, `centerImageX`,
+#'   `centerImageY`, `nPoints` — see `fixations_idt`.
 #' - per slide, when any session has at least one annotation: (Phase 2) `annotations_<slug>.csv` —
 #'   pairwise IoU of each session's own rasterized annotated region (tidy long format, same
 #'   diagonal-reuse convention as `compare_<slug>.csv`) plus a slide-level `coincidenceLevel` over
@@ -1885,10 +3034,18 @@ MIN_CORRELATION_N <- 5
 #'
 #' `res` sets the longest-side resolution of the scanpath-rasterized fine/magband heatmaps (see
 #' `.res_grid_dims`); `magbands` sets the number of within-path zoom bands for the
-#' magnification-split analysis (see `zoom_band_labels`).
+#' tercile-fallback magnification-split analysis (see `zoom_band_labels`).
+#'
+#' `magband_scheme` (Tier 2 B3, `--magband-scheme`) is `"canonical"` (default) or `"tercile"`.
+#' `"canonical"` uses true-objective-magnification bands (`MAG_BAND_CUTS`, 7 bands) for every
+#' session whose `baseMagnification`/`dsMilli` are computable, auto-falling back to the tercile
+#' scheme per-session otherwise (see `magband_labels_for_scheme`). `"tercile"` forces the pre-B3
+#' within-path quantile scheme for every session regardless of `baseMagnification` availability.
+#' `magbands_<slug>.csv` gains a `bandScheme` column recording which scheme was actually used.
 analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = NULL,
                      make_figures = FALSE, res = DEFAULT_RES, magbands = DEFAULT_MAGBANDS,
-                     key_csv = NULL, graded_csv = NULL) {
+                     key_csv = NULL, graded_csv = NULL,
+                     magband_scheme = DEFAULT_MAGBAND_SCHEME) {
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
   fragments <- load_fragments(inputs)
   if (length(fragments) == 0) {
@@ -1951,6 +3108,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     path_seq <- list() # sessionId -> visited-cell sequence (schema/3+ only)
     common_ann_masks <- list() # sessionId -> this session's own annotated region, resampled to
                                 # (tw, th) logical -- used only by the cross-user annotations_<slug>.csv
+    mouse_native <- list() # sessionId -> this session's own NATIVE (gw, gh) point-based
+                            # mouse-dwell grid (Tier 3 C2) -- all-zero (never NULL) for a session
+                            # with no schema/5 mouse data or zero on-slide points, mirroring
+                            # common_ann_masks' all-FALSE convention for annotation-less sessions.
 
     for (sid in session_ids) {
       f <- by_session[[sid]]
@@ -1958,6 +3119,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       grid <- as.numeric(f$grid)
       native_grid[[sid]] <- list(grid = grid, gw = gw, gh = gh)
       resampled[[sid]] <- resample_nn(grid, gw, gh, tw, th)
+      mouse_native[[sid]] <- rep(0.0, gw * gh)
 
       com <- center_of_mass(grid, gw, gh)
       base_mag <- f$baseMagnification
@@ -1977,6 +3139,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       n_ann <- length(ann_fc$features)
       ann_area <- annotations_area_px(ann_fc)
       native_ann_mask <- rasterize_feature_collection(ann_fc, gw, gh, img_w, img_h)
+      # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): overlap-correct companion to ann_area
+      # above -- reuses the SAME native_ann_mask (no re-rasterization), so this is always in sync
+      # with dwellInAnnotationPct/enrichmentRatio's mask.
+      ann_area_union <- annotated_area_union_px(native_ann_mask, gw, gh, img_w, img_h)
       # Cross-user (annotations_<slug>.csv) comparisons need every session's mask on the slide's
       # common (tw, th) grid -- resample the already-rasterized native mask (as 0.0/1.0 doubles)
       # via the same nearest-neighbour resampler used for dwell grids, rather than re-rasterizing
@@ -2027,7 +3193,47 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # Path-dependent Phase 2 metrics: blank without a path at all (schema/1, /2).
         annotationReentryCount = NA,
         cursorOverSlidePct = NA,
-        mouseViewportCouplingPx = NA
+        mouseViewportCouplingPx = NA,
+        # Tier 1 additive metrics (docs/superpowers/specs/2026-07-23-...): A2 turn-angle
+        # directionality + A4 active fraction are path-only (blank without a path at all, like the
+        # block above); A3 mouse kinematics is additionally gated on schema/5 mouse data
+        # (populated in the `has_mouse_data` branch below, alongside the existing Phase 2 cursor
+        # metrics).
+        meanAbsTurnAngleDeg = NA,
+        turnAngleEntropy = NA,
+        mousePathLengthPx = NA,
+        mouseVelocityPxPerSec = NA,
+        activeFractionPct = NA,
+        # Tier 2 (docs/superpowers/specs/2026-07-23-...) additive columns: B1 transparency
+        # (idleMs/activeSpanMs), B2 Drew-fidelity zoom (avgZoomLog2W/drillingRateOctavesPerMin),
+        # B4 magnification-source flag. All path-only (NA without a path at all, like the Tier 1
+        # block above).
+        idleMs = NA,
+        activeSpanMs = NA,
+        avgZoomLog2W = NA,
+        drillingRateOctavesPerMin = NA,
+        magnificationSource = NA_character_,
+        # Tier 3 C1 (docs/superpowers/specs/2026-07-23-...): I-DT fixation extraction -- path-only
+        # (NA without a path at all, like the Tier 1/2 blocks above).
+        nFixations = NA,
+        meanFixationMs = NA,
+        medianFixationMs = NA,
+        sdFixationMs = NA,
+        fixationsPerMin = NA,
+        # Tier 3 C2/C4 (docs/superpowers/specs/2026-07-23-...): mouse-dwell coverage/entropy
+        # (schema/5 only, populated in the `has_mouse_data` branch below) and segment-level
+        # linearity (path-only, populated in the path block below).
+        mouseCoveragePct = NA,
+        mouseEntropy = NA,
+        meanSegmentLinearity = NA,
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended at the END of metrics.csv's
+        # fieldnames (additive/append-only column order), NOT interleaved next to
+        # annotatedAreaPx/meanSegmentLinearity above despite the conceptual relation.
+        # annotatedAreaUnionPx is grid+annotation-mask-only (no path required), so it's always
+        # populated (0.0 with no annotations), like annotatedAreaPx above.
+        annotatedAreaUnionPx = ann_area_union,
+        # visitCountJaccard is path-only (NA without a path), populated in the path block below.
+        visitCountJaccard = NA
       )
 
       path <- f$path
@@ -2054,10 +3260,62 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # slide's common (tw, th)) -- a per-session metric, not a cross-session one, so it should
         # stay at the resolution the fragment actually recorded.
         row$annotationReentryCount <- annotation_reentry_count(path, native_ann_mask, gw, gh, img_w, img_h)
+        # Tier 1 A2 (turn-angle directionality) + A4 (active fraction): path-only, no mouse data
+        # or annotation needed -- populated whenever a path exists at all (NA internally on their
+        # own documented degenerate cases, e.g. <3 points).
+        row$meanAbsTurnAngleDeg <- mean_abs_turn_angle_deg(path)
+        row$turnAngleEntropy <- turn_angle_entropy(path)
+        row$activeFractionPct <- active_fraction_pct(path, if (!is.null(f$durationMs)) f$durationMs else NA)
         if (has_mouse_data(path)) {
           row$cursorOverSlidePct <- cursor_over_slide_pct(path)
           row$mouseViewportCouplingPx <- mouse_viewport_coupling_px(path)
+          # Tier 1 A3: mouse kinematics, schema/5 only (same gate as the two cursor metrics above).
+          row$mousePathLengthPx <- mouse_path_length_px(path)
+          row$mouseVelocityPxPerSec <- mouse_velocity_px_per_sec(path)
+          # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): point-based mouse-dwell grid at
+          # this session's own NATIVE (gw, gh) resolution (same resolution convention
+          # coveragePct/entropy use for the recorded grid above). NULL (blank
+          # mouseCoveragePct/mouseEntropy) iff zero on-slide points anywhere in the path;
+          # `mouse_native[[sid]]` stays the all-zero default in that case, which is exactly right
+          # for the cross-session mouse_<slug>.csv comparison below.
+          mouse_grid <- mouse_raster_from_path(path, img_w, img_h, gw, gh)
+          if (!is.null(mouse_grid)) {
+            row$mouseCoveragePct <- coverage(mouse_grid) * 100.0
+            row$mouseEntropy <- entropy(mouse_grid)
+            mouse_native[[sid]] <- mouse_grid
+          }
         }
+        # Tier 2 B1 transparency columns + B2 Drew-fidelity zoom + B4 magnification-source flag:
+        # path-only (like the Tier 1 block above), populated regardless of mouse data.
+        row$idleMs <- idle_ms(path)
+        row$activeSpanMs <- active_span_ms(path)
+        row$avgZoomLog2W <- avg_zoom_log2_w(path, base_mag, img_w)
+        row$drillingRateOctavesPerMin <- drilling_rate_octaves_per_min(path, base_mag, img_w)
+        row$magnificationSource <- if (!is.null(base_mag)) "true" else "proxy-downsample"
+        # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
+        # deterministic dispersion-threshold detector over the viewport centers. Computed once here
+        # for metrics.csv's summary columns; the per-fixation fixations_<slug>.csv rows are built
+        # later (per slide) by recomputing this same call directly off each path session's own
+        # fragment (mirrors the magband-split export's recompute-don't-cache convention), so no
+        # extra per-slide cache list is needed here.
+        fx <- fixations_idt(path)
+        row$nFixations <- n_fixations(fx)
+        row$meanFixationMs <- mean_fixation_ms(fx)
+        row$medianFixationMs <- median_fixation_ms(fx)
+        row$sdFixationMs <- sd_fixation_ms(fx)
+        row$fixationsPerMin <- fixations_per_min(fx, path)
+        # Tier 3 C4 (docs/superpowers/specs/2026-07-23-...): segment-level linearity, split at
+        # this session's own top-hotspot cells -- reuses the session's own NATIVE (grid, gw, gh)
+        # recorded dwell grid (same resolution hotspots_<slug>.csv's top_hotspots call uses), not
+        # the slide's common (tw, th) or a scanpath raster.
+        row$meanSegmentLinearity <- mean_segment_linearity(path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N)
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the visit-count
+        # grid needs the session's own NATIVE (gw, gh) visited-cell sequence, recomputed here (NOT
+        # `path_seq[[sid]]`, which is built at the slide's common (tw, th) resolution for
+        # cross-session scanpath_<slug>.csv comparisons) -- same native-resolution convention
+        # meanSegmentLinearity/hotspots_<slug>.csv use.
+        native_seq <- visited_sequence(path, gw, gh, img_w, img_h)
+        row$visitCountJaccard <- visit_count_jaccard(grid, gw, gh, native_seq, HOTSPOT_TOP_N)
       }
       metrics_rows[[length(metrics_rows) + 1]] <- row
 
@@ -2075,6 +3333,21 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         NA_real_
       }
       decision_ms <- if (!is.null(dec$decisionMs)) as.numeric(dec$decisionMs) else NA_real_
+      # Tier 3 C5 (2026-07-23): promptShownMs is a passthrough, mirroring decisionMs's own handling
+      # immediately above -- absent (older fragment, recorded before the recorder gained this
+      # field) degrades to NA/blank, never a crash. responseLatencyMs = decisionMs - promptShownMs
+      # is computed only when BOTH are real numbers (is.numeric already excludes logical values,
+      # same rationale as confidence's guard below).
+      prompt_shown_ms <- if (!is.null(dec$promptShownMs) && is.numeric(dec$promptShownMs)) {
+        as.numeric(dec$promptShownMs)
+      } else {
+        NA_real_
+      }
+      response_latency_ms <- if (!is.na(decision_ms) && !is.na(prompt_shown_ms)) {
+        decision_ms - prompt_shown_ms
+      } else {
+        NA_real_
+      }
       # Blank iff absent/NULL or its string form is empty; otherwise the string form -- so a
       # numeric 0 sessionId stably maps to "0" (this already matched that rule before the Python
       # parity fix: `nzchar(as.character(0))` is TRUE since "0" has 1 char, so this line needs no
@@ -2097,14 +3370,20 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         confidence = if (!is.null(confidence) && is.numeric(confidence)) as.numeric(confidence) else NA_real_,
         confidenceScaled = conf_scaled,
         decisionMs = decision_ms,
-        # == decisionMs (both are relative to the slide's recording start); kept as a separate
-        # column so a future recorder revision that captures a distinct "time from leave-prompt to
-        # submit" value has a column ready to diverge into.
+        # == decisionMs (both relative to the slide's recording start): "time from slide open to
+        # submit". Tier 3 C5 (2026-07-23) added the recorder's promptShownMs, which made the
+        # previously-anticipated "time from leave-prompt to submit" column real -- that's
+        # responseLatencyMs below, appended as its own column rather than replacing this one.
+        # decisionLatencyMs itself stays permanently == decisionMs.
         decisionLatencyMs = decision_ms,
         correctDx = correct_dx,
         # blank unless --graded supplied a (slideKey, sessionId) row -- NEVER auto-derived from
         # diagnosis == correctDx string comparison.
-        correct = graded_val
+        correct = graded_val,
+        # Tier 3 C5 (appended, additive): passthrough of the recorder's dialog-shown timestamp and
+        # the derived once-prompted response latency. See the guard comments above.
+        promptShownMs = prompt_shown_ms,
+        responseLatencyMs = response_latency_ms
       )
     }
 
@@ -2116,8 +3395,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     slide_metric_rows <- metrics_rows[
       seq(length(metrics_rows) - length(session_ids) + 1, length(metrics_rows))
     ]
-    consensus_grid <- Reduce(`+`, lapply(session_ids, function(sid) normalise_max(resampled[[sid]]))) /
-      length(session_ids)
+    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): factored out of the consensus_grid
+    # one-liner below so consensus_count_<slug>.csv can reuse the SAME per-session normalized
+    # grids (identical Reduce(`+`, ...) input as before -- byte-identical consensus_grid, no drift).
+    norm_grids <- lapply(session_ids, function(sid) normalise_max(resampled[[sid]]))
+    consensus_grid <- Reduce(`+`, norm_grids) / length(session_ids)
     # Slide-level (not per-session) statistic -- placed on exactly one row below (see
     # blinded_focus.analyze's module docstring "coincidenceLevel" convention note; the two
     # toolkits must place it identically for their compare_<slug>.csv files to diff-match).
@@ -2135,7 +3417,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           iou = iou(resampled[[a]], resampled[[b]], IOU_THRESH),
           diffFromConsensus = NA,
           coincidenceLevel = NA,
-          regionCoveragePct = NA
+          regionCoveragePct = NA,
+          # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): a genuine PAIRWISE quantity (unlike
+          # diffFromConsensus/coincidenceLevel), so it is computed on EVERY row, not
+          # diagonal-only -- exactly 0.0 for a==b (self-comparison).
+          jsDivergence = js_divergence(resampled[[a]], resampled[[b]])
         )
         if (identical(a, b)) {
           r$diffFromConsensus <- 1.0 - cc(resampled[[a]], consensus_grid)
@@ -2150,11 +3436,77 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     write_csv_tidy(
       compare_rows, file.path(out_dir, paste0("compare_", slide_slug, ".csv")),
       c("sessionA", "sessionB", "cc", "sim", "iou", "diffFromConsensus",
-        "coincidenceLevel", "regionCoveragePct")
+        "coincidenceLevel", "regionCoveragePct",
+        # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order above
+        # is unchanged.
+        "jsDivergence")
     )
     plot_heatmap(
       consensus_grid, tw, th, paste0("Consensus - ", slide_key),
       file.path(out_dir, paste0("consensus_", slide_slug, ".png"))
+    )
+
+    # ------------------------------------------------------------------
+    # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): per-cell reader-count "weak annotation"
+    # map -- the spatial structure coincidenceLevel collapses to one scalar. Reuses norm_grids
+    # (same per-session normalise_max vectors as consensus_grid above, at the slide's common
+    # (tw, th) grid) and HOTSPOT_THRESH_FRAC (the SAME threshold count_hotspots/nHotspots already
+    # use -- a coarser per-session-max-relative threshold, distinct from coincidence_level's own
+    # IOU_THRESH). Written whenever the slide has >=2 sessions (a single session's "reader count"
+    # is a degenerate/uninformative 0-or-1 map), regardless of whether any cell actually clears the
+    # threshold (possibly a header-only, zero-row file -- blank-not-crash, not a missing file).
+    # ------------------------------------------------------------------
+    if (length(session_ids) >= 2) {
+      reader_counts <- Reduce(`+`, lapply(norm_grids, function(g) as.numeric(g > HOTSPOT_THRESH_FRAC)))
+      consensus_count_rows <- list()
+      for (idx0 in seq_len(tw * th) - 1L) {
+        n_readers <- as.integer(reader_counts[idx0 + 1])
+        if (n_readers >= 1) {
+          consensus_count_rows[[length(consensus_count_rows) + 1]] <- list(
+            cellRow = idx0 %/% tw, cellCol = idx0 %% tw, nReaders = n_readers
+          )
+        }
+      }
+      write_csv_tidy(
+        consensus_count_rows, file.path(out_dir, paste0("consensus_count_", slide_slug, ".csv")),
+        c("cellRow", "cellCol", "nReaders")
+      )
+    }
+
+    # ------------------------------------------------------------------
+    # Tier 1 A5: top-hotspots export -- surfaces the already-implemented top_hotspots at each
+    # session's own NATIVE (gw, gh) grid resolution (per-session metric, not cross-session -- same
+    # resolution convention as annotationReentryCount above). Written for every session
+    # unconditionally ("when any session has a grid, i.e. always" -- every fragment always carries
+    # a grid).
+    # ------------------------------------------------------------------
+    hotspot_rows <- list()
+    for (sid in session_ids) {
+      ng <- native_grid[[sid]]
+      f <- by_session[[sid]]
+      img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
+      img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
+      total <- sum(ng$grid)
+      label <- label_for(sid, labels)
+      hs <- top_hotspots(ng$grid, ng$gw, ng$gh, HOTSPOT_TOP_N)
+      for (i in seq_along(hs)) {
+        h <- hs[[i]]
+        hotspot_rows[[length(hotspot_rows) + 1]] <- list(
+          session = label,
+          rank = i,
+          cellRow = h$row,
+          cellCol = h$col,
+          centerImageX = (h$col + 0.5) / ng$gw * img_w,
+          centerImageY = (h$row + 0.5) / ng$gh * img_h,
+          dwellMs = h$value,
+          dwellFrac = if (total > 0) h$value / total else NA
+        )
+      }
+    }
+    write_csv_tidy(
+      hotspot_rows, file.path(out_dir, paste0("hotspots_", slide_slug, ".csv")),
+      c("session", "rank", "cellRow", "cellCol", "centerImageX", "centerImageY",
+        "dwellMs", "dwellFrac")
     )
 
     # ------------------------------------------------------------------
@@ -2189,6 +3541,52 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       write_csv_tidy(
         ann_rows, file.path(out_dir, paste0("annotations_", slide_slug, ".csv")),
         c("sessionA", "sessionB", "iou", "coincidenceLevel")
+      )
+    }
+
+    # ------------------------------------------------------------------
+    # Tier 3 C2 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): cross-reader
+    # mouse agreement -- pairwise cc/iou of each session's own point-based mouse-dwell grid
+    # (mouse_native, resampled to the slide's common (tw, th) grid) + a coincidence level,
+    # mirroring annotations_<slug>.csv's tidy-long + diagonal-reuse convention exactly. Gated on at
+    # least one session carrying schema/5 mouse data at all (NOT on whether that session's mouse
+    # grid ended up non-empty -- a session whose mouse data has zero on-slide points still "has
+    # mouse data" in the schema sense and should still trigger the file, same rationale as the
+    # annotations gate above being on nAnnotations > 0, not on the mask being non-empty). A session
+    # without mouse data contributes its all-zero mouse_native placeholder (never NULL), so every
+    # session_ids entry participates in the pairwise matrix.
+    # ------------------------------------------------------------------
+    any_mouse <- any(sapply(session_ids, function(sid) has_mouse_data(by_session[[sid]]$path)))
+    if (any_mouse) {
+      mouse_resampled <- list()
+      for (sid in session_ids) {
+        mouse_resampled[[sid]] <- resample_nn(
+          mouse_native[[sid]], native_grid[[sid]]$gw, native_grid[[sid]]$gh, tw, th
+        )
+      }
+      mouse_coincidence_val <- coincidence_level(
+        lapply(session_ids, function(sid) mouse_resampled[[sid]]), IOU_THRESH
+      )
+      mouse_rows <- list()
+      for (idx_a in seq_along(session_ids)) {
+        a <- session_ids[idx_a]
+        for (b in session_ids) {
+          mouse_row <- list(
+            sessionA = label_for(a, labels),
+            sessionB = label_for(b, labels),
+            cc = cc(mouse_resampled[[a]], mouse_resampled[[b]]),
+            iou = iou(mouse_resampled[[a]], mouse_resampled[[b]], IOU_THRESH),
+            coincidenceLevel = NA
+          )
+          if (identical(a, b) && idx_a == 1) {
+            mouse_row$coincidenceLevel <- mouse_coincidence_val
+          }
+          mouse_rows[[length(mouse_rows) + 1]] <- mouse_row
+        }
+      }
+      write_csv_tidy(
+        mouse_rows, file.path(out_dir, paste0("mouse_", slide_slug, ".csv")),
+        c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel")
       )
     }
 
@@ -2250,6 +3648,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           time_off <- sum(other[!ref_mask])
           denom <- max(sum(ref_mask), 1)
           ref_cov <- sum(other[ref_mask] > 0) / denom
+          # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): precisionAtTopK/recall vs the SAME
+          # ref_mask this row already compares against (whichever of --roi/--reference built it
+          # above) -- see precision_recall_at_topk's docs.
+          pr <- precision_recall_at_topk(other, ref_mask)
           list(
             session = label_for(sid, labels),
             nss = nss(other, ref_mask),
@@ -2258,10 +3660,20 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             iou = iou(other, ref_map, IOU_THRESH),
             refCoveragePct = ref_cov * 100.0,
             timeOnRefMs = time_on,
-            timeOffRefMs = time_off
+            timeOffRefMs = time_off,
+            precisionAtTopK = pr$precision,
+            recall = pr$recall
           )
         }
-        other_sids <- session_ids[session_ids != reference]
+        # Pre-existing latent bug fix (found by Tier 3 C6's roi-only/no-reference fixture, the
+        # first R test to exercise this combination): `session_ids != reference` when
+        # `reference` is NULL evaluates to `logical(0)` (R's `!=` against NULL is length-0, not
+        # broadcast), so `session_ids[logical(0)]` silently returns an EMPTY vector rather than
+        # every session -- diverging from the Python toolkit's `sid != reference` (always TRUE
+        # for a string `sid` when `reference is None`), which correctly keeps every session. Guard
+        # explicitly so a `--roi`-only call (no `--reference`) includes every session, matching
+        # Python exactly; unaffected when `reference` is a real string (identical to before).
+        other_sids <- if (is.null(reference)) session_ids else session_ids[session_ids != reference]
         ref_rows <- lapply(other_sids, ref_row_fn)
         if (!is.null(reference) && reference %in% session_ids) {
           ref_rows <- c(list(ref_row_fn(reference)), ref_rows)
@@ -2270,7 +3682,10 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         ref_rows <- ref_rows[order(-nss_vals)]
         write_csv_tidy(
           ref_rows, file.path(out_dir, paste0("reference_", slide_slug, ".csv")),
-          c("session", "nss", "aucJudd", "cc", "iou", "refCoveragePct", "timeOnRefMs", "timeOffRefMs")
+          c("session", "nss", "aucJudd", "cc", "iou", "refCoveragePct", "timeOnRefMs", "timeOffRefMs",
+            # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order
+            # above is unchanged.
+            "precisionAtTopK", "recall")
         )
         reference_summaries[[length(reference_summaries) + 1]] <- list(
           slide = slide_key, slug = slide_slug, rows = ref_rows
@@ -2290,7 +3705,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             sessionA = label_for(a, labels),
             sessionB = label_for(b, labels),
             levenshteinSim = levenshtein_sim(path_seq[[a]], path_seq[[b]]),
-            transitionEntropy = NA
+            transitionEntropy = NA,
+            # Tier 3 C3 (docs/superpowers/specs/2026-07-23-...): DTW distance between the two
+            # sessions' raw viewport-center paths (NOT the grid-cell path_seq/levenshtein
+            # sequence) -- a resolution-independent complement. Every scan_sids session has a
+            # non-empty path by construction, so this is never blank here; always exactly 0.0 on
+            # the diagonal (a == b), by construction of the DP itself.
+            dtwDistance = dtw_distance(by_session[[a]]$path, by_session[[b]]$path)
           )
           if (identical(a, b)) {
             r$transitionEntropy <- transition_entropy(path_seq[[a]])
@@ -2300,12 +3721,72 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       }
       write_csv_tidy(
         scan_rows, file.path(out_dir, paste0("scanpath_", slide_slug, ".csv")),
-        c("sessionA", "sessionB", "levenshteinSim", "transitionEntropy")
+        c("sessionA", "sessionB", "levenshteinSim", "transitionEntropy", "dtwDistance")
       )
     }
 
     # ------------------------------------------------------------------
-    # magnification-split (Phase 1): per-session dwell time in each within-path zoom band
+    # Tier 1 A5: top-15 per-session directed cell-transitions (path sessions only) -- surfaces
+    # the already-implemented top_transitions ranking on each session's own visited-cell sequence
+    # (path_seq, already computed above at the slide's common (tw, th) grid, same sequence
+    # n_revisits/transition_entropy use).
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      transition_rows <- list()
+      for (sid in scan_sids) {
+        label <- label_for(sid, labels)
+        tt <- top_transitions(path_seq[[sid]], TRANSITIONS_TOP_N)
+        for (t in tt) {
+          transition_rows[[length(transition_rows) + 1]] <- list(
+            session = label, fromCell = t$fromCell, toCell = t$toCell, count = t$count
+          )
+        }
+      }
+      if (length(transition_rows) > 0) {
+        write_csv_tidy(
+          transition_rows, file.path(out_dir, paste0("transitions_", slide_slug, ".csv")),
+          c("session", "fromCell", "toCell", "count")
+        )
+      }
+    }
+
+    # ------------------------------------------------------------------
+    # Tier 3 C1 (docs/superpowers/specs/2026-07-23-phase3-analysis-enrichment.md): per-session I-DT
+    # fixations (path sessions only), same tidy long-format / gate-on-nonempty-rows convention as
+    # transitions_<slug>.csv above -- the file is only written if at least one fixation was found
+    # across every path-carrying session on this slide. Recomputes fixations_idt directly off each
+    # session's own path (same recompute-don't-cache convention the magnification-split section
+    # below uses for its own per-session band assignment).
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      fixation_rows <- list()
+      for (sid in scan_sids) {
+        label <- label_for(sid, labels)
+        f <- by_session[[sid]]
+        fx <- fixations_idt(f$path)
+        if (is.null(fx)) fx <- list()
+        for (i in seq_along(fx)) {
+          fxn <- fx[[i]]
+          fixation_rows[[length(fixation_rows) + 1]] <- list(
+            session = label, idx = i, startMs = fxn$startMs, durationMs = fxn$durationMs,
+            centerImageX = fxn$centerImageX, centerImageY = fxn$centerImageY, nPoints = fxn$nPoints
+          )
+        }
+      }
+      if (length(fixation_rows) > 0) {
+        write_csv_tidy(
+          fixation_rows, file.path(out_dir, paste0("fixations_", slide_slug, ".csv")),
+          c("session", "idx", "startMs", "durationMs", "centerImageX", "centerImageY", "nPoints")
+        )
+      }
+    }
+
+    # ------------------------------------------------------------------
+    # magnification-split (Phase 1; Tier 2 B1 idle-exclusion + B3 canonical-band scheme):
+    # per-session dwell time in each zoom band -- band ASSIGNMENT is unaffected by idle exclusion
+    # (matches the tercile scheme's pre-existing behavior: quantile cuts, or the canonical
+    # MAG_BAND_CUTS, are computed/applied over every step regardless of idle), only the per-band
+    # bandTimeMs/bandTimePct SUM excludes idle steps' dt (B1).
     # ------------------------------------------------------------------
     if (length(scan_sids) > 0) {
       magband_rows <- list()
@@ -2314,25 +3795,31 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         path <- f$path
         base_mag <- f$baseMagnification
         img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
-        bands <- zoom_band_labels(path, base_mag, img_w, magbands)
+        result <- magband_labels_for_scheme(path, base_mag, img_w, magbands, magband_scheme)
+        bands <- result$bands
+        scheme_used <- result$scheme
         if (length(bands) == 0) next
         dts <- step_durations_ms(path)
-        total_dt <- sum(dts)
+        idle <- idle_step_mask(path)
+        active_dts <- dts[!idle]
+        total_dt <- sum(active_dts)
+        n_bands_used <- if (identical(scheme_used, "canonical")) CANONICAL_MAGBAND_COUNT else magbands
         label <- label_for(sid, labels)
-        for (band in 0:(magbands - 1)) {
-          band_dt <- sum(dts[bands == band])
+        for (band in 0:(n_bands_used - 1)) {
+          band_dt <- sum(dts[bands == band & !idle])
           magband_rows[[length(magband_rows) + 1]] <- list(
             session = label,
             band = band,
             bandTimeMs = band_dt,
-            bandTimePct = if (total_dt > 0) band_dt / total_dt * 100.0 else 0.0
+            bandTimePct = if (total_dt > 0) band_dt / total_dt * 100.0 else 0.0,
+            bandScheme = scheme_used
           )
         }
       }
       if (length(magband_rows) > 0) {
         write_csv_tidy(
           magband_rows, file.path(out_dir, paste0("magbands_", slide_slug, ".csv")),
-          c("session", "band", "bandTimeMs", "bandTimePct")
+          c("session", "band", "bandTimeMs", "bandTimePct", "bandScheme")
         )
       }
     }
@@ -2377,11 +3864,16 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             )
           }
 
-          # Phase 1: magnification-split heatmaps, one per within-path zoom band.
+          # Phase 1 (Tier 2 B3: canonical-scheme-aware): magnification-split heatmaps, one per zoom
+          # band. raster_from_path itself excludes idle steps (Tier 2 B1), so an idle step
+          # contributes no heat to any band's figure either.
           base_mag <- f$baseMagnification
-          bands <- zoom_band_labels(path, base_mag, img_w, magbands)
+          band_result <- magband_labels_for_scheme(path, base_mag, img_w, magbands, magband_scheme)
+          bands <- band_result$bands
+          scheme_used_fig <- band_result$scheme
           if (length(bands) > 0) {
-            for (band in 0:(magbands - 1)) {
+            n_bands_used_fig <- if (identical(scheme_used_fig, "canonical")) CANONICAL_MAGBAND_COUNT else magbands
+            for (band in 0:(n_bands_used_fig - 1)) {
               step_mask <- (bands == band)
               if (!any(step_mask)) next
               raster_b <- raster_from_path(path, img_w, img_h, res_gw, res_gh, step_mask = step_mask)
@@ -2393,7 +3885,33 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
               }
             }
           }
+
+          # Tier 3 C2 (docs/superpowers/specs/2026-07-23-...): mouse-dwell map figure, schema/5
+          # only -- reuses the same heatmap plotting helper + `res` resolution as the
+          # scanpath-raster figure above. Not part of the numeric-parity contract.
+          if (has_mouse_data(path)) {
+            mouse_raster_fig <- mouse_raster_from_path(path, img_w, img_h, res_gw, res_gh)
+            if (!is.null(mouse_raster_fig)) {
+              plot_heatmap(
+                mouse_raster_fig, res_gw, res_gh, paste0(label, " mouse dwell"),
+                file.path(slide_out, paste0(sess_slug, "_mousemap.png"))
+              )
+            }
+          }
         }
+      }
+
+      # Tier 1 A6: multi-reader scanpath overlay -- one PNG per slide, every path-carrying
+      # session's viewport-center path on a shared axis. Gated on scan_sids (same path-presence
+      # gate as scanpath_<slug>.csv/magbands_<slug>.csv) so a slide with no paths at all doesn't
+      # emit a trivially-empty overlay.
+      if (length(scan_sids) > 0) {
+        overlay_labels <- sapply(scan_sids, function(sid) label_for(sid, labels))
+        overlay_paths <- lapply(scan_sids, function(sid) by_session[[sid]]$path)
+        plot_scanpath_multi_overlay(
+          overlay_labels, overlay_paths, paste0(slide_key, " - all scanpaths"),
+          file.path(out_dir, paste0("overlay_", slide_slug, "_scanpaths.png"))
+        )
       }
     }
   }
@@ -2408,7 +3926,26 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "scanningRatePxPerMin", "drillingRatePerMin", "pathVelocityPxPerSec",
       "linearity", "searchFocusRatio", "baseMagnification", "pathTruncated",
       "nAnnotations", "annotatedAreaPx", "dwellInAnnotationPct", "annotationReentryCount",
-      "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx"
+      "enrichmentRatio", "cursorOverSlidePct", "mouseViewportCouplingPx",
+      # Tier 1 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
+      # order above is unchanged.
+      "meanAbsTurnAngleDeg", "turnAngleEntropy", "mousePathLengthPx", "mouseVelocityPxPerSec",
+      "activeFractionPct",
+      # Tier 2 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
+      # order above (incl. Tier 1) is unchanged. B1: idleMs/activeSpanMs. B2:
+      # avgZoomLog2W/drillingRateOctavesPerMin. B4: magnificationSource.
+      "idleMs", "activeSpanMs", "avgZoomLog2W", "drillingRateOctavesPerMin",
+      "magnificationSource",
+      # Tier 3 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing column
+      # order above (incl. Tier 1/2) is unchanged. C1: I-DT fixation extraction.
+      "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
+      # Tier 3 C2/C4 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+      # column order above (incl. Tier 1/2/C1) is unchanged. C2: mouse-dwell coverage/entropy.
+      # C4: segment-level linearity.
+      "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
+      # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
+      # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
+      "annotatedAreaUnionPx", "visitCountJaccard"
     )
   )
 
@@ -2416,7 +3953,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     write_csv_tidy(
       decision_rows, file.path(out_dir, "decisions.csv"),
       c("slide", "sessionId", "session", "diagnosis", "confidence", "confidenceScaled",
-        "decisionMs", "decisionLatencyMs", "correctDx", "correct")
+        "decisionMs", "decisionLatencyMs", "correctDx", "correct",
+        # Tier 3 C5 (2026-07-23): appended, existing column order above is unchanged.
+        "promptShownMs", "responseLatencyMs")
     )
   } else {
     message("warning: no decisions found in any fragment; decisions.csv not written")
@@ -2433,17 +3972,43 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     )
   }
 
-  write_summary(out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded)
+  write_summary(
+    out_dir, groups, slide_summaries, reference_summaries, decision_rows, nav_rows, had_graded,
+    metrics_rows
+  )
   utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
 }
 
-#' Write `summary.md`: slide/session counts, per-slide mean pairwise CC + ICC(2,1) + coverage/
-#' duration spread, the reference ranking when applicable, and (Phase 3, gated on `had_graded`) a
+#' Write `summary.md`: slide/session counts, (Tier 2 B4, when any path-carrying session exists) a
+#' magnification-source caveat line, per-slide mean pairwise CC + ICC(2,1) + coverage/duration
+#' spread, the reference ranking when applicable, and (Phase 3, gated on `had_graded`) a
 #' "Navigation <-> diagnostic accuracy" section. Matches the Python toolkit's `_write_summary`
 #' structure/section headers exactly.
 write_summary <- function(out_dir, groups, slide_summaries, reference_summaries,
-                           decision_rows = NULL, nav_rows = NULL, had_graded = FALSE) {
+                           decision_rows = NULL, nav_rows = NULL, had_graded = FALSE,
+                           metrics_rows = NULL) {
   lines <- c("# Blinded-focus analysis summary", "", paste0("- Slides analyzed: ", length(groups)), "")
+  # Tier 2 B4: magnification-source caveat -- how many path-carrying sessions used a proxy
+  # (downsample-relative or w-proxy) magnification rather than the true objective power, so a
+  # reader knows pooled avgZoom-family numbers may mix the two. Only emitted when at least one
+  # path-carrying session exists at all (nothing to caveat otherwise).
+  magsrc <- Filter(
+    function(v) !is.null(v) && !is.na(v) && nzchar(v),
+    lapply(if (is.null(metrics_rows)) list() else metrics_rows, function(r) r$magnificationSource)
+  )
+  if (length(magsrc) > 0) {
+    magsrc_vec <- vapply(magsrc, as.character, character(1))
+    n_true <- sum(magsrc_vec == "true")
+    n_proxy <- sum(magsrc_vec == "proxy-downsample")
+    lines <- c(lines, paste0(
+      "> Magnification source: ", n_true, "/", length(magsrc_vec), " path-carrying sessions use ",
+      "true objective magnification (baseMagnification present); ", n_proxy, "/", length(magsrc_vec),
+      " use a proxy (downsample- or window-width-relative) value -- see `magnificationSource` in ",
+      "metrics.csv. Proxy-magnification rows are not directly comparable to true-magnification ",
+      "rows for avgZoom/zoomVariance/zoomRange/avgZoomLog2W."
+    ))
+    lines <- c(lines, "")
+  }
   lines <- c(lines, "## Per-slide agreement", "")
   for (s in slide_summaries) {
     lines <- c(lines, paste0("### ", s$slide))
