@@ -448,6 +448,15 @@ public class QuizAuthorWindow {
                     errorLabel.setText("Açık bir slayt yok — önce QuPath'te bir slayt açın.");
                     return;
                 }
+                // Same bound-slide guard the reference/highlight captures use: refuse to store a
+                // viewport captured on a DIFFERENT slide than the stop is bound to (would silently
+                // attach the wrong slide's pan/zoom to this stop). Skipped when nothing is bound yet.
+                String liveUrl = QuizSlide.currentSlideUrl(viewer);
+                if (boundSlideUrl != null && !boundSlideUrl.isBlank() && !boundSlideUrl.equals(liveUrl)) {
+                    errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaydı açın "
+                            + "ya da yeniden bağlayın.");
+                    return;
+                }
                 QuizQuestion.Viewport vp = new QuizQuestion.Viewport();
                 vp.downsample = viewer.getDownsampleFactor();
                 vp.centerX = viewer.getCenterPixelX();
