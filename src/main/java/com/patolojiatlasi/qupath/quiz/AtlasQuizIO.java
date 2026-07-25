@@ -12,8 +12,9 @@ import com.google.gson.JsonParseException;
 /** Read/write/validate a quiz-pack JSON file. UI-free and unit-tested. */
 public final class AtlasQuizIO {
 
-    /** Current on-disk format. Bump only with a matching reader change. */
-    public static final int FORMAT_VERSION = 1;
+    /** Current on-disk format written by this build. Readers accept MIN_FORMAT_VERSION..FORMAT_VERSION. */
+    public static final int FORMAT_VERSION = 2;
+    public static final int MIN_FORMAT_VERSION = 1;
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -41,9 +42,10 @@ public final class AtlasQuizIO {
 
     /** Throw IOException on any structural problem. Package-private for tests. */
     static void validate(AtlasQuiz quiz) throws IOException {
-        if (quiz.getFormatVersion() != FORMAT_VERSION)
-            throw new IOException("Unsupported quiz format version " + quiz.getFormatVersion()
-                    + " (this extension reads version " + FORMAT_VERSION + ")");
+        int v = quiz.getFormatVersion();
+        if (v < MIN_FORMAT_VERSION || v > FORMAT_VERSION)
+            throw new IOException("Unsupported quiz format version " + v
+                    + " (this extension reads versions " + MIN_FORMAT_VERSION + ".." + FORMAT_VERSION + ")");
         if (quiz.getQuestions().isEmpty())
             throw new IOException("Quiz has no questions");
         int i = 0;
@@ -74,6 +76,9 @@ public final class AtlasQuizIO {
                 case NAVIGATION -> {
                     if (isBlank(q.getTargetGeometryGeoJson()))
                         throw new IOException("Question " + i + " (navigation) has no target geometry");
+                }
+                case NARRATION -> {
+                    // caption-only stop: prompt (the caption) + slideUrl already validated above; nothing extra.
                 }
             }
         }
