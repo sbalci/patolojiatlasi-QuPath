@@ -50,7 +50,16 @@ Output files (written to ``--out DIR``):
   :func:`blinded_focus.metrics.visit_count_jaccard`), path-only (blank without a path). Both
   columns are appended at the END of the CSV (after ``meanSegmentLinearity``), not interleaved
   with the columns they conceptually relate to, per the additive/append-only column-order
-  invariant.
+  invariant. (PT3, docs/superpowers/specs/2026-07-25-enrichment-polish.md P3, additive)
+  ``meanSegmentLinearityROI`` -- the ROI-entry-boundary complement to ``meanSegmentLinearity``:
+  mean :func:`blinded_focus.metrics.linearity` over sub-paths split at entries into the reader's
+  own union annotation mask (reusing :func:`rasterize_feature_collection`'s output at the
+  session's native ``(gw, gh)``, same mask ``dwellInAnnotationPct``/``annotationReentryCount``
+  use) instead of at dwell-hotspot cells; see
+  :func:`blinded_focus.metrics.mean_segment_linearity_roi` for the pinned algorithm. Path +
+  annotations only (blank with no annotations, no path, or fewer than 2 ROI-entry boundaries).
+  Appended at the END of the CSV (after ``visitCountJaccard``), same append-only convention as
+  the Tier 3 C6 pair above.
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus). (Tier 3 C6, appended) ``jsDivergence``
@@ -97,7 +106,24 @@ Output files (written to ``--out DIR``):
   own point-based mouse-dwell grid (resampled to the slide's common grid; a session without mouse
   data contributes an all-zero grid, same convention ``annotations_<slug>.csv`` uses for a
   session with no annotations), plus a slide-level ``coincidenceLevel`` (same diagonal-reuse
-  convention as ``compare_<slug>.csv``/``annotations_<slug>.csv``).
+  convention as ``compare_<slug>.csv``/``annotations_<slug>.csv``) and (PT2,
+  docs/superpowers/specs/2026-07-25-enrichment-polish.md P2) ``mouseICC`` — ICC(2,1) over only the
+  sessions that actually carry mouse data (a filtered population, unlike ``cc``/``iou``/
+  ``coincidenceLevel`` above, which include every session for CSV matrix completeness), placed on
+  the same diagonal-reuse row.
+- per slide, when >=2 sessions have a computable **canonical** magnification band scheme (PT4,
+  docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): ``magband_agreement_<slug>.csv`` —
+  answers "do readers agree more at overview vs cell power" (Chakraborty). One row per canonical
+  magnification band (:data:`blinded_focus.metrics.MAG_BAND_LABELS`, ascending magnification):
+  ``band``, ``nSessions``, ``meanPairwiseCC``, ``coincidenceLevel`` — each session's dwell-time
+  raster is restricted to the steps assigned to that band (reusing
+  :func:`blinded_focus.metrics.raster_from_path`'s ``step_mask``, idle-excluded automatically),
+  resampled to the slide's common grid, then compared with the same
+  :func:`blinded_focus.metrics.mean_pairwise_cc`/:func:`blinded_focus.metrics.coincidence_level`
+  ``compare_<slug>.csv`` uses. A band is emitted only when >=2 sessions actually dwelled in it.
+  Skipped entirely (no file) when fewer than 2 sessions on the slide use the canonical scheme --
+  i.e. under ``--magband-scheme tercile`` or when fewer than 2 sessions have a computable
+  ``baseMagnification``/``dsMilli`` (both collapse to "0 or 1 canonical-scheme sessions").
 - (Phase 3) ``decisions.csv`` — one row per (slide, session) with a hand-entered ``decision``
   object (``diagnosis``, ``confidence``, ``decisionMs``): ``slide``, ``sessionId`` (stable join
   key), ``session`` (display label), ``diagnosis``, ``confidence``, ``confidenceScaled``
@@ -765,7 +791,12 @@ def analyze(
                 "linearity": "",
                 "searchFocusRatio": "",
                 # Passthrough fragment-level fields (schema/4+; blank for /1,/2,/3 which lack them).
-                "baseMagnification": base_mag if base_mag is not None else "",
+                # Blank unless a real number (never bool) -- a non-numeric baseMagnification (only
+                # possible in a hand-edited fragment) renders blank identically to R's as.numeric()->NA,
+                # matching the same non-numeric-field parity discipline used for confidence/promptShownMs.
+                "baseMagnification": (
+                    base_mag if isinstance(base_mag, (int, float)) and not isinstance(base_mag, bool) else ""
+                ),
                 "pathTruncated": f.get("pathTruncated", ""),
                 # Phase 2 annotation metrics: nAnnotations/annotatedAreaPx/dwellInAnnotationPct
                 # only need the grid + this session's own annotation mask (no path required), so
@@ -822,6 +853,12 @@ def analyze(
                 # visitCountJaccard is path-only (blank without a path), populated in the `if
                 # path:` block below.
                 "visitCountJaccard": "",
+                # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): appended at the
+                # END of metrics.csv's fieldnames (additive/append-only column order, same
+                # convention as the Tier 3 C6 pair above), not interleaved next to
+                # meanSegmentLinearity despite the conceptual relation. Path + annotations only
+                # (blank without a path, populated in the `if path:` block below).
+                "meanSegmentLinearityROI": "",
             }
 
             path = f.get("path")
@@ -881,7 +918,16 @@ def analyze(
                 row["activeSpanMs"] = m.active_span_ms(path)
                 row["avgZoomLog2W"] = m.avg_zoom_log2_w(path, base_mag, img_w)
                 row["drillingRateOctavesPerMin"] = m.drilling_rate_octaves_per_min(path, base_mag, img_w)
-                row["magnificationSource"] = "true" if base_mag is not None else "proxy-downsample"
+                # Polish final-review Finding 1 (docs/superpowers/sdd/polish-finalfix-report.md): a
+                # fragment-level baseMagnification that is present but non-numeric (e.g. "unknown"
+                # -- schema-valid, the field is typed loosely) must still degrade to
+                # "proxy-downsample", not crash -- mirrors metrics.true_magnification's existing
+                # try/except (TypeError, ValueError) pattern.
+                try:
+                    is_true = base_mag is not None and float(base_mag) > 0
+                except (TypeError, ValueError):
+                    is_true = False
+                row["magnificationSource"] = "true" if is_true else "proxy-downsample"
                 # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
                 # deterministic dispersion-threshold detector over the viewport centers. Computed
                 # once here for metrics.csv's summary columns; the per-fixation
@@ -901,6 +947,13 @@ def analyze(
                 # top_hotspots call uses), not the slide's common (tw, th) or a scanpath raster.
                 row["meanSegmentLinearity"] = m.mean_segment_linearity(
                     path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N
+                )
+                # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry
+                # segment linearity -- reuses this session's own NATIVE (gw, gh) union annotation
+                # mask (native_ann_mask, the SAME mask annotationReentryCount/dwellInAnnotationPct
+                # already use above), not the slide's common (tw, th).
+                row["meanSegmentLinearityROI"] = m.mean_segment_linearity_roi(
+                    path, native_ann_mask, gw, gh, img_w, img_h
                 )
                 # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the
                 # visit-count grid needs the session's own NATIVE (gw, gh) visited-cell sequence,
@@ -1149,7 +1202,20 @@ def analyze(
         # trigger the file, same as the annotations gate is on nAnnotations > 0, not on the mask
         # being non-empty). A session without mouse data contributes its all-zero mouse_native
         # placeholder (never None), so every session_ids entry participates in the pairwise matrix.
+        #
+        # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC, a SLIDE-LEVEL
+        # ICC(2,1) of the mouse-dwell grids (reusing the same `icc()` compare_<slug>.csv's
+        # meanPairwiseCC/icc already use), placed on the same diagonal-reuse row as
+        # coincidenceLevel. Unlike the cc/iou/coincidenceLevel columns above (deliberately computed
+        # across EVERY session_ids entry, including mouse-data-less placeholder grids, for CSV
+        # matrix completeness), mouseICC is computed only over the sessions that actually carry
+        # mouse data -- an all-zero placeholder grid isn't a second "reader" to agree with, and
+        # icc() itself would silently mix a real dwell grid with a meaningless constant-zero one
+        # otherwise. NaN (-> blank) when fewer than 2 sessions have mouse data, mirroring icc()'s
+        # own "<2 grids" guard.
         # ------------------------------------------------------------------
+        mouse_mean_cc = float("nan")
+        mouse_icc_val = float("nan")
         if any(m.has_mouse_data(f.get("path")) for _, f in sessions):
             mouse_resampled = {
                 sid: m.resample_nn(mouse_native[sid], native_grid[sid][1], native_grid[sid][2], tw, th)
@@ -1158,6 +1224,9 @@ def analyze(
             mouse_coincidence_val = m.coincidence_level(
                 [mouse_resampled[sid] for sid in session_ids], IOU_THRESH
             )
+            mouse_data_sids = [sid for sid, f in sessions if m.has_mouse_data(f.get("path"))]
+            mouse_mean_cc = m.mean_pairwise_cc([mouse_resampled[sid] for sid in mouse_data_sids])
+            mouse_icc_val = m.icc([mouse_resampled[sid] for sid in mouse_data_sids])
             mouse_rows = []
             for idx_a, a in enumerate(session_ids):
                 for b in session_ids:
@@ -1167,14 +1236,16 @@ def analyze(
                         "cc": m.cc(mouse_resampled[a], mouse_resampled[b]),
                         "iou": m.iou(mouse_resampled[a], mouse_resampled[b], IOU_THRESH),
                         "coincidenceLevel": "",
+                        "mouseICC": "",
                     }
                     if a == b and idx_a == 0:
                         mouse_row["coincidenceLevel"] = mouse_coincidence_val
+                        mouse_row["mouseICC"] = mouse_icc_val
                     mouse_rows.append(mouse_row)
             _write_csv(
                 os.path.join(out_dir, f"mouse_{slide_slug}.csv"),
                 mouse_rows,
-                ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel"],
+                ["sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"],
             )
 
         mean_cc = m.mean_pairwise_cc([resampled[sid] for sid in session_ids])
@@ -1205,6 +1276,12 @@ def analyze(
             "meanDwellInAnnotationPct": _mean_of("dwellInAnnotationPct"),
             "annotationCoincidenceLevel": annotation_coincidence_val,
             "meanCursorOverSlidePct": _mean_of("cursorOverSlidePct"),
+            # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouse-dwell
+            # cross-reader agreement, for the new summary.md "cursor agreement" line. NaN (->
+            # "n/a" via _fmt) when the slide has no mouse data at all, or fewer than 2 sessions
+            # carry it.
+            "meanPairwiseMouseCC": mouse_mean_cc,
+            "mouseICC": mouse_icc_val,
         })
 
         # ------------------------------------------------------------------
@@ -1404,6 +1481,86 @@ def analyze(
                 )
 
         # ------------------------------------------------------------------
+        # PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): per-magnification-band
+        # cross-reader agreement -- "do readers agree more at overview vs cell power" (Chakraborty).
+        # For each of the 7 canonical magnification bands (:data:`blinded_focus.metrics.MAG_BAND_LABELS`),
+        # build every CANONICAL-scheme session's own dwell-time-restricted raster for that band
+        # (reusing raster_from_path's step_mask mechanism -- idle-excluded automatically, same
+        # mechanism the magband_rows/figures blocks above already use), resample it to the slide's
+        # common (tw, th) grid (same resampler compare_<slug>.csv/mouse_<slug>.csv use), then
+        # mean_pairwise_cc/coincidence_level across the sessions that actually dwelled in that band.
+        #
+        # "Canonical-scheme session" is determined by RE-DERIVING (bands, scheme_used) via
+        # magband_labels_for_scheme -- the SAME per-step band assignment the magband_rows loop above
+        # already computes (recomputed here, not cached -- mirrors the fixations_<slug>.csv/
+        # meanSegmentLinearity recompute-don't-cache convention elsewhere in this module) -- rather
+        # than calling canonical_mag_band_labels directly, so that a slide run under
+        # ``--magband-scheme tercile`` transitively yields 0 canonical sessions (every session's
+        # scheme_used comes back "tercile") and the file is skipped, exactly like a session whose
+        # own baseMagnification/dsMilli are individually not computable (per-session tercile
+        # fallback) is excluded from this file's population -- the filtered-population approach
+        # PT2's mouseICC established for schema-gated sessions, not an all-or-nothing block.
+        #
+        # File-level gate: written iff >=2 sessions are canonical-scheme -- this single condition
+        # subsumes both "--magband-scheme tercile" (0 canonical sessions) and "null
+        # baseMagnification" (<2 canonical-capable sessions on this slide), both of which the spec
+        # says should skip the file entirely. "Has any dwell in this band" is checked on the
+        # POST-resample grid (consistent with what mean_pairwise_cc/coincidence_level actually
+        # consume) -- a session whose dwell in this band falls entirely into a grid cell dropped by
+        # nearest-neighbour resampling is (correctly) excluded from that band's row. Written
+        # (possibly with zero data rows, mirroring consensus_count_<slug>.csv's own "header-only is
+        # fine" convention) whenever the file-level gate passes, regardless of whether any
+        # individual band clears its own >=2-dwelling-sessions per-row threshold.
+        # ------------------------------------------------------------------
+        if scan_sids:
+            canonical_band_grids = {b: [] for b in range(CANONICAL_MAGBAND_COUNT)}
+            n_canonical_sessions = 0
+            for sid in scan_sids:
+                f = frag_by_sid[sid]
+                path = f["path"]
+                base_mag = f.get("baseMagnification")
+                img_w = f.get("imageWidth", 1)
+                img_h = f.get("imageHeight", 1)
+                bands, scheme_used = m.magband_labels_for_scheme(
+                    path, base_mag, img_w, magbands, magband_scheme,
+                )
+                if scheme_used != "canonical" or not bands:
+                    continue
+                n_canonical_sessions += 1
+                gw, gh = native_grid[sid][1], native_grid[sid][2]
+                bands_arr_pt4 = np.asarray(bands)
+                for band in range(CANONICAL_MAGBAND_COUNT):
+                    band_step_mask = (bands_arr_pt4 == band)
+                    if not band_step_mask.any():
+                        continue
+                    raster_b = m.raster_from_path(
+                        path, img_w, img_h, gw, gh, step_mask=band_step_mask,
+                    )
+                    if raster_b is None:
+                        continue
+                    resampled_b = m.resample_nn(raster_b, gw, gh, tw, th)
+                    if not np.any(resampled_b > 0):
+                        continue
+                    canonical_band_grids[band].append(resampled_b)
+            if n_canonical_sessions >= 2:
+                magband_agreement_rows = []
+                for band in range(CANONICAL_MAGBAND_COUNT):
+                    grids_b = canonical_band_grids[band]
+                    if len(grids_b) < 2:
+                        continue
+                    magband_agreement_rows.append({
+                        "band": m.MAG_BAND_LABELS[band],
+                        "nSessions": len(grids_b),
+                        "meanPairwiseCC": m.mean_pairwise_cc(grids_b),
+                        "coincidenceLevel": m.coincidence_level(grids_b, IOU_THRESH),
+                    })
+                _write_csv(
+                    os.path.join(out_dir, f"magband_agreement_{slide_slug}.csv"),
+                    magband_agreement_rows,
+                    ["band", "nSessions", "meanPairwiseCC", "coincidenceLevel"],
+                )
+
+        # ------------------------------------------------------------------
         # figures
         # ------------------------------------------------------------------
         if make_figures:
@@ -1515,7 +1672,12 @@ def analyze(
          "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
          # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
          # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
-         "annotatedAreaUnionPx", "visitCountJaccard"],
+         "annotatedAreaUnionPx", "visitCountJaccard",
+         # PT3 additive column (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3):
+         # appended at the very END, existing column order above (incl. Tier 1/2/3/C6) is
+         # unchanged -- see the module docstring's PT3 note for why this isn't interleaved next to
+         # meanSegmentLinearity despite the conceptual relation.
+         "meanSegmentLinearityROI"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):
@@ -1599,6 +1761,11 @@ def _write_summary(
         lines.append(
             f"- cursor coupling: mean % of path time cursor was over the slide = "
             f"{_fmt(s['meanCursorOverSlidePct'], 1)}"
+        )
+        # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2).
+        lines.append(
+            f"- cursor agreement: mean pairwise mouse CC = {_fmt(s['meanPairwiseMouseCC'])}, "
+            f"mouse ICC(2,1) = {_fmt(s['mouseICC'])}"
         )
         lines.append("")
     if reference_summaries:

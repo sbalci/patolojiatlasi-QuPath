@@ -79,6 +79,19 @@ SCHEMAS <- c(
 #' make later `matrix(..., nrow=gh, ncol=gw)` / reshape calls throw (too few values) or silently
 #' misalign rows/cols (too many, matrix() just recycles), so it must be caught here at load time
 #' rather than downstream.
+#'
+#' **Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md):**
+#' `gw > 0 && gh > 0` is now ALSO required. A fragment recording `gridWidth==0` or `gridHeight==0`
+#' (`grid=[]`, or `grid=list()`) used to pass this check -- `length(list())==0==0*5` -- despite
+#' carrying no spatial grid at all. That degenerate-but-schema-valid shape is exactly what kept
+#' resurfacing as a recurring "schema-valid input crashes the whole analyze() batch" class deep in
+#' this file's grid functions (see the final-review report's Findings 2/3 fixture history).
+#' Rejecting it here, at load, is the single choke point that makes every one of those downstream
+#' crashes unreachable in the first place -- a zero-dimension fragment is simply never handed to
+#' `analyze()` at all, degrading exactly like any other malformed fragment (a skipped file, not a
+#' crashed batch). The per-function guards added to `resample_nn`/`raster_from_path` below are kept
+#' anyway, as defense-in-depth for any DIRECT caller of those functions that bypasses
+#' `load_fragments` entirely.
 .is_valid_fragment <- function(d) {
   if (!(is.list(d) &&
     !is.null(d$schema) && length(d$schema) == 1 && d$schema %in% SCHEMAS &&
@@ -90,7 +103,7 @@ SCHEMAS <- c(
   }
   gw <- suppressWarnings(as.integer(d$gridWidth))
   gh <- suppressWarnings(as.integer(d$gridHeight))
-  if (length(gw) != 1 || length(gh) != 1 || is.na(gw) || is.na(gh)) {
+  if (length(gw) != 1 || length(gh) != 1 || is.na(gw) || is.na(gh) || gw <= 0 || gh <= 0) {
     return(FALSE)
   }
   length(d$grid) == gw * gh
@@ -403,8 +416,23 @@ normalise_sum <- function(grid) {
 #' Nearest-neighbour resample a row-major `(gh, gw)` grid to `(th, tw)`. Returns a flat
 #' `(tw*th,)` row-major vector. Same algorithm as `blinded_focus.metrics.resample_nn` in the
 #' Python toolkit.
+#'
+#' **Zero-size-grid guard (polish final-review Finding 2, defense-in-depth):** the root cause -- a
+#' schema-valid fragment recording `gridWidth`/`gridHeight` of `0` -- is now rejected at load by
+#' `.is_valid_fragment`, so `analyze()` never calls this function with a degenerate `(gw, gh)` or
+#' `(tw, th)`. This guard exists purely for a DIRECT caller that bypasses `load_fragments` (e.g. a
+#' script or test constructing a grid by hand): without it, `matrix(..., nrow=gh, ncol=gw)` at
+#' `gw<=0`/`gh<=0` errors ("invalid 'nrow' value"), or (if `gw`/`gh` are valid but
+#' `tw<=0`/`th<=0`) the `0:(th-1L)`/`0:(tw-1L)` index sequences count DOWNWARD from 0 (R's `:`
+#' operator has no empty-range form), producing a wrongly-shaped/garbage result instead of the
+#' well-defined "nothing to resample" callers expect. Returns an all-zero vector of the
+#' (clamped-non-negative) target size instead. Matches the Python port's `resample_nn` guard
+#' exactly.
 resample_nn <- function(grid, gw, gh, tw, th) {
   gw <- as.integer(gw); gh <- as.integer(gh); tw <- as.integer(tw); th <- as.integer(th)
+  if (gw <= 0 || gh <= 0 || tw <= 0 || th <= 0) {
+    return(rep(0.0, max(tw, 0L) * max(th, 0L)))
+  }
   g <- matrix(as.numeric(grid), nrow = gh, ncol = gw, byrow = TRUE)
   if (gw == tw && gh == th) {
     return(as.numeric(t(g)))
@@ -972,6 +1000,19 @@ active_span_ms <- function(path) {
 #'
 #' Returns `NULL` for a 0/1-point path (a `dt` requires two points). Exact port of
 #' `blinded_focus.metrics.raster_from_path`.
+#'
+#' **Zero-size-grid guard (polish final-review Finding 3, defense-in-depth):** also returns `NULL`
+#' for `gw<=0`/`gh<=0`. The root cause -- a schema-valid fragment recording
+#' `gridWidth`/`gridHeight` of `0` -- is now rejected at load by `.is_valid_fragment`, so
+#' `analyze()` never reaches this function with a degenerate grid; this guard is defense-in-depth
+#' for a direct caller. Without it, `matrix(0.0, nrow=gh, ncol=gw)` at `gw==0`/`gh==0` is a
+#' genuinely empty matrix, and every cell-index clamp below (`min(max(...), gw-1L)`, `gw-1L==-1L`)
+#' resolves to `-1L`; R's `grid[row+1L, col+1L]` with `col+1L==0L` is a documented silent no-op
+#' rather than an error (unlike the Python port's `IndexError` on the same input), so this guard is
+#' about Python<->R PARITY of the "nothing measurable" contract, not preventing an R crash -- same
+#' rationale as `mouse_raster_from_path`'s existing zero-size-grid guard above. Matches the Python
+#' port's `raster_from_path` exactly (callers already null-check this function's return, e.g. the
+#' magband-split export's `if (is.null(raster_b)) next`).
 raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
   pm <- as_path_matrix(path)
   n <- nrow(pm)
@@ -979,6 +1020,9 @@ raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
     return(NULL)
   }
   gw <- as.integer(gw); gh <- as.integer(gh)
+  if (gw <= 0 || gh <= 0) {
+    return(NULL)
+  }
   img_w <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
   img_h <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
   dts <- step_durations_ms(path)
@@ -1031,13 +1075,30 @@ raster_from_path <- function(path, img_w, img_h, gw, gh, step_mask = NULL) {
 #' 3. Point has no `dsMilli` (5-element): width-proxy `img_w/w`.
 #'
 #' `dsMilli<=0`/`w<=0` are treated defensively as full-resolution/1px respectively.
+#'
+#' **Non-numeric `base_mag` guard (polish final-review Finding 1, completing the fix):** a
+#' fragment-level `baseMagnification` that is present but not numeric (e.g. the string
+#' `"unknown"` -- schema-valid, since the field is typed loosely) degrades to branch 2 (the
+#' `base_mag`-unknown zoom level), identical to `base_mag=NULL`, rather than erroring. Before this
+#' guard, `is.na(base_mag)` ran on the PRE-conversion value: `is.na("unknown")` is `FALSE` (it's a
+#' valid non-NA string), so the check fell through to `as.numeric(base_mag) > 0`, which coerces to
+#' `NA` (with a warning) -- and `if (NA)` is a fatal R error ("missing value where TRUE/FALSE
+#' needed"). Since every one of `avg_zoom`/`zoom_variance`/`zoom_range`/
+#' `magnification_percentage`/`scanning_rate_px_per_min`/`drilling_rate_per_min`/
+#' `avg_zoom_log2_w`/`drilling_rate_octaves_per_min` calls this per scanpath point, this was
+#' reachable on the very first `dsMilli`-carrying path point (`row$avgZoom <- avg_zoom(path,
+#' base_mag, img_w)`, well before the `magnificationSource` assignment separately guarded) --
+#' aborting the whole batch the instant any real schema/4+ session recorded a non-numeric
+#' `baseMagnification`. Fixed by coercing FIRST (`suppressWarnings(as.numeric(base_mag))`), then
+#' checking `is.na()` on the coerced value -- mirrors `true_magnification`'s fix below exactly.
 point_zoom <- function(point, base_mag = NULL, img_w = NULL) {
   has_ds <- length(point) >= 6
   if (has_ds) {
     ds_milli <- as.numeric(point[6])
     if (is.na(ds_milli) || ds_milli <= 0) ds_milli <- 1000.0
-    if (!is.null(base_mag) && !is.na(base_mag) && as.numeric(base_mag) > 0) {
-      return(as.numeric(base_mag) / (ds_milli / 1000.0))
+    bm <- if (!is.null(base_mag)) suppressWarnings(as.numeric(base_mag)) else NA_real_
+    if (!is.na(bm) && bm > 0) {
+      return(bm / (ds_milli / 1000.0))
     }
     return(1000.0 / ds_milli)
   }
@@ -1290,12 +1351,22 @@ MAG_BAND_LABELS <- c("<1x", "1-2x", "2-4x", "4-10x", "10-20x", "20-40x", ">=40x"
 #' `dsMilli` at all (schema/3, 5-element points) -- callers fall back to the existing tercile
 #' scheme (`zoom_band_labels`) in that case, per B3's auto-fallback rule. `dsMilli <= 0` is treated
 #' defensively as full-resolution (matches `point_zoom`'s own guard).
+#' **Non-numeric `base_mag` guard (polish final-review Finding 1):** fixed the same pre-conversion
+#' `is.na()` bug `point_zoom` had -- `is.na(base_mag)` on a non-numeric string like `"unknown"` is
+#' `FALSE`, so it used to fall through to `bm <- as.numeric(base_mag)` (`NA` with a warning) and
+#' then `if (bm <= 0)`, i.e. `if (NA)` -- a fatal R error. Since this function is called once per
+#' STEP from `canonical_mag_band_labels` (used by `magband_labels_for_scheme`, the default
+#' `--magband-scheme canonical` path), a non-numeric `baseMagnification` used to abort the
+#' `magbands_<slug>.csv`/per-band-figure export for the whole slide. Fixed by coercing FIRST
+#' (`suppressWarnings(as.numeric(base_mag))`), then checking `is.na()` on the coerced value -- `NA`
+#' correctly degrades to the documented "not computable" `NULL` sentinel, so callers auto-fall-back
+#' to the tercile scheme exactly as they already do for a `NULL`/absent `baseMagnification`.
 true_magnification <- function(point, base_mag) {
-  if (is.null(base_mag) || length(base_mag) == 0 || is.na(base_mag)) {
+  if (is.null(base_mag) || length(base_mag) == 0) {
     return(NULL)
   }
-  bm <- as.numeric(base_mag)
-  if (bm <= 0) {
+  bm <- suppressWarnings(as.numeric(base_mag))
+  if (is.na(bm) || bm <= 0) {
     return(NULL)
   }
   if (length(point) < 6) {
@@ -2209,7 +2280,9 @@ dtw_distance <- function(path_a, path_b) {
 #' Tier 3 C4: mean `linearity` over the sub-paths a scanpath splits into at the session's own
 #' top-`top_n` dwell hotspot cells -- exact port of `blinded_focus.metrics.mean_segment_linearity`
 #' (Python); see its docstring for the full pinned segmentation algorithm (deterministic,
-#' hotspot-based; the ROI-entry variant is intentionally NOT implemented).
+#' hotspot-based; the ROI-entry variant is a separate function, `mean_segment_linearity_roi`
+#' (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) -- segmented at annotation
+#' boundaries instead of hotspot cells).
 #'
 #' **C4 dedup fix (2026-07-23, docs/superpowers/sdd/t4-report.md "C4 dedup fix" section):**
 #' consecutive samples landing in the SAME hotspot cell are collapsed to a single boundary (its
@@ -2255,6 +2328,84 @@ mean_segment_linearity <- function(path, grid, gw, gh, img_w, img_h, top_n = 5) 
       boundary_idx <- c(boundary_idx, i)
     }
     last_boundary_cell <- cell
+  }
+  if (length(boundary_idx) < 2) {
+    return(NaN)
+  }
+  linearities <- c()
+  for (j in seq_len(length(boundary_idx) - 1)) {
+    seg <- pm[boundary_idx[j]:boundary_idx[j + 1], , drop = FALSE]
+    if (nrow(seg) >= 2) {
+      linearities <- c(linearities, linearity(seg))
+    }
+  }
+  if (length(linearities) == 0) {
+    return(NaN)
+  }
+  mean(linearities)
+}
+
+#' PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): mean `linearity` over the
+#' sub-paths a scanpath splits into at **annotation-ROI-entry** boundaries -- exact port of
+#' `blinded_focus.metrics.mean_segment_linearity_roi` (Python). Reuses the reader's own union
+#' annotation mask (`rasterize_feature_collection` -- the SAME mask/native `(gw, gh)`
+#' `dwell_in_mask_pct`/`annotation_reentry_count` already use). A complement to the hotspot-based
+#' `mean_segment_linearity` (Roa-Pena whole-path vs region-transit): this variant segments at
+#' entries into the reader's own annotated region instead of at dwell-hotspot visits.
+#'
+#' **Boundary definition** (deliberately simpler than `mean_segment_linearity`'s cell-identity
+#' dedup -- here the state is a single inside/outside boolean, not a specific cell identity, so an
+#' outside-excursion is REQUIRED between any two boundaries and the dedup falls out of the state
+#' machine for free, needing no explicit "same cell as last boundary" check):
+#'
+#' 1. Walk every RAW path point (no run-length dedup of the walk itself, same rationale as
+#'    `mean_segment_linearity` -- the 1:1 correspondence between a path INDEX and its point must
+#'    be preserved) and map it to a grid cell via the same floor/clamp convention used throughout
+#'    this file (`visited_sequence`'s mapping, 0-based cell indices -- hence `mask[cell + 1L]`
+#'    below for R's 1-based indexing). A point is INSIDE iff its cell is `TRUE` in `mask`.
+#' 2. A path point at index `i` is an ROI-entry boundary iff it is inside AND EITHER `i == 1`
+#'    (R's first index, already inside at the very start) OR the immediately-preceding point's
+#'    cell was OUTSIDE -- an outside-to-inside transition. Checked purely via the inside/outside
+#'    boolean, not cell identity, so a maximal run of consecutive inside points (one cell or
+#'    several, as long as the region is never left) naturally collapses to exactly ONE boundary,
+#'    at the run's first index -- no separate dedup step needed: reaching a second boundary
+#'    structurally requires >=1 intervening OUTSIDE point, so consecutive boundary indices are
+#'    never adjacent.
+#' 3. Segments are the sub-paths between consecutive boundary points (inclusive of both endpoints,
+#'    same shared-endpoint convention as `mean_segment_linearity`). Fewer than 2 boundaries at all
+#'    -> zero segments.
+#' 4. `linearity` (unchanged, reused as-is) is computed on every segment with `>= 2` points;
+#'    `meanSegmentLinearityROI` is the mean of those per-segment linearities.
+#'
+#' `NaN` (blank) if: `mask` has no `TRUE` cells (no annotation on this slide); `path` has fewer
+#' than 2 points; fewer than 2 ROI-entry boundaries are found (zero segments); or every segment
+#' found has fewer than 2 points (unreachable by the structural argument in step 2 -- kept as an
+#' explicit guard for defensiveness, mirroring `mean_segment_linearity`'s own analogous guard).
+mean_segment_linearity_roi <- function(path, mask, gw, gh, img_w, img_h) {
+  mask <- as.logical(mask)
+  if (!any(mask)) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  gw_i <- as.integer(gw); gh_i <- as.integer(gh)
+  img_w_f <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h_f <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  boundary_idx <- integer(0)
+  prev_inside <- FALSE
+  for (i in seq_len(n)) {
+    cx <- pm[i, 2]; cy <- pm[i, 3]
+    col <- min(max(as.integer(floor(cx / img_w_f * gw_i)), 0L), gw_i - 1L)
+    row <- min(max(as.integer(floor(cy / img_h_f * gh_i)), 0L), gh_i - 1L)
+    cell <- row * gw_i + col
+    inside <- mask[cell + 1L]
+    if (inside && !prev_inside) {
+      boundary_idx <- c(boundary_idx, i)
+    }
+    prev_inside <- inside
   }
   if (length(boundary_idx) < 2) {
     return(NaN)
@@ -3180,7 +3331,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         linearity = NA,
         searchFocusRatio = NA,
         # Passthrough fragment-level fields (schema/4+; NA -> blank for /1,/2,/3 which lack them).
-        baseMagnification = if (!is.null(base_mag)) as.numeric(base_mag) else NA,
+        baseMagnification = if (!is.null(base_mag)) suppressWarnings(as.numeric(base_mag)) else NA,
         pathTruncated = if (!is.null(f$pathTruncated)) as.logical(f$pathTruncated) else NA,
         # Phase 2 annotation metrics: nAnnotations/annotatedAreaPx/dwellInAnnotationPct only need
         # the grid + this session's own annotation mask (no path required), so they're always
@@ -3233,7 +3384,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # populated (0.0 with no annotations), like annotatedAreaPx above.
         annotatedAreaUnionPx = ann_area_union,
         # visitCountJaccard is path-only (NA without a path), populated in the path block below.
-        visitCountJaccard = NA
+        visitCountJaccard = NA,
+        # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): appended at the END of
+        # metrics.csv's fieldnames (additive/append-only column order, same convention as the
+        # Tier 3 C6 pair above), not interleaved next to meanSegmentLinearity despite the
+        # conceptual relation. Path + annotations only (NA without a path, populated in the path
+        # block below).
+        meanSegmentLinearityROI = NA
       )
 
       path <- f$path
@@ -3291,7 +3448,20 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         row$activeSpanMs <- active_span_ms(path)
         row$avgZoomLog2W <- avg_zoom_log2_w(path, base_mag, img_w)
         row$drillingRateOctavesPerMin <- drilling_rate_octaves_per_min(path, base_mag, img_w)
-        row$magnificationSource <- if (!is.null(base_mag)) "true" else "proxy-downsample"
+        # Polish final-review Finding 1 (docs/superpowers/sdd/polish-finalfix-report.md): coerce
+        # with suppressWarnings() FIRST, then test is.na()/> 0 on the already-coerced value -- the
+        # bare `as.numeric(base_mag)` calls below previously ran twice (once inside is.na(), once
+        # for the comparison) and each emitted an "NAs introduced by coercion" warning for a
+        # non-numeric baseMagnification; this was never a crash here (`&&` short-circuits on
+        # `is.na(...)==TRUE` before the second call), but is fixed for cleanliness/consistency with
+        # the point_zoom/true_magnification guards above, which fix the same pattern where it DOES
+        # crash.
+        bm_src <- if (!is.null(base_mag)) suppressWarnings(as.numeric(base_mag)) else NA_real_
+        row$magnificationSource <- if (!is.na(bm_src) && bm_src > 0) {
+          "true"
+        } else {
+          "proxy-downsample"
+        }
         # Tier 3 C1: I-DT fixation extraction (docs/superpowers/specs/2026-07-23-...) --
         # deterministic dispersion-threshold detector over the viewport centers. Computed once here
         # for metrics.csv's summary columns; the per-fixation fixations_<slug>.csv rows are built
@@ -3309,6 +3479,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # recorded dwell grid (same resolution hotspots_<slug>.csv's top_hotspots call uses), not
         # the slide's common (tw, th) or a scanpath raster.
         row$meanSegmentLinearity <- mean_segment_linearity(path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N)
+        # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry segment
+        # linearity -- reuses this session's own NATIVE (gw, gh) union annotation mask
+        # (native_ann_mask, the SAME mask annotationReentryCount/dwellInAnnotationPct already use
+        # above), not the slide's common (tw, th).
+        row$meanSegmentLinearityROI <- mean_segment_linearity_roi(path, native_ann_mask, gw, gh, img_w, img_h)
         # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the visit-count
         # grid needs the session's own NATIVE (gw, gh) visited-cell sequence, recomputed here (NOT
         # `path_seq[[sid]]`, which is built at the slide's common (tw, th) resolution for
@@ -3555,7 +3730,19 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     # annotations gate above being on nAnnotations > 0, not on the mask being non-empty). A session
     # without mouse data contributes its all-zero mouse_native placeholder (never NULL), so every
     # session_ids entry participates in the pairwise matrix.
+    #
+    # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC, a SLIDE-LEVEL
+    # ICC(2,1) of the mouse-dwell grids (reusing the same `icc()` compare_<slug>.csv's
+    # meanPairwiseCC/icc already use), placed on the same diagonal-reuse row as coincidenceLevel.
+    # Unlike the cc/iou/coincidenceLevel columns above (deliberately computed across EVERY
+    # session_ids entry, including mouse-data-less placeholder grids, for CSV matrix
+    # completeness), mouseICC is computed only over the sessions that actually carry mouse data --
+    # an all-zero placeholder grid isn't a second "reader" to agree with, and icc() itself would
+    # silently mix a real dwell grid with a meaningless constant-zero one otherwise. NaN (->
+    # blank) when fewer than 2 sessions have mouse data, mirroring icc()'s own "<2 grids" guard.
     # ------------------------------------------------------------------
+    mouse_mean_cc <- NaN
+    mouse_icc_val <- NaN
     any_mouse <- any(sapply(session_ids, function(sid) has_mouse_data(by_session[[sid]]$path)))
     if (any_mouse) {
       mouse_resampled <- list()
@@ -3567,6 +3754,9 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       mouse_coincidence_val <- coincidence_level(
         lapply(session_ids, function(sid) mouse_resampled[[sid]]), IOU_THRESH
       )
+      mouse_data_sids <- session_ids[sapply(session_ids, function(sid) has_mouse_data(by_session[[sid]]$path))]
+      mouse_mean_cc <- mean_pairwise_cc(lapply(mouse_data_sids, function(sid) mouse_resampled[[sid]]))
+      mouse_icc_val <- icc(lapply(mouse_data_sids, function(sid) mouse_resampled[[sid]]))
       mouse_rows <- list()
       for (idx_a in seq_along(session_ids)) {
         a <- session_ids[idx_a]
@@ -3576,17 +3766,19 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             sessionB = label_for(b, labels),
             cc = cc(mouse_resampled[[a]], mouse_resampled[[b]]),
             iou = iou(mouse_resampled[[a]], mouse_resampled[[b]], IOU_THRESH),
-            coincidenceLevel = NA
+            coincidenceLevel = NA,
+            mouseICC = NA
           )
           if (identical(a, b) && idx_a == 1) {
             mouse_row$coincidenceLevel <- mouse_coincidence_val
+            mouse_row$mouseICC <- mouse_icc_val
           }
           mouse_rows[[length(mouse_rows) + 1]] <- mouse_row
         }
       }
       write_csv_tidy(
         mouse_rows, file.path(out_dir, paste0("mouse_", slide_slug, ".csv")),
-        c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel")
+        c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC")
       )
     }
 
@@ -3611,7 +3803,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       # Phase 2 headline numbers.
       meanDwellInAnnotationPct = .mean_of_col(slide_metric_rows, "dwellInAnnotationPct"),
       annotationCoincidenceLevel = annotation_coincidence_val,
-      meanCursorOverSlidePct = .mean_of_col(slide_metric_rows, "cursorOverSlidePct")
+      meanCursorOverSlidePct = .mean_of_col(slide_metric_rows, "cursorOverSlidePct"),
+      # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouse-dwell cross-reader
+      # agreement, for the new summary.md "cursor agreement" line. NaN (-> "n/a" via .fmt) when
+      # the slide has no mouse data at all, or fewer than 2 sessions carry it.
+      meanPairwiseMouseCC = mouse_mean_cc,
+      mouseICC = mouse_icc_val
     )
 
     # ------------------------------------------------------------------
@@ -3825,6 +4022,83 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
     }
 
     # ------------------------------------------------------------------
+    # PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): per-magnification-band
+    # cross-reader agreement -- "do readers agree more at overview vs cell power" (Chakraborty).
+    # For each of the 7 canonical magnification bands (MAG_BAND_LABELS), build every
+    # CANONICAL-scheme session's own dwell-time-restricted raster for that band (reusing
+    # raster_from_path's step_mask mechanism -- idle-excluded automatically, same mechanism the
+    # magband_rows/figures blocks above already use), resample it to the slide's common (tw, th)
+    # grid (same resampler compare_<slug>.csv/mouse_<slug>.csv use), then
+    # mean_pairwise_cc/coincidence_level across the sessions that actually dwelled in that band.
+    #
+    # "Canonical-scheme session" is determined by RE-DERIVING (bands, scheme) via
+    # magband_labels_for_scheme -- the SAME per-step band assignment the magband_rows loop above
+    # already computes (recomputed here, not cached -- mirrors the recompute-don't-cache convention
+    # elsewhere in this module) -- rather than calling canonical_mag_band_labels directly, so that a
+    # slide run under `--magband-scheme tercile` transitively yields 0 canonical sessions (every
+    # session's scheme comes back "tercile") and the file is skipped, exactly like a session whose
+    # own baseMagnification/dsMilli are individually not computable (per-session tercile fallback)
+    # is excluded from this file's population -- the filtered-population approach PT2's mouseICC
+    # established for schema-gated sessions, not an all-or-nothing block.
+    #
+    # File-level gate: written iff >=2 sessions are canonical-scheme -- this single condition
+    # subsumes both "--magband-scheme tercile" (0 canonical sessions) and "null baseMagnification"
+    # (<2 canonical-capable sessions on this slide), both of which the spec says should skip the
+    # file entirely. "Has any dwell in this band" is checked on the POST-resample grid (consistent
+    # with what mean_pairwise_cc/coincidence_level actually consume) -- a session whose dwell in
+    # this band falls entirely into a grid cell dropped by nearest-neighbour resampling is
+    # (correctly) excluded from that band's row. Written (possibly with zero data rows, mirroring
+    # consensus_count_<slug>.csv's own "header-only is fine" convention) whenever the file-level
+    # gate passes, regardless of whether any individual band clears its own >=2-dwelling-sessions
+    # per-row threshold.
+    # ------------------------------------------------------------------
+    if (length(scan_sids) > 0) {
+      canonical_band_grids <- vector("list", CANONICAL_MAGBAND_COUNT)
+      for (band in 0:(CANONICAL_MAGBAND_COUNT - 1)) canonical_band_grids[[band + 1]] <- list()
+      n_canonical_sessions <- 0L
+      for (sid in scan_sids) {
+        f <- by_session[[sid]]
+        path <- f$path
+        base_mag <- f$baseMagnification
+        img_w <- if (!is.null(f$imageWidth)) f$imageWidth else 1
+        img_h <- if (!is.null(f$imageHeight)) f$imageHeight else 1
+        result_pt4 <- magband_labels_for_scheme(path, base_mag, img_w, magbands, magband_scheme)
+        bands_pt4 <- result_pt4$bands
+        scheme_used_pt4 <- result_pt4$scheme
+        if (!identical(scheme_used_pt4, "canonical") || length(bands_pt4) == 0) next
+        n_canonical_sessions <- n_canonical_sessions + 1L
+        ng <- native_grid[[sid]]
+        gw <- ng$gw; gh <- ng$gh
+        for (band in 0:(CANONICAL_MAGBAND_COUNT - 1)) {
+          band_step_mask <- (bands_pt4 == band)
+          if (!any(band_step_mask)) next
+          raster_b <- raster_from_path(path, img_w, img_h, gw, gh, step_mask = band_step_mask)
+          if (is.null(raster_b)) next
+          resampled_b <- resample_nn(raster_b, gw, gh, tw, th)
+          if (!any(resampled_b > 0)) next
+          canonical_band_grids[[band + 1]][[length(canonical_band_grids[[band + 1]]) + 1]] <- resampled_b
+        }
+      }
+      if (n_canonical_sessions >= 2) {
+        magband_agreement_rows <- list()
+        for (band in 0:(CANONICAL_MAGBAND_COUNT - 1)) {
+          grids_b <- canonical_band_grids[[band + 1]]
+          if (length(grids_b) < 2) next
+          magband_agreement_rows[[length(magband_agreement_rows) + 1]] <- list(
+            band = MAG_BAND_LABELS[band + 1],
+            nSessions = length(grids_b),
+            meanPairwiseCC = mean_pairwise_cc(grids_b),
+            coincidenceLevel = coincidence_level(grids_b, IOU_THRESH)
+          )
+        }
+        write_csv_tidy(
+          magband_agreement_rows, file.path(out_dir, paste0("magband_agreement_", slide_slug, ".csv")),
+          c("band", "nSessions", "meanPairwiseCC", "coincidenceLevel")
+        )
+      }
+    }
+
+    # ------------------------------------------------------------------
     # figures
     # ------------------------------------------------------------------
     if (make_figures) {
@@ -3945,7 +4219,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
       # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
       # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
-      "annotatedAreaUnionPx", "visitCountJaccard"
+      "annotatedAreaUnionPx", "visitCountJaccard",
+      # PT3 additive column (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): appended
+      # at the very END, existing column order above (incl. Tier 1/2/3/C6) is unchanged -- see the
+      # PT3 note where meanSegmentLinearity is documented for why this isn't interleaved next to
+      # it despite the conceptual relation.
+      "meanSegmentLinearityROI"
     )
   )
 
@@ -4039,6 +4318,11 @@ write_summary <- function(out_dir, groups, slide_summaries, reference_summaries,
     lines <- c(lines, paste0(
       "- cursor coupling: mean % of path time cursor was over the slide = ",
       .fmt(s$meanCursorOverSlidePct, 1)
+    ))
+    # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2).
+    lines <- c(lines, paste0(
+      "- cursor agreement: mean pairwise mouse CC = ", .fmt(s$meanPairwiseMouseCC),
+      ", mouse ICC(2,1) = ", .fmt(s$mouseICC)
     ))
     lines <- c(lines, "")
   }

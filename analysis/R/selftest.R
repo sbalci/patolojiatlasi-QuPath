@@ -546,6 +546,32 @@ build_mouse_fixture <- function() {
   list(f1, f2)
 }
 
+MOUSE_ICC_SLIDE_KEY <- "sha256:selftest-slide-mouse-icc-0001"
+#' PT2 fixture (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): 2 schema/5 sessions
+#' with a BYTE-IDENTICAL mouse path -- their post-resample mouse-dwell grids are therefore
+#' identical arrays. Hand-derivation of ICC(2,1) for 2 identical columns in the two-way-ANOVA
+#' formula `icc()` uses: col_means both == grand_mean -> ss_cols == 0 -> ms_cols == 0; row_means
+#' == the (shared) per-cell value -> ss_rows == ss_total exactly -> ss_error == 0 -> ms_error == 0
+#' -> denom == ms_rows == (ms_rows - ms_error) -> ICC == 1.0 EXACTLY (as long as the grid itself
+#' isn't perfectly uniform, i.e. ms_rows != 0 -- true here since only cell(0,0) is dwelled on).
+#' meanPairwiseMouseCC is also exactly 1.0 (cc of a grid against an identical copy of itself, with
+#' nonzero variance, is a perfect Pearson correlation). Mirrors the Python toolkit's
+#' `build_mouse_icc_fixture` exactly.
+build_mouse_icc_fixture <- function() {
+  grid <- .n_nonzero_grid(10)
+  path <- matrix(
+    c(
+      0, 1000, 750, 400, 300, 1000, 50, 50,
+      1000, 1000, 750, 400, 300, 1000, 60, 60,
+      2000, 1000, 750, 400, 300, 1000, 70, 70
+    ),
+    nrow = 3, ncol = 8, byrow = TRUE
+  )
+  f1 <- .fragment("micc1", 5, grid, 2000, 3, path = path, slide_key = MOUSE_ICC_SLIDE_KEY)
+  f2 <- .fragment("micc2", 5, grid, 2000, 3, path = path, slide_key = MOUSE_ICC_SLIDE_KEY)
+  list(f1, f2)
+}
+
 SEGLIN_SLIDE_KEY <- "sha256:selftest-slide-seglin-0001"
 #' Tier 3 C4 fixture: a single schema/3, 5-point path with a KNOWN hotspot split -- one clean
 #' segment of exactly linearity==1.0 between two of the grid's top-5 hotspot cells, bracketed by
@@ -634,6 +660,306 @@ build_seglin_dwell_fragment <- function() {
     "seglindwell1", 3, grid, 400, 5, path = path,
     slide_key = SEGLIN_DWELL_SLIDE_KEY
   )
+}
+
+ROI_SEGLIN_SLIDE_KEY <- "sha256:selftest-slide-roi-seglin-0001"
+#' PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) fixture: a single schema/3
+#' path (5-element points) + one annotation Feature exercising `mean_segment_linearity_roi`'s
+#' dedup (a 3-point dwell run inside the ROI collapses to ONE boundary, not 3) and its
+#' 2-boundary/1-segment case. Mirrors the Python toolkit's `build_roi_seglin_fragment` exactly.
+#' Its own small custom grid dims (gw=gh=4, img_w=img_h=400 -> cell = 100x100 image px),
+#' deliberately NOT the shared module GW/GH/IMG_W/IMG_H (8/8/2000/1500) -- every coordinate/cell
+#' mapping below is exactly hand-derivable (independently verified against the implementation
+#' before this fixture was written; see docs/superpowers/sdd/pt3-report.md).
+#'
+#' Annotation: one rectangle covering exactly grid cell (row1, col1) -- x in [100,200], y in
+#' [100,200] -- so cell(1,1)'s center (150,150) is the ONLY cell center inside it. The rasterized
+#' union mask therefore has exactly 1 TRUE cell, flat index 1*4+1=5 (0-based).
+#'
+#' path (t, cx, cy, w, h), 7 points, mapped to grid cells (col=floor(cx/400*4), row=floor(cy/400*4)):
+#'   p0=(0,   50, 50)   -- cell(0,0)=0, OUTSIDE
+#'   p1=(100, 150,150)  -- cell(1,1)=5, INSIDE -> BOUNDARY 1 (prev OUTSIDE)
+#'   p2=(200, 160,140)  -- cell(1,1)=5, INSIDE -> dwell run, dedup (prev INSIDE -> NOT a new boundary)
+#'   p3=(300, 140,160)  -- cell(1,1)=5, INSIDE -> dwell run, dedup (same)
+#'   p4=(400, 350,50)   -- cell(0,3)=3, OUTSIDE -> exit
+#'   p5=(500, 50,350)   -- cell(3,0)=12, OUTSIDE -> wander (detour, not a straight line back)
+#'   p6=(600, 180,120)  -- cell(1,1)=5, INSIDE -> BOUNDARY 2 (prev OUTSIDE)
+#'
+#' boundary_idx (1-based) = c(2, 7) (only 2 boundaries -> exactly 1 segment, pm[2:7,] = p1..p6, 6
+#' points). meanSegmentLinearityROI = linearity(p1..p6), hand-derived directly from the raw
+#' coordinates (net-displacement / total-path-length), independent of calling
+#' mean_segment_linearity_roi itself:
+#'   net   = dist(p1, p6) = dist((150,150),(180,120)) = sqrt(30^2+30^2) = 30*sqrt(2)
+#'         = 42.42640687119285
+#'   total = dist(p1,p2)+dist(p2,p3)+dist(p3,p4)+dist(p4,p5)+dist(p5,p6)
+#'         = sqrt(200)+sqrt(800)+sqrt(56200)+sqrt(180000)+sqrt(69800)
+#'         = 967.9527636781734
+#'   -> meanSegmentLinearityROI = 42.42640687119285 / 967.9527636781734 = 0.0438310715803678
+#'   (confirmed bit-identical against the implementation before this fixture was committed, and
+#'   against the Python toolkit's own fixture/asserts).
+#'
+#' Dedup-bite check: a NAIVE implementation with no run-dedup (every INSIDE point its own
+#' boundary: boundary_idx (1-based) = c(2,3,4,7)) would instead produce 3 segments -- (p1,p2) and
+#' (p2,p3), both trivial 2-point runs with linearity==1.0 EXACTLY, plus (p3,p4,p5,p6) with
+#' linearity==0.061120401465477904 -- mean([1.0, 1.0, 0.061120401465477904]) ==
+#' 0.687040133821826, measurably INFLATED toward 1.0 by the two trivial within-dwell segments (the
+#' same C4-dedup failure mode `mean_segment_linearity` was already fixed for -- see
+#' build_seglin_dwell_fragment). This fixture's correct value (0.0438310715803678) is clearly < 1
+#' and clearly != the naive 0.687... value, so a regression to per-sample (undeduped) boundaries
+#' is caught, not silently masked.
+build_roi_seglin_fragment <- function() {
+  rs_gw <- 4L; rs_gh <- 4L
+  rs_img_w <- 400; rs_img_h <- 400
+  grid <- rep(0.0, 16) # the recorded dwell grid is unrelated to this fixture's ROI-entry metric
+  path <- matrix(
+    c(
+      0, 50, 50, 400, 300,
+      100, 150, 150, 400, 300,
+      200, 160, 140, 400, 300,
+      300, 140, 160, 400, 300,
+      400, 350, 50, 400, 300,
+      500, 50, 350, 400, 300,
+      600, 180, 120, 400, 300
+    ),
+    nrow = 7, ncol = 5, byrow = TRUE
+  )
+  ann_fc <- list(
+    type = "FeatureCollection",
+    features = list(
+      list(
+        type = "Feature",
+        geometry = list(
+          type = "Polygon",
+          coordinates = list(list(c(100, 100), c(200, 100), c(200, 200), c(100, 200), c(100, 100)))
+        ),
+        properties = list(name = "roi")
+      )
+    )
+  )
+  list(
+    schema = "atlas-focus-contribution/3",
+    slideKey = ROI_SEGLIN_SLIDE_KEY,
+    sessionId = "roiseglin1",
+    imageWidth = rs_img_w, imageHeight = rs_img_h,
+    gridWidth = rs_gw, gridHeight = rs_gh,
+    grid = grid,
+    durationMs = 600,
+    sampleCount = 7,
+    date = "2026-07-25",
+    path = lapply(seq_len(nrow(path)), function(i) as.numeric(path[i, ])),
+    annotations = ann_fc
+  )
+}
+
+MAGBAND_AGREEMENT_SLIDE_KEY <- "sha256:selftest-slide-magband-agreement-0001"
+#' PT4 fixture (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): 2 schema/4 sessions
+#' with a BYTE-IDENTICAL 6-element (t,cx,cy,w,h,dsMilli) path and the SAME known
+#' `baseMagnification` (40.0) -- their per-band dwell rasters are therefore identical arrays, the
+#' same "hand-verifiable CC=1.0" design PT2's `build_mouse_icc_fixture` uses. Mirrors the Python
+#' toolkit's `build_magband_agreement_fixture` exactly.
+#'
+#' Own small custom grid/image dims (gw=gh=4, img_w=img_h=400 -> cell = 100x100 image px). 3-point
+#' path (t, cx, cy, w, h, dsMilli):
+#'   p0=(0,    50,50, 100,100, 8000) -> step0: true_mag = 40/(8000/1000) = 5.0  -> band index 3
+#'     ("4-10x", MAG_BAND_CUTS=[1,2,4,10,20,40], findInterval(5.0,cuts)==3). Viewport rect
+#'     (cx=50,cy=50,w=h=100) -> image px [0,100]x[0,100] -> native cell(0,0) EXACTLY.
+#'   p1=(1000, 50,50, 100,100, 2000) -> step1: true_mag = 40/(2000/1000) = 20.0 -> band index 5
+#'     ("20-40x", findInterval(20.0,cuts)==5). Same viewport position -> native cell(0,0) again.
+#'   p2=(2000, 50,50, 100,100, 2000) -> endpoint (no owned step).
+#'
+#' Native gw=gh=4 == this slide's common (tw,th) (both sessions share the same grid dims), so
+#' resample_nn is a no-op identity copy. Both sessions' path/baseMagnification are BYTE-IDENTICAL
+#' -> for EACH band, session1's resampled raster == session2's resampled raster exactly (nonzero
+#' variance: one cell=1000.0, rest 0.0) -> cc(g,g) == 1.0 EXACTLY -> mean_pairwise_cc([g,g]) == 1.0.
+#' coincidence_level([g,g], IOU_THRESH=0.1) == 1.0 EXACTLY (identical grids -> every above-threshold
+#' cell is shared by both).
+#'
+#' Expected magband_agreement_<slug>.csv: exactly 2 rows, band ascending --
+#'   ("4-10x", nSessions=2, meanPairwiseCC=1.0, coincidenceLevel=1.0)
+#'   ("20-40x", nSessions=2, meanPairwiseCC=1.0, coincidenceLevel=1.0)
+build_magband_agreement_fixture <- function() {
+  mba_gw <- 4L; mba_gh <- 4L
+  mba_img_w <- 400; mba_img_h <- 400
+  grid <- rep(0.0, 16) # the recorded dwell grid is unrelated to this fixture's PT4 metric
+  path <- matrix(
+    c(
+      0, 50, 50, 100, 100, 8000,
+      1000, 50, 50, 100, 100, 2000,
+      2000, 50, 50, 100, 100, 2000
+    ),
+    nrow = 3, ncol = 6, byrow = TRUE
+  )
+  path_list <- lapply(seq_len(nrow(path)), function(i) as.numeric(path[i, ]))
+  .frag <- function(session_id) {
+    list(
+      schema = "atlas-focus-contribution/4",
+      slideKey = MAGBAND_AGREEMENT_SLIDE_KEY,
+      sessionId = session_id,
+      imageWidth = mba_img_w, imageHeight = mba_img_h,
+      gridWidth = mba_gw, gridHeight = mba_gh,
+      grid = grid,
+      durationMs = 2000,
+      sampleCount = 3,
+      date = "2026-07-25",
+      path = path_list,
+      baseMagnification = 40.0
+    )
+  }
+  list(.frag("mba1"), .frag("mba2"))
+}
+
+MAGBAND_AGREEMENT_FRAC_SLIDE_KEY <- "sha256:selftest-slide-magband-agreement-frac-0001"
+#' PT4 parity-robustness fixture (per advisor review): 3 schema/4 sessions on ONE slide with a
+#' FRACTIONAL (non-1.0/non-0.0) meanPairwiseCC, AND a native grid resolution that differs from the
+#' slide's common (tw, th) grid for 2 of the 3 sessions -- so resample_nn's nearest-neighbour
+#' UPSAMPLE path is actually exercised. Mirrors the Python toolkit's
+#' `build_magband_agreement_frac_fixture` exactly.
+#'
+#' mbaf1, mbaf2: native gw=gh=4, img_w=img_h=400 (cell=100px). mbaf3: native gw=gh=8, img_w=img_h=400
+#' (cell=50px) -- the LARGEST native grid on this slide, so the common (tw,th)=(8,8) and
+#' mbaf1/mbaf2's native (4,4) grids get NN-upsampled (each native cell's value is COPIED, unscaled,
+#' into a 2x2 block of the 8x8 target).
+#'
+#' All 3 share baseMagnification=40.0 and the SAME 2-band ds schedule (8000ms -> "4-10x" band
+#' index3; 2000ms -> "20-40x" band index5), each dwelling at its OWN distinct image position (so
+#' the 3 post-resample rasters have DISJOINT nonzero support at the (8,8) resolution):
+#'   mbaf1 dwells at native (4,4) cell(0,0) (cx=cy=50, w=h=100) -> upsampled to (8,8) rows{0,1} x
+#'     cols{0,1} (flat idx 0-based {0,1,8,9}), value=1000.0 (=dt) at all 4 cells.
+#'   mbaf2 dwells at native (4,4) cell(0,1) (cx=150,cy=50, w=h=100) -> upsampled to (8,8) rows{0,1}
+#'     x cols{2,3} (flat idx 0-based {2,3,10,11}), value=1000.0 at all 4 cells.
+#'   mbaf3 dwells at native (8,8) cell(4,4) directly (cx=cy=225, w=h=50, no resampling needed) ->
+#'     flat idx 0-based {36}, value=1000.0.
+#'
+#' Hand-derived (raw Pearson-correlation formula, verified independently of `cc()` before this
+#' fixture was written; N=64 cells each; mirrors the Python toolkit's docstring derivation exactly):
+#'   cc(mbaf1, mbaf2) == -1/15 == -0.06666666666666667 EXACTLY.
+#'   cc(mbaf1, mbaf3) == cc(mbaf2, mbaf3) == -0.03253000243161777.
+#'   meanPairwiseCC == mean(-0.06666666666666667, -0.03253000243161777, -0.03253000243161777)
+#'                  == -0.0439088905099674 (both bands identical value, since every session uses
+#'                  the SAME dwell position for both step0/step1 -- only the ds/band differs).
+#'   coincidenceLevel == 0.0 EXACTLY: each grid's above-threshold cells are entirely disjoint from
+#'     the other two -> no cell is ever shared by >=2 readers.
+build_magband_agreement_frac_fixture <- function() {
+  img_w <- 400; img_h <- 400
+  ds_schedule <- c(8000, 2000, 2000) # step0 -> "4-10x" (idx3), step1 -> "20-40x" (idx5)
+  .path_at <- function(cx, cy, w, h) {
+    m <- matrix(
+      c(
+        0, cx, cy, w, h, ds_schedule[1],
+        1000, cx, cy, w, h, ds_schedule[2],
+        2000, cx, cy, w, h, ds_schedule[3]
+      ),
+      nrow = 3, ncol = 6, byrow = TRUE
+    )
+    lapply(seq_len(nrow(m)), function(i) as.numeric(m[i, ]))
+  }
+  f1 <- list(
+    schema = "atlas-focus-contribution/4",
+    slideKey = MAGBAND_AGREEMENT_FRAC_SLIDE_KEY,
+    sessionId = "mbaf1",
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = 4L, gridHeight = 4L,
+    grid = rep(0.0, 16),
+    durationMs = 2000,
+    sampleCount = 3,
+    date = "2026-07-25",
+    path = .path_at(50, 50, 100, 100), # native cell(0,0)
+    baseMagnification = 40.0
+  )
+  f2 <- list(
+    schema = "atlas-focus-contribution/4",
+    slideKey = MAGBAND_AGREEMENT_FRAC_SLIDE_KEY,
+    sessionId = "mbaf2",
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = 4L, gridHeight = 4L,
+    grid = rep(0.0, 16),
+    durationMs = 2000,
+    sampleCount = 3,
+    date = "2026-07-25",
+    path = .path_at(150, 50, 100, 100), # native cell(0,1)
+    baseMagnification = 40.0
+  )
+  f3 <- list(
+    schema = "atlas-focus-contribution/4",
+    slideKey = MAGBAND_AGREEMENT_FRAC_SLIDE_KEY,
+    sessionId = "mbaf3",
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = 8L, gridHeight = 8L,
+    grid = rep(0.0, 64),
+    durationMs = 2000,
+    sampleCount = 3,
+    date = "2026-07-25",
+    path = .path_at(225, 225, 50, 50), # native (8,8) cell(4,4) directly
+    baseMagnification = 40.0
+  )
+  list(f1, f2, f3)
+}
+
+MAGBAND_AGREEMENT_PARTIAL_SLIDE_KEY <- "sha256:selftest-slide-magband-agreement-partial-0001"
+#' PT4 row-skip fixture (per advisor review): the spec's hard-constraints list explicitly names "a
+#' band with only 1 dwelling session (row skipped)" as a blank-not-crash case -- neither
+#' `build_magband_agreement_fixture` nor `build_magband_agreement_frac_fixture` above exercises it
+#' (every canonical session in both dwells in BOTH bands). This fixture is built so exactly ONE
+#' band has 2 dwelling sessions (row emitted) and the OTHER has only 1 (row skipped). Mirrors the
+#' Python toolkit's `build_magband_agreement_partial_fixture` exactly.
+#'
+#' 2 schema/4 sessions, same small custom grid dims as `build_magband_agreement_fixture` (gw=gh=4,
+#' img_w=img_h=400), same baseMagnification=40.0, same dwell position (native cell(0,0), cx=cy=50,
+#' w=h=100) so the shared band's per-session rasters are identical:
+#'   mbap1: 3-point path, 2 steps -- step0 -> band3 "4-10x", step1 -> band5 "20-40x". Dwells in
+#'     BOTH bands.
+#'   mbap2: 2-point path, 1 step ONLY -- step0 -> band3 "4-10x" ONLY. Dwells ONLY in band3.
+#'
+#' band index3 ("4-10x"): grids = [mbap1's, mbap2's], both = cell(0,0) dwell dt=1000ms, rest 0 --
+#'   IDENTICAL -> nSessions=2, meanPairwiseCC=1.0, coincidenceLevel=1.0 (row EMITTED).
+#' band index5 ("20-40x"): only mbap1 dwells there -> grids list length 1 < 2 -> row SKIPPED.
+#' n_canonical_sessions = 2 -> file-level gate passes -> file IS written, but with exactly 1 row.
+build_magband_agreement_partial_fixture <- function() {
+  gw <- 4L; gh <- 4L
+  img_w <- 400; img_h <- 400
+  grid <- rep(0.0, 16)
+  path1 <- matrix(
+    c(
+      0, 50, 50, 100, 100, 8000,
+      1000, 50, 50, 100, 100, 2000,
+      2000, 50, 50, 100, 100, 2000
+    ),
+    nrow = 3, ncol = 6, byrow = TRUE
+  )
+  path2 <- matrix(
+    c(
+      0, 50, 50, 100, 100, 8000,
+      1000, 50, 50, 100, 100, 8000
+    ),
+    nrow = 2, ncol = 6, byrow = TRUE
+  )
+  f1 <- list(
+    schema = "atlas-focus-contribution/4",
+    slideKey = MAGBAND_AGREEMENT_PARTIAL_SLIDE_KEY,
+    sessionId = "mbap1",
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = gw, gridHeight = gh,
+    grid = grid,
+    durationMs = 2000,
+    sampleCount = 3,
+    date = "2026-07-25",
+    path = lapply(seq_len(nrow(path1)), function(i) as.numeric(path1[i, ])),
+    baseMagnification = 40.0
+  )
+  f2 <- list(
+    schema = "atlas-focus-contribution/4",
+    slideKey = MAGBAND_AGREEMENT_PARTIAL_SLIDE_KEY,
+    sessionId = "mbap2",
+    imageWidth = img_w, imageHeight = img_h,
+    gridWidth = gw, gridHeight = gh,
+    grid = grid,
+    durationMs = 1000,
+    sampleCount = 2,
+    date = "2026-07-25",
+    path = lapply(seq_len(nrow(path2)), function(i) as.numeric(path2[i, ])),
+    baseMagnification = 40.0
+  )
+  list(f1, f2)
 }
 
 C6_SLIDE_KEY <- "sha256:selftest-slide-c6-0001"
@@ -1903,6 +2229,50 @@ check_tier4_mouse_fixture <- function(tmp) {
   )
 }
 
+#' PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2) pipeline-level check: runs
+#' `build_mouse_icc_fixture` (2 schema/5 sessions with an identical mouse path, so their resampled
+#' mouse-dwell grids are identical arrays) through the full `analyze()` pipeline and asserts
+#' `mouse_<slug>.csv`'s new `mouseICC` column is exactly `1.0` on the diagonal-reuse row (the
+#' first session) and blank on every other row -- plus the mirrored `summary.md` "cursor
+#' agreement" line.
+check_mouse_icc_fixture <- function(tmp) {
+  fragments <- build_mouse_icc_fixture()
+  in_dir <- file.path(tmp, "in_mouse_icc")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_mouse_icc")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  mouse_files <- out_files[startsWith(out_files, "mouse_")]
+  stopifnot("expected exactly one mouse_ file" = length(mouse_files) == 1)
+  mouse_df <- utils::read.csv(file.path(out_dir, mouse_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "mouse_<slug>.csv columns mismatch" =
+      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"))
+  )
+  stopifnot("expected 2x2=4 pairwise rows" = nrow(mouse_df) == 4)
+
+  diag1 <- mouse_df[mouse_df$sessionA == "micc1" & mouse_df$sessionB == "micc1", ]
+  stopifnot(
+    "expected mouseICC == 1.0 (identical mouse-dwell grids, diagonal-reuse row)" =
+      abs(diag1$mouseICC - 1.0) < 1e-9
+  )
+  diag2 <- mouse_df[mouse_df$sessionA == "micc2" & mouse_df$sessionB == "micc2", ]
+  stopifnot(
+    "mouseICC should be blank on every diagonal row except the first session's" =
+      is.na(diag2$mouseICC)
+  )
+  cross <- mouse_df[mouse_df$sessionA == "micc1" & mouse_df$sessionB == "micc2", ]
+  stopifnot("mouseICC should be blank on off-diagonal rows" = is.na(cross$mouseICC))
+
+  summary_text <- paste(readLines(file.path(out_dir, "summary.md"), warn = FALSE), collapse = "\n")
+  stopifnot(
+    "expected the new PT2 'cursor agreement' summary.md line with meanPairwiseMouseCC/mouseICC both 1.000" =
+      grepl("cursor agreement: mean pairwise mouse CC = 1.000, mouse ICC(2,1) = 1.000", summary_text, fixed = TRUE)
+  )
+}
+
 #' Tier 3 C4 pipeline-level check: runs `build_seglin_fragment` (a single path with a known
 #' 2-boundary hotspot split, colinear segment) through the full `analyze()` pipeline and asserts
 #' `meanSegmentLinearity == 1.0` exactly.
@@ -1951,6 +2321,273 @@ check_tier4_seglin_dwell_fixture <- function(tmp) {
     "must differ from the pre-fix-inflated value 0.9738334909707113" =
       abs(row$meanSegmentLinearity - 0.9738334909707113) > 1e-6
   )
+}
+
+#' PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): direct, pipeline-independent
+#' unit checks for `mean_segment_linearity_roi` -- TDD-style asserts on hand-built inputs,
+#' bypassing the full `analyze()` pipeline entirely. Mirrors the Python toolkit's
+#' `check_pt3_direct_unit_asserts` exactly. Masks are hand-built logical vectors (NOT run through
+#' `rasterize_feature_collection`), so these asserts are independent of the rasterizer's own
+#' correctness -- the rasterizer's cell-center-containment behaviour is verified separately in
+#' `check_pt3_roi_seglin_fixture`'s full-pipeline run.
+check_pt3_direct_unit_asserts <- function() {
+  gw <- 4L; gh <- 4L
+  img_w <- 400; img_h <- 400
+  mask_cell5 <- rep(FALSE, 16)
+  mask_cell5[6] <- TRUE # cell(row1, col1), 0-based idx5 -> 1-based idx6
+
+  # ---- no annotations at all (empty mask) -> blank ----
+  p_any <- matrix(c(0, 50, 50, 400, 100, 150, 150, 400), nrow = 2, ncol = 4, byrow = TRUE)
+  stopifnot(
+    "mean_segment_linearity_roi should be blank when the mask has no TRUE cells at all" =
+      is.nan(mean_segment_linearity_roi(p_any, rep(FALSE, 16), gw, gh, img_w, img_h))
+  )
+
+  # ---- <2 path points -> blank ----
+  p_one <- matrix(c(0, 150, 150, 400), nrow = 1, ncol = 4, byrow = TRUE)
+  stopifnot(
+    "mean_segment_linearity_roi should be blank for a <2-point path" =
+      is.nan(mean_segment_linearity_roi(p_one, mask_cell5, gw, gh, img_w, img_h))
+  )
+  stopifnot(
+    "mean_segment_linearity_roi should be blank for an empty/NULL path" =
+      is.nan(mean_segment_linearity_roi(NULL, mask_cell5, gw, gh, img_w, img_h))
+  )
+
+  # ---- path never enters the annotated region -> 0 boundaries -> blank ----
+  p_never_enters <- matrix(
+    c(0, 50, 50, 400, 100, 350, 50, 400, 200, 50, 350, 400),
+    nrow = 3, ncol = 4, byrow = TRUE
+  )
+  stopifnot(
+    "mean_segment_linearity_roi should be blank when the path never enters the ROI" =
+      is.nan(mean_segment_linearity_roi(p_never_enters, mask_cell5, gw, gh, img_w, img_h))
+  )
+
+  # ---- exactly 1 ROI-entry boundary (enters once, never re-enters) -> blank ----
+  p_one_entry <- matrix(
+    c(0, 50, 50, 400, 100, 150, 150, 400, 200, 160, 140, 400),
+    nrow = 3, ncol = 4, byrow = TRUE
+  )
+  stopifnot(
+    "mean_segment_linearity_roi should be blank with only 1 ROI-entry boundary (no segment pair)" =
+      is.nan(mean_segment_linearity_roi(p_one_entry, mask_cell5, gw, gh, img_w, img_h))
+  )
+
+  # ---- i==0-already-inside boundary case: the path STARTS inside the ROI (no preceding OUTSIDE
+  # point exists at all), then exits, then re-enters -> boundary_idx (1-based)=c(1,3), 1 segment.
+  # None of the fixtures above exercise this branch (every other path starts OUTSIDE) --
+  # `inside && !prev_inside` is TRUE at i=1 because `prev_inside` is initialized FALSE, so this is
+  # a real, distinct code path (spec: "i==0, or the previous point's cell was OUTSIDE"). Hand-
+  # derived (mirrors the Python toolkit's fixture exactly): net=dist(p0,p2)=
+  # dist((150,150),(180,120))=sqrt(30^2+30^2)=42.42640687119285;
+  # total=dist(p0,p1)+dist(p1,p2)=dist((150,150),(50,50))+dist((50,50),(180,120))
+  #      =sqrt(20000)+sqrt(21800)=289.06958683964353 -> linearity=0.14676883630351673.
+  p_start_inside <- matrix(
+    c(
+      0, 150, 150, 400,
+      100, 50, 50, 400,
+      200, 180, 120, 400
+    ),
+    nrow = 3, ncol = 4, byrow = TRUE
+  )
+  v_start_inside <- mean_segment_linearity_roi(p_start_inside, mask_cell5, gw, gh, img_w, img_h)
+  stopifnot(
+    "expected meanSegmentLinearityROI == 0.14676883630351673 (i==0-already-inside boundary case)" =
+      abs(v_start_inside - 0.14676883630351673) < 1e-9
+  )
+
+  # ---- dedup regression + exact-value assert: see build_roi_seglin_fragment's docstring for the
+  # full hand derivation (independently derived from raw coordinates, not by calling this
+  # function). A dwell run of 3 consecutive inside-cell samples, followed by a genuine transit out
+  # and back in, must collapse to exactly 2 boundaries (1 segment), NOT 4 boundaries (3 segments,
+  # 2 of them trivial 2-point 1.0-linearity runs) ----
+  p_dwell_roi <- matrix(
+    c(
+      0, 50, 50, 400, 300,
+      100, 150, 150, 400, 300,
+      200, 160, 140, 400, 300,
+      300, 140, 160, 400, 300,
+      400, 350, 50, 400, 300,
+      500, 50, 350, 400, 300,
+      600, 180, 120, 400, 300
+    ),
+    nrow = 7, ncol = 5, byrow = TRUE
+  )
+  v_roi <- mean_segment_linearity_roi(p_dwell_roi, mask_cell5, gw, gh, img_w, img_h)
+  stopifnot(
+    "expected meanSegmentLinearityROI == 0.0438310715803678 (single collapsed-dedup transit segment p1..p6)" =
+      abs(v_roi - 0.0438310715803678) < 1e-9
+  )
+  stopifnot(
+    "value must differ from the naive no-dedup mean 0.687040133821826 -- if this fails, the ROI-entry boundary detection regressed to per-sample (undeduped) boundaries" =
+      abs(v_roi - 0.687040133821826) > 1e-6
+  )
+}
+
+#' PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) pipeline-level check: runs
+#' `build_roi_seglin_fragment` (a single path + one rectangular annotation) through the full
+#' `analyze()` pipeline and asserts `meanSegmentLinearityROI` equals the hand-derived value,
+#' exercising both the dwell-run dedup (3 consecutive inside-cell points collapse to ONE boundary)
+#' and the rasterizer's cell-center-containment behaviour end-to-end (unlike
+#' `check_pt3_direct_unit_asserts`, which hand-builds the mask directly). Mirrors the Python
+#' toolkit's `check_pt3_roi_seglin_fixture` exactly.
+check_pt3_roi_seglin_fixture <- function(tmp) {
+  frag <- build_roi_seglin_fragment()
+  in_dir <- file.path(tmp, "in_roi_seglin")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_roi_seglin")
+  analyze(list(in_dir), out_dir)
+
+  metrics <- utils::read.csv(file.path(out_dir, "metrics.csv"), stringsAsFactors = FALSE)
+  stopifnot(nrow(metrics) == 1)
+  row <- metrics[1, ]
+  stopifnot(
+    "expected meanSegmentLinearityROI == 0.0438310715803678 (single collapsed-dedup transit segment p1..p6)" =
+      abs(row$meanSegmentLinearityROI - 0.0438310715803678) < 1e-9
+  )
+  stopifnot(
+    "value must differ from the naive no-dedup mean 0.687040133821826" =
+      abs(row$meanSegmentLinearityROI - 0.687040133821826) > 1e-6
+  )
+  stopifnot(
+    "meanSegmentLinearity should still be populated" = !is.na(row$meanSegmentLinearity)
+  )
+}
+
+#' PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4) pipeline-level check: runs
+#' `build_magband_agreement_fixture` (2 sessions, BYTE-IDENTICAL path/baseMagnification) through
+#' the full `analyze()` pipeline and asserts `magband_agreement_<slug>.csv` has exactly the 2
+#' expected bands, ascending, each with the hand-derived exact `meanPairwiseCC == 1.0` /
+#' `coincidenceLevel == 1.0` (identical per-band dwell grids). Mirrors the Python toolkit's
+#' `check_pt4_magband_agreement_fixture` exactly.
+check_pt4_magband_agreement_fixture <- function(tmp) {
+  fragments <- build_magband_agreement_fixture()
+  in_dir <- file.path(tmp, "in_magband_agreement")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_magband_agreement")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  files <- out_files[startsWith(out_files, "magband_agreement_")]
+  stopifnot("expected exactly one magband_agreement_ file" = length(files) == 1)
+  df <- utils::read.csv(file.path(out_dir, files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "magband_agreement.csv columns mismatch" =
+      identical(colnames(df), c("band", "nSessions", "meanPairwiseCC", "coincidenceLevel"))
+  )
+  stopifnot(
+    "expected exactly bands c('4-10x', '20-40x') in ascending-magnification order" =
+      identical(df$band, c("4-10x", "20-40x"))
+  )
+  for (i in seq_len(nrow(df))) {
+    r <- df[i, ]
+    stopifnot("expected nSessions == 2" = r$nSessions == 2)
+    stopifnot(
+      "expected meanPairwiseCC == 1.0 (identical per-band dwell grids)" =
+        abs(r$meanPairwiseCC - 1.0) < 1e-9
+    )
+    stopifnot("expected coincidenceLevel == 1.0" = abs(r$coincidenceLevel - 1.0) < 1e-9)
+  }
+}
+
+#' PT4 parity-robustness check (per advisor review): runs `build_magband_agreement_frac_fixture`
+#' (3 sessions, disjoint per-session dwell positions, 2 of 3 native grids resampled up to the
+#' slide's common (8,8) grid) through the full `analyze()` pipeline and asserts the hand-derived
+#' FRACTIONAL `meanPairwiseCC` (not 1.0, not 0.0) and the exact `coincidenceLevel == 0.0` (disjoint
+#' supports -- no cell is ever shared by >=2 readers). Mirrors the Python toolkit's
+#' `check_pt4_magband_agreement_frac_fixture` exactly.
+check_pt4_magband_agreement_frac_fixture <- function(tmp) {
+  fragments <- build_magband_agreement_frac_fixture()
+  in_dir <- file.path(tmp, "in_magband_agreement_frac")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_magband_agreement_frac")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  files <- out_files[startsWith(out_files, "magband_agreement_")]
+  stopifnot("expected exactly one magband_agreement_ file" = length(files) == 1)
+  df <- utils::read.csv(file.path(out_dir, files[1]), stringsAsFactors = FALSE)
+  stopifnot(identical(df$band, c("4-10x", "20-40x")))
+  for (i in seq_len(nrow(df))) {
+    r <- df[i, ]
+    stopifnot("expected nSessions == 3" = r$nSessions == 3)
+    stopifnot(
+      "expected meanPairwiseCC == -0.0439088905099674 (hand-derived disjoint-support Pearson correlation across 3 sessions)" =
+        abs(r$meanPairwiseCC - (-0.0439088905099674)) < 1e-9
+    )
+    # Bite check (per advisor review): a regression that collapsed disjoint-support grids to a
+    # degenerate 1.0/0.0 value must be caught, not silently pass a loose bounds check.
+    stopifnot("meanPairwiseCC must not degenerate to 1.0" = abs(r$meanPairwiseCC - 1.0) > 1e-6)
+    stopifnot("meanPairwiseCC must not degenerate to 0.0" = abs(r$meanPairwiseCC) > 1e-6)
+    stopifnot(
+      "expected coincidenceLevel == 0.0 (disjoint per-session dwell, no shared cell)" =
+        abs(r$coincidenceLevel - 0.0) < 1e-9
+    )
+  }
+}
+
+#' PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): running
+#' `build_magband_agreement_fixture` (2 sessions that WOULD be canonical-scheme by default) under
+#' `--magband-scheme tercile` must yield NO `magband_agreement_<slug>.csv` at all -- every
+#' session's scheme becomes "tercile" under the forced CLI flag, so `n_canonical_sessions == 0 < 2`
+#' and the file-level gate fails, exactly like the null-`baseMagnification` case. Mirrors the
+#' Python toolkit's `check_pt4_tercile_scheme_no_file` exactly.
+check_pt4_tercile_scheme_no_file <- function(tmp) {
+  fragments <- build_magband_agreement_fixture()
+  in_dir <- file.path(tmp, "in_magband_agreement_tercile")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_magband_agreement_tercile")
+  analyze(list(in_dir), out_dir, magband_scheme = "tercile")
+
+  out_files <- list.files(out_dir)
+  stopifnot(
+    "magband_agreement_<slug>.csv should NOT be written under --magband-scheme tercile, even when >=2 sessions would otherwise qualify" =
+      length(out_files[startsWith(out_files, "magband_agreement_")]) == 0
+  )
+  magband_files <- out_files[startsWith(out_files, "magbands_")]
+  stopifnot("expected exactly one magbands_ file" = length(magband_files) == 1)
+  magbands_df <- utils::read.csv(file.path(out_dir, magband_files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "--magband-scheme tercile should force tercile for every session" =
+      all(magbands_df$bandScheme == "tercile")
+  )
+}
+
+#' PT4 row-skip check (per advisor review -- the hard-constraints list explicitly names "a band
+#' with only 1 dwelling session (row skipped)" as a blank-not-crash case): runs
+#' `build_magband_agreement_partial_fixture` (2 sessions, one dwelling in both canonical bands, the
+#' other in only one) through the full `analyze()` pipeline and asserts
+#' `magband_agreement_<slug>.csv` has EXACTLY 1 row ("4-10x", the shared band) -- the "20-40x" band,
+#' dwelled on by only 1 session, must be silently dropped, not emitted as a row of NAs. Mirrors the
+#' Python toolkit's `check_pt4_magband_agreement_partial_fixture` exactly.
+check_pt4_magband_agreement_partial_fixture <- function(tmp) {
+  fragments <- build_magband_agreement_partial_fixture()
+  in_dir <- file.path(tmp, "in_magband_agreement_partial")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_magband_agreement_partial")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  files <- out_files[startsWith(out_files, "magband_agreement_")]
+  stopifnot("expected exactly one magband_agreement_ file" = length(files) == 1)
+  df <- utils::read.csv(file.path(out_dir, files[1]), stringsAsFactors = FALSE)
+  stopifnot(
+    "expected exactly 1 row (band '4-10x'; '20-40x' has only 1 dwelling session and must be dropped)" =
+      identical(df$band, "4-10x")
+  )
+  row <- df[1, ]
+  stopifnot("expected nSessions == 2" = row$nSessions == 2)
+  stopifnot(
+    "expected meanPairwiseCC == 1.0 (identical per-band dwell grids)" =
+      abs(row$meanPairwiseCC - 1.0) < 1e-9
+  )
+  stopifnot("expected coincidenceLevel == 1.0" = abs(row$coincidenceLevel - 1.0) < 1e-9)
 }
 
 #' Direct, pipeline-independent unit checks for the new Tier 3 C6 functions (`js_divergence`,
@@ -2163,39 +2800,248 @@ check_tier6_c6_fixture <- function(tmp) {
   stopifnot(all(abs(got[names(expected)] - expected) < 1e-9))
 }
 
-#' Final-review Finding 1 pipeline-level check: a schema-valid gridWidth=0/gridHeight=5 fragment
-#' WITH a path must run through the full `analyze()` pipeline to completion (no crash), with
-#' `visitCountJaccard` blank (NA) for the degenerate zero-size grid.
+#' Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md): a
+#' schema-valid gridWidth=0/gridHeight=5 fragment WITH a path is now REJECTED AT LOAD by
+#' `.is_valid_fragment`'s `gw>0 && gh>0` guard -- it never enters the batch at all, so the
+#' `visit_count_grid` crash this fixture used to trigger is unreachable by construction. Confirms
+#' both the direct load-time rejection and that a batch consisting ONLY of this fragment completes
+#' with zero rows (no crash, no metrics.csv row).
 check_finalfix_zerogrid_path_fixture <- function(tmp) {
   frag <- build_zerogrid_path_fragment()
   in_dir <- file.path(tmp, "in_zerogrid_path")
   dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
   write_fragments_to_dir(list(frag), in_dir)
+
+  loaded <- load_fragments(list(in_dir))
+  stopifnot("a gridWidth=0 fragment must be rejected at load" = length(loaded) == 0)
+
   out_dir <- file.path(tmp, "out_zerogrid_path")
   metrics <- analyze(list(in_dir), out_dir)  # must not raise
-  stopifnot(nrow(metrics) == 1)
-  stopifnot("path must still have been processed" = metrics$pathPoints[1] == 10)
   stopifnot(
-    "expected blank visitCountJaccard for a zero-size grid" = is.na(metrics$visitCountJaccard[1])
+    "a batch with only a zero-dim-grid fragment must yield 0 rows" = nrow(metrics) == 0
   )
 }
 
-#' Final-review Finding 2 pipeline-level check: a schema/5 gridWidth=0/gridHeight=5 fragment WITH
-#' on-slide mouse data must run through the full `analyze()` pipeline to completion (no crash),
-#' with `mouseCoveragePct`/`mouseEntropy` blank (NA).
+#' Polish final-review root-cause fix (docs/superpowers/sdd/polish-finalfix-report.md): a schema/5
+#' gridWidth=0/gridHeight=5 fragment WITH on-slide mouse data is now REJECTED AT LOAD by the same
+#' `gw>0 && gh>0` guard -- the `mouse_raster_from_path` zero-size-grid crash this fixture used to
+#' trigger (Python-only; R's own matrix indexing silently no-ops on this shape, see
+#' `mouse_raster_from_path`'s docstring) is unreachable by construction. Mirrors
+#' `check_finalfix_zerogrid_path_fixture`'s two-level assert.
 check_finalfix_zerogrid_mouse_fixture <- function(tmp) {
   frag <- build_zerogrid_mouse_fragment()
   in_dir <- file.path(tmp, "in_zerogrid_mouse")
   dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
   write_fragments_to_dir(list(frag), in_dir)
+
+  loaded <- load_fragments(list(in_dir))
+  stopifnot("a gridWidth=0 fragment must be rejected at load" = length(loaded) == 0)
+
   out_dir <- file.path(tmp, "out_zerogrid_mouse")
   metrics <- analyze(list(in_dir), out_dir)  # must not raise
-  stopifnot(nrow(metrics) == 1)
   stopifnot(
-    "expected blank mouseCoveragePct for a zero-size grid" = is.na(metrics$mouseCoveragePct[1])
+    "a batch with only a zero-dim-grid fragment must yield 0 rows" = nrow(metrics) == 0
   )
+}
+
+DEGENERATE_PLUS_NORMAL_SLIDE_KEY <- "sha256:selftest-slide-polish-degenerate-plus-normal-0001"
+#' Polish final-review fixture (Finding 2's realistic trigger): ONE gridWidth=0 fragment sharing a
+#' slideKey with ONE normal, full-grid session -- exercises the partial-skip path: the degenerate
+#' fragment is silently dropped at `load_fragments` time, while the normal session on the SAME
+#' slide processes completely unaffected. Mirrors the Python toolkit's
+#' `build_degenerate_plus_normal_fragments` exactly.
+build_degenerate_plus_normal_fragments <- function() {
+  path <- do.call(rbind, lapply(0:9, function(t) c(t * 250, 100 + t, 100 + t, 400, 300)))
+  degenerate <- .finalfix_fragment(
+    "degen1", 3, numeric(0), 0L, 5L, 2000, 1500, 2250, 10, path = path,
+    slide_key = DEGENERATE_PLUS_NORMAL_SLIDE_KEY
+  )
+  normal_grid <- .n_nonzero_grid(10)
+  normal <- .finalfix_fragment(
+    "normal1", 3, normal_grid, GW, GH, IMG_W, IMG_H, 2500, 10, path = path,
+    slide_key = DEGENERATE_PLUS_NORMAL_SLIDE_KEY
+  )
+  list(degenerate, normal)
+}
+
+#' Polish final-review pipeline-level check: a slide carrying ONE degenerate (gridWidth=0)
+#' fragment ALONGSIDE one normal fragment must complete with exactly 1 row (the normal session) --
+#' the degenerate fragment is dropped at load, and its presence must not perturb or abort
+#' processing of its normal slide-mate.
+check_polish_degenerate_plus_normal_fixture <- function(tmp) {
+  frags <- build_degenerate_plus_normal_fragments()
+  in_dir <- file.path(tmp, "in_degenerate_plus_normal")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(frags, in_dir)
+
+  loaded <- load_fragments(list(in_dir))
   stopifnot(
-    "expected blank mouseEntropy for a zero-size grid" = is.na(metrics$mouseEntropy[1])
+    "expected only the normal session to survive load" =
+      length(loaded) == 1 && loaded[[1]]$sessionId == "normal1"
+  )
+
+  out_dir <- file.path(tmp, "out_degenerate_plus_normal")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot("expected exactly 1 row (normal session only)" = nrow(metrics) == 1)
+  stopifnot(metrics$session[1] == "normal1")
+  stopifnot(metrics$pathPoints[1] == 10)
+}
+
+CANONICAL_DEGENERATE_SLIDE_KEY <- "sha256:selftest-slide-polish-canonical-degenerate-0001"
+#' Polish final-review fixture (Finding 3's realistic trigger, now moot post-root-fix but locked in
+#' as a regression guard): ONE gridWidth=0 fragment sharing a slide with TWO normal,
+#' canonical-scheme-computable sessions. Mirrors the Python toolkit's
+#' `build_canonical_degenerate_fragments` exactly.
+build_canonical_degenerate_fragments <- function() {
+  degenerate <- .finalfix_fragment(
+    "cdegen1", 4, numeric(0), 0L, 5L, 2000, 1500, 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 501),
+    slide_key = CANONICAL_DEGENERATE_SLIDE_KEY
+  )
+  f1 <- .fragment(
+    "cnorm1", 4, .n_nonzero_grid(10), 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 601), base_magnification = 40.0,
+    slide_key = CANONICAL_DEGENERATE_SLIDE_KEY
+  )
+  f2 <- .fragment(
+    "cnorm2", 4, .n_nonzero_grid(10), 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 602), base_magnification = 40.0,
+    slide_key = CANONICAL_DEGENERATE_SLIDE_KEY
+  )
+  list(degenerate, f1, f2)
+}
+
+#' Polish final-review pipeline-level check: a slide with a degenerate (gridWidth=0) fragment PLUS
+#' two normal canonical-scheme sessions must complete, write `magband_agreement_<slug>.csv` from
+#' the two normal sessions alone, and not crash.
+check_polish_canonical_degenerate_fixture <- function(tmp) {
+  frags <- build_canonical_degenerate_fragments()
+  in_dir <- file.path(tmp, "in_canonical_degenerate")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(frags, in_dir)
+  out_dir <- file.path(tmp, "out_canonical_degenerate")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot(
+    "expected 2 rows (degenerate session dropped at load)" = nrow(metrics) == 2
+  )
+  stopifnot(setequal(metrics$session, c("cnorm1", "cnorm2")))
+
+  slug <- slug(CANONICAL_DEGENERATE_SLIDE_KEY)
+  agreement_path <- file.path(out_dir, paste0("magband_agreement_", slug, ".csv"))
+  stopifnot("expected magband_agreement_<slug>.csv" = file.exists(agreement_path))
+  agreement <- utils::read.csv(agreement_path, stringsAsFactors = FALSE)
+  stopifnot(nrow(agreement) >= 1)
+  stopifnot(
+    "every emitted band should reflect exactly the 2 normal sessions" =
+      all(agreement$nSessions == 2)
+  )
+}
+
+NONNUMERIC_BASEMAG_SLIDE_KEY <- "sha256:selftest-slide-polish-nonnumeric-basemag-0001"
+#' Polish final-review fixture (Finding 1): a schema/4 session with a VALID grid, a real
+#' dsMilli-carrying path (the actual crash path -- see `point_zoom`'s docstring), and a
+#' `baseMagnification` that is present but NON-NUMERIC (`"unknown"`). Mirrors the Python toolkit's
+#' `build_nonnumeric_basemag_fragment` exactly.
+build_nonnumeric_basemag_fragment <- function() {
+  .fragment(
+    "nonnum1", 4, .n_nonzero_grid(10), 10000, 40,
+    path = .make_path_v4(2, 2, n = 40, seed = 701), base_magnification = "unknown",
+    slide_key = NONNUMERIC_BASEMAG_SLIDE_KEY
+  )
+}
+
+#' Polish final-review Finding 1 pipeline-level check: a fragment with a valid grid and a
+#' dsMilli-carrying path but a non-numeric `baseMagnification` ("unknown") must complete the full
+#' `analyze()` pipeline (no crash anywhere in the `point_zoom`-derived metric chain or the
+#' `magnificationSource`/canonical-band assignment), with `magnificationSource=="proxy-downsample"`
+#' and the canonical scheme auto-falling back to `"tercile"`.
+check_polish_nonnumeric_basemag_fixture <- function(tmp) {
+  frag <- build_nonnumeric_basemag_fragment()
+  in_dir <- file.path(tmp, "in_nonnumeric_basemag")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(list(frag), in_dir)
+  out_dir <- file.path(tmp, "out_nonnumeric_basemag")
+  metrics <- analyze(list(in_dir), out_dir)  # must not raise
+  stopifnot(nrow(metrics) == 1)
+  stopifnot(metrics$magnificationSource[1] == "proxy-downsample")
+  # Both toolkits render a non-numeric `baseMagnification` as blank: R numerically coerces it
+  # (`suppressWarnings(as.numeric(base_mag))` -> NA -> blank), and Python now guards the passthrough
+  # column to blank on a non-numeric value too (previously it passed the raw string through -- that
+  # Python-string vs R-blank divergence is now closed). This is a
+  # cosmetic passthrough-column divergence only; it does not affect magnificationSource/bandScheme,
+  # which both toolkits compute identically (see the cross-language parity check).
+  stopifnot(
+    "R's baseMagnification passthrough numerically coerces a non-numeric value to NA" =
+      is.na(metrics$baseMagnification[1])
+  )
+
+  slug <- slug(NONNUMERIC_BASEMAG_SLIDE_KEY)
+  magbands_path <- file.path(out_dir, paste0("magbands_", slug, ".csv"))
+  stopifnot("expected magbands_<slug>.csv" = file.exists(magbands_path))
+  magbands <- utils::read.csv(magbands_path, stringsAsFactors = FALSE)
+  stopifnot(
+    "a non-numeric baseMagnification is not canonical-computable -> must fall back to tercile" =
+      all(magbands$bandScheme == "tercile")
+  )
+}
+
+MOUSE_ICC_ALLZERO_SLIDE_KEY <- "sha256:selftest-slide-polish-mouse-icc-allzero-0001"
+#' Polish final-review fixture (refuted-but-worth-a-guard): 2 schema/5 sessions on one slide --
+#' one whose cursor is the off-viewer sentinel (-1, -1) at EVERY tick (a legitimate ALL-ZERO
+#' point-based mouse-dwell grid, not NULL) alongside one normal session with real on-slide mouse
+#' movement. Locks in that Python and R compute the IDENTICAL `mouseICC` for this input. Mirrors
+#' the Python toolkit's `build_mouse_icc_allzero_fixture` exactly.
+build_mouse_icc_allzero_fixture <- function() {
+  grid <- .n_nonzero_grid(10)
+  real_path <- matrix(
+    c(
+      0, 500, 400, 400, 300, 1000, 60, 50,
+      1000, 600, 450, 400, 300, 1000, 90, 80,
+      2000, 700, 500, 400, 300, 1000, 120, 110,
+      3000, 650, 470, 400, 300, 1000, 100, 90
+    ),
+    nrow = 4, ncol = 8, byrow = TRUE
+  )
+  offslide_path <- matrix(
+    c(
+      0, 500, 400, 400, 300, 1000, -1, -1,
+      1000, 600, 450, 400, 300, 1000, -1, -1,
+      2000, 700, 500, 400, 300, 1000, -1, -1,
+      3000, 650, 470, 400, 300, 1000, -1, -1
+    ),
+    nrow = 4, ncol = 8, byrow = TRUE
+  )
+  f_real <- .fragment(
+    "micc-real", 5, grid, 3000, 4, path = real_path, slide_key = MOUSE_ICC_ALLZERO_SLIDE_KEY
+  )
+  f_zero <- .fragment(
+    "micc-zero", 5, grid, 3000, 4, path = offslide_path, slide_key = MOUSE_ICC_ALLZERO_SLIDE_KEY
+  )
+  list(f_real, f_zero)
+}
+
+#' Polish final-review pipeline-level check: a slide with one all-off-slide-cursor session
+#' (all-zero mouse-dwell grid) and one normal-mouse session must complete without crash, and
+#' `mouse_<slug>.csv`'s `mouseICC` (diagonal-reuse row) must be a finite number close to 0.0
+#' (numerically compared against Python's output separately, in the cross-language parity check).
+check_polish_mouse_icc_allzero_fixture <- function(tmp) {
+  frags <- build_mouse_icc_allzero_fixture()
+  in_dir <- file.path(tmp, "in_mouse_icc_allzero")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(frags, in_dir)
+  out_dir <- file.path(tmp, "out_mouse_icc_allzero")
+  analyze(list(in_dir), out_dir)  # must not raise
+
+  slug <- slug(MOUSE_ICC_ALLZERO_SLIDE_KEY)
+  mouse_path <- file.path(out_dir, paste0("mouse_", slug, ".csv"))
+  stopifnot("expected mouse_<slug>.csv" = file.exists(mouse_path))
+  mouse_df <- utils::read.csv(mouse_path, stringsAsFactors = FALSE)
+  diag_rows <- mouse_df[!is.na(mouse_df$mouseICC), ]
+  stopifnot("expected exactly 1 non-blank mouseICC row" = nrow(diag_rows) == 1)
+  icc_val <- as.numeric(diag_rows$mouseICC[1])
+  stopifnot("mouseICC should be finite" = is.finite(icc_val))
+  stopifnot(
+    "expected mouseICC near 0.0 for one all-zero + one real grid" = abs(icc_val) < 0.5
   )
 }
 
@@ -2277,6 +3123,172 @@ check_finalfix_idle_fixation_fixture <- function(tmp) {
   stopifnot(f2$nPoints == 2)
 }
 
+# ---------------------------------------------------------------------------
+# P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md): logged Minors
+# from the enrichment-cycle final review -- consensus_count_<slug>.csv only ever exercised at 2
+# sessions, meanDiff's n>=2-per-group guard only ever exercised at n=0 (avgZoom) and zero-variance
+# (dwellInAnnotationPct) -- never the n=1 boundary -- and the calibration summary
+# (calibrationGap/brierScore/confidenceAccuracyR) never independently value-asserted at all. Mirrors
+# the Python toolkit's selftest.py exactly (same fixtures, same hand-derived numbers).
+# ---------------------------------------------------------------------------
+
+CONSENSUS3_SLIDE_KEY <- "sha256:selftest-slide-consensus3-0001"
+#' consensus_count_<slug>.csv 3-SESSION fixture (the Tier 3 C6 fixture above only covers 2). A
+#' minimal 2x2 grid (gw=gh=2 for all 3 sessions -> `.target_grid_dims` picks (tw,th)=(2,2) too, so
+#' resampled==native -- no resample-interaction to reason about). Every session's cell(0,0) is its
+#' own per-session maximum (normalise_max -> 1.0 > HOTSPOT_THRESH_FRAC=0.5), so all 3 dwell on it;
+#' each session ALSO has one other cell at norm value 0.6 (> 0.5, clear of the strict-> boundary),
+#' unique to that session: d3a -> cell(0,1), d3b -> cell(1,0), d3c -> cell(1,1). Hand-derived
+#' nReaders: (0,0) -> 3 (every session), (0,1) -> 1 (d3a only), (1,0) -> 1 (d3b only), (1,1) -> 1
+#' (d3c only) -- exactly 4 rows.
+build_consensus3_fixture <- function() {
+  grid_a <- c(100.0, 60.0, 0.0, 0.0)
+  grid_b <- c(100.0, 0.0, 60.0, 0.0)
+  grid_c <- c(100.0, 0.0, 0.0, 60.0)
+  list(
+    .finalfix_fragment("d3a", 2, grid_a, 2, 2, 200, 200, 3000, 5, slide_key = CONSENSUS3_SLIDE_KEY),
+    .finalfix_fragment("d3b", 2, grid_b, 2, 2, 200, 200, 3000, 5, slide_key = CONSENSUS3_SLIDE_KEY),
+    .finalfix_fragment("d3c", 2, grid_c, 2, 2, 200, 200, 3000, 5, slide_key = CONSENSUS3_SLIDE_KEY)
+  )
+}
+
+#' P1 selftest coverage gap: runs `build_consensus3_fixture` (3 sessions, not just the Tier 3 C6
+#' fixture's 2) through the full `analyze()` pipeline and asserts `consensus_count_<slug>.csv`'s
+#' per-cell reader counts reach `nReaders==3` for the one cell every session dwells on, plus the
+#' exact 4-row set (see the fixture's own docstring for the hand derivation).
+check_consensus3_fixture <- function(tmp) {
+  fragments <- build_consensus3_fixture()
+  in_dir <- file.path(tmp, "in_consensus3")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  out_dir <- file.path(tmp, "out_consensus3")
+  analyze(list(in_dir), out_dir)
+
+  out_files <- list.files(out_dir)
+  cc_files <- out_files[startsWith(out_files, "consensus_count_")]
+  stopifnot(length(cc_files) == 1)
+  cc <- utils::read.csv(file.path(out_dir, cc_files[1]), stringsAsFactors = FALSE)
+  stopifnot(identical(colnames(cc), c("cellRow", "cellCol", "nReaders")))
+  stopifnot(nrow(cc) == 4)
+  got <- setNames(as.numeric(cc$nReaders), paste(cc$cellRow, cc$cellCol))
+  expected <- c("0 0" = 3, "0 1" = 1, "1 0" = 1, "1 1" = 1)
+  stopifnot(setequal(names(got), names(expected)))
+  stopifnot(all(abs(got[names(expected)] - expected) < 1e-9))
+  stopifnot(
+    "expected nReaders==3 for the cell all 3 sessions dwell on" =
+      abs(got[["0 0"]] - 3) < 1e-9
+  )
+}
+
+MEANDIFF_N1_SLIDE_KEY <- "sha256:selftest-slide-meandiff-n1-0001"
+#' meanDiff n=1-per-group BOUNDARY fixture: 3 graded sessions on their own slide -- ONE graded
+#' correct=1 (n=1 in that group), TWO graded correct=0 (n=2). `.nav_stat_row`'s meanDiff guard
+#' (blinded_focus.R) requires `length(correct_vals) >= 2 AND length(incorrect_vals) >= 2` -- with
+#' only 1 correct-group session this must render BLANK even though
+#' meanCorrect/meanIncorrect/medianCorrect/medianIncorrect (which only need >= 1 value each) stay
+#' populated. Uses `coveragePct` (grid-only, always populated -- same metric
+#' `check_nav_accuracy`'s existing n=3-per-group case uses) with hand-derivable coverage fractions
+#' on the module's GW=GH=8 (64-cell) grid: md1(correct=1)=56/64=87.5%, md2(correct=0)=6/64=9.375%,
+#' md3(correct=0)=8/64=12.5% -> meanCorrect=87.5 (n=1), meanIncorrect=(9.375+12.5)/2=10.9375 (n=2),
+#' medianCorrect=87.5, medianIncorrect=10.9375 (n=2 median == mean here).
+build_meandiff_n1_fragments <- function() {
+  .grid <- function(n_nonzero, value = 100.0) {
+    g <- rep(0.0, GW * GH)
+    if (n_nonzero > 0) {
+      g[seq_len(n_nonzero)] <- value
+    }
+    g
+  }
+
+  spec <- list(
+    list(sid = "md1", n_nonzero = 56, correct = 1),
+    list(sid = "md2", n_nonzero = 6, correct = 0),
+    list(sid = "md3", n_nonzero = 8, correct = 0)
+  )
+  fragments <- list()
+  graded_rows <- list()
+  for (i in seq_along(spec)) {
+    s <- spec[[i]]
+    f <- .fragment(
+      s$sid, 2, .grid(s$n_nonzero), 3000, 10,
+      slide_key = MEANDIFF_N1_SLIDE_KEY,
+      decision = .decision("tumor", 3, 4000 + (i - 1) * 50)
+    )
+    fragments[[length(fragments) + 1]] <- f
+    graded_rows[[length(graded_rows) + 1]] <- c(MEANDIFF_N1_SLIDE_KEY, s$sid, as.character(s$correct))
+  }
+  list(fragments = fragments, graded_rows = graded_rows)
+}
+
+#' P1 selftest coverage gap: the `meanDiff` n>=2-per-group guard (blinded_focus.R's
+#' `.nav_stat_row`) at the n=1 boundary -- distinct from `check_nav_accuracy`'s existing n=0
+#' (`avgZoom`) and zero-variance (`dwellInAnnotationPct`) blank-guard cases. With only 1
+#' graded-correct session, `meanDiff` must render BLANK while
+#' `meanCorrect`/`meanIncorrect`/`medianCorrect`/`medianIncorrect` (needing only n>=1 each) stay
+#' populated -- and asserts their exact hand-derived values (see `build_meandiff_n1_fragments`'s
+#' docstring).
+check_meandiff_n1_boundary <- function(tmp) {
+  fixture <- build_meandiff_n1_fragments()
+  in_dir <- file.path(tmp, "in_meandiff_n1")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fixture$fragments, in_dir)
+  graded_csv_path <- file.path(tmp, "meandiff_n1_graded.csv")
+  .write_simple_csv(graded_csv_path, c("slideKey", "sessionId", "correct"), fixture$graded_rows)
+  out_dir <- file.path(tmp, "out_meandiff_n1")
+  analyze(list(in_dir), out_dir, graded_csv = graded_csv_path)
+
+  nav_path <- file.path(out_dir, "nav_accuracy.csv")
+  stopifnot("nav_accuracy.csv missing for the meanDiff n=1 fixture" = file.exists(nav_path))
+  nav_rows <- utils::read.csv(nav_path, stringsAsFactors = FALSE, colClasses = "character")
+  cov <- nav_rows[nav_rows$metric == "coveragePct", ][1, ]
+  stopifnot(cov$n == "3")
+  stopifnot(
+    "expected BLANK meanDiff at the n=1-per-group boundary (1 correct, 2 incorrect)" =
+      cov$meanDiff == ""
+  )
+  stopifnot("meanCorrect should stay populated with n=1 in that group" = cov$meanCorrect != "")
+  stopifnot("meanIncorrect should stay populated with n=2 in that group" = cov$meanIncorrect != "")
+  stopifnot("medianCorrect should stay populated with n=1 in that group" = cov$medianCorrect != "")
+  stopifnot("medianIncorrect should stay populated with n=2 in that group" = cov$medianIncorrect != "")
+  stopifnot(abs(as.numeric(cov$meanCorrect) - 87.5) < 1e-9)
+  stopifnot(abs(as.numeric(cov$meanIncorrect) - 10.9375) < 1e-9)
+  stopifnot(abs(as.numeric(cov$medianCorrect) - 87.5) < 1e-9)
+  stopifnot(abs(as.numeric(cov$medianIncorrect) - 10.9375) < 1e-9)
+}
+
+#' P1 selftest coverage gap: independent hand-derived value asserts on `.calibration_stats`'s three
+#' summary numbers (`calibrationGap`/`brierScore`/`confidenceAccuracyR`) -- previously only
+#' reachable indirectly via `summary.md`'s rounded-to-3-decimals text line, never asserted against
+#' a hand-derived value at all. 5 hand-built decision rows (`n == MIN_CORRELATION_N` exactly, the
+#' r-guard's own boundary): `confidenceScaled = c(1.0, 0.75, 0.5, 0.25, 0.0)` paired with
+#' `correct = c(1, 1, 1, 0, 0)` -> `calibrationGap = mean(conf) - mean(correct) = 0.5 - 0.6 = -0.1`;
+#' `brierScore = mean((conf-correct)^2) = 0.375/5 = 0.075`; `confidenceAccuracyR` (Pearson r, both
+#' sides non-degenerate variance) works out to exactly `sqrt(0.75) == sqrt(3)/2` (deviation
+#' cross-product 0.75, deviation-sum-of-squares product 0.625*1.2=0.75, so
+#' `r = 0.75/sqrt(0.75) = sqrt(0.75)` -- a clean closed form, hand-verified independently of the
+#' implementation before this fixture was written). Mirrors the Python toolkit's
+#' `check_calibration_direct_unit_asserts` exactly.
+check_calibration_direct_unit_asserts <- function() {
+  rows <- list(
+    list(correct = 1, confidenceScaled = 1.0),
+    list(correct = 1, confidenceScaled = 0.75),
+    list(correct = 1, confidenceScaled = 0.5),
+    list(correct = 0, confidenceScaled = 0.25),
+    list(correct = 0, confidenceScaled = 0.0)
+  )
+  calib <- .calibration_stats(rows)
+  stopifnot(calib$n == 5)
+  stopifnot(abs(calib$gap - (-0.1)) < 1e-9)
+  stopifnot(abs(calib$brier - 0.075) < 1e-9)
+  stopifnot(abs(calib$conf_acc_r - sqrt(0.75)) < 1e-9)
+
+  # Degenerate zero-eligible-rows case: all three stay NaN, n=0 (documented in the function's own
+  # docstring but never previously asserted).
+  calib0 <- .calibration_stats(list())
+  stopifnot(calib0$n == 0)
+  stopifnot(is.nan(calib0$gap) && is.nan(calib0$brier) && is.nan(calib0$conf_acc_r))
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -2316,7 +3328,8 @@ run <- function() {
     "magnificationSource",
     "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
     "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
-    "annotatedAreaUnionPx", "visitCountJaccard"
+    "annotatedAreaUnionPx", "visitCountJaccard",
+    "meanSegmentLinearityROI"
   )
   stopifnot("metrics.csv columns mismatch" = identical(colnames(metrics), expected_cols))
   stopifnot(
@@ -2456,6 +3469,15 @@ run <- function() {
       stop(sprintf("REGRESSION: %s bandTimeMs drifted (expected %s, got %s)", nm, pre_t2_magbands[[nm]], val), call. = FALSE)
     }
   }
+
+  # --- PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): no
+  # magband_agreement_<slug>.csv on THIS slide -- only s1 is canonical-scheme (s2/s4 fall back to
+  # tercile, per the magbands assert above), so n_canonical_sessions == 1 < 2 -> the file-level gate
+  # fails and the file must not exist at all (not header-only). ---
+  stopifnot(
+    "magband_agreement_<slug>.csv should NOT be written when fewer than 2 sessions use the canonical scheme (this slide has only 1: s1)" =
+      length(out_files[startsWith(out_files, "magband_agreement_")]) == 0
+  )
 
   # --- hotspots_<slug>.csv (Tier 1 A5): written for every session (grid always present), rank
   # ascending + dwellMs descending within each session ---
@@ -2820,7 +3842,7 @@ run <- function() {
   mouse_df <- utils::read.csv(file.path(out_dir, mouse_files[1]), stringsAsFactors = FALSE)
   stopifnot(
     "mouse_<slug>.csv columns mismatch" =
-      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel"))
+      identical(colnames(mouse_df), c("sessionA", "sessionB", "cc", "iou", "coincidenceLevel", "mouseICC"))
   )
   stopifnot("expected 4x4=16 pairwise rows" = nrow(mouse_df) == 16)
   diag_s1 <- mouse_df[mouse_df$sessionA == "s1" & mouse_df$sessionB == "s1", ]
@@ -2833,6 +3855,13 @@ run <- function() {
       "all-zero placeholder mouse grid should self-cc == 0.0 (constant)" = abs(diag$cc - 0.0) < 1e-9
     )
   }
+  # PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): only s1 actually has mouse
+  # data on this 4-session slide -- fewer than 2 mouse-carrying sessions -> mouseICC must be
+  # blank (icc() is undefined for a single reader), even though the diagonal-reuse row (s1,
+  # idx 1) is where coincidenceLevel IS populated.
+  stopifnot(
+    "mouseICC should be blank with only 1 mouse-data session on the slide" = is.na(diag_s1$mouseICC)
+  )
 
   # --- Tier 3 C4 (segment-level linearity): populated for s1/s2 (whose synthetic path dwells
   # right at their own recorded grid's center -- and also drifts through a couple of neighboring
@@ -2859,6 +3888,29 @@ run <- function() {
   stopifnot(
     "schema/2 (no path) should have blank meanSegmentLinearity" = is.na(row_s3$meanSegmentLinearity)
   )
+
+  # --- PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry segment
+  # linearity -- s2 (has a path, but NO annotations at all) and s3 (no path, no annotations) must
+  # both be blank (the "no annotations -> blank" case), regardless of path. s1/s4 have
+  # annotations + paths but aren't guaranteed to actually cross an ROI-entry boundary twice by
+  # this fixture's design (untested here -- see the dedicated build_roi_seglin_fragment fixture
+  # for an exact-value assert), so only bounds-check them if populated. ---
+  stopifnot(
+    "meanSegmentLinearityROI should be blank for a session with a path but no annotations" =
+      is.na(row_s2$meanSegmentLinearityROI)
+  )
+  stopifnot(
+    "meanSegmentLinearityROI should be blank for a session with no path and no annotations" =
+      is.na(row_s3$meanSegmentLinearityROI)
+  )
+  for (r in list(row_s1, row_s4)) {
+    if (!is.na(r$meanSegmentLinearityROI)) {
+      stopifnot(
+        "meanSegmentLinearityROI out of [0,1]" =
+          r$meanSegmentLinearityROI >= -1e-9 && r$meanSegmentLinearityROI <= 1.0 + 1e-9
+      )
+    }
+  }
 
   # --- Tier 3 C3 (DTW): scanpath_<slug>.csv gains dtwDistance, diagonal exactly 0.0
   # (self-comparison, by construction of the DP), off-diagonal non-negative and non-blank ---
@@ -3195,6 +4247,37 @@ run <- function() {
   check_finalfix_zerogrid_mouse_fixture(tmp)
   check_finalfix_topk_sparse_fixture(tmp)
   check_finalfix_idle_fixation_fixture(tmp)
+
+  # --- Polish final-review (docs/superpowers/sdd/polish-finalfix-report.md): root-cause
+  # zero-dim-grid rejection at load (.is_valid_fragment), resample_nn/raster_from_path
+  # defense-in-depth guards, and the non-numeric baseMagnification crash (point_zoom /
+  # magnificationSource / true_magnification) ---
+  check_polish_degenerate_plus_normal_fixture(tmp)
+  check_polish_canonical_degenerate_fixture(tmp)
+  check_polish_nonnumeric_basemag_fixture(tmp)
+  check_polish_mouse_icc_allzero_fixture(tmp)
+
+  # --- P1 selftest coverage gaps (docs/superpowers/specs/2026-07-25-enrichment-polish.md):
+  # consensus_count_<slug>.csv at 3 sessions, meanDiff's n=1-per-group boundary, and independent
+  # calibration-summary value asserts ---
+  check_consensus3_fixture(tmp)
+  check_meandiff_n1_boundary(tmp)
+  check_calibration_direct_unit_asserts()
+
+  # --- PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC ---
+  check_mouse_icc_fixture(tmp)
+
+  # --- PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry segment
+  # linearity ---
+  check_pt3_direct_unit_asserts()
+  check_pt3_roi_seglin_fixture(tmp)
+
+  # --- PT4 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P4): per-magnification-band
+  # cross-reader agreement ---
+  check_pt4_magband_agreement_fixture(tmp)
+  check_pt4_magband_agreement_frac_fixture(tmp)
+  check_pt4_magband_agreement_partial_fixture(tmp)
+  check_pt4_tercile_scheme_no_file(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }
