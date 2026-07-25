@@ -2163,6 +2163,29 @@ check_pt3_direct_unit_asserts <- function() {
       is.nan(mean_segment_linearity_roi(p_one_entry, mask_cell5, gw, gh, img_w, img_h))
   )
 
+  # ---- i==0-already-inside boundary case: the path STARTS inside the ROI (no preceding OUTSIDE
+  # point exists at all), then exits, then re-enters -> boundary_idx (1-based)=c(1,3), 1 segment.
+  # None of the fixtures above exercise this branch (every other path starts OUTSIDE) --
+  # `inside && !prev_inside` is TRUE at i=1 because `prev_inside` is initialized FALSE, so this is
+  # a real, distinct code path (spec: "i==0, or the previous point's cell was OUTSIDE"). Hand-
+  # derived (mirrors the Python toolkit's fixture exactly): net=dist(p0,p2)=
+  # dist((150,150),(180,120))=sqrt(30^2+30^2)=42.42640687119285;
+  # total=dist(p0,p1)+dist(p1,p2)=dist((150,150),(50,50))+dist((50,50),(180,120))
+  #      =sqrt(20000)+sqrt(21800)=289.06958683964353 -> linearity=0.14676883630351673.
+  p_start_inside <- matrix(
+    c(
+      0, 150, 150, 400,
+      100, 50, 50, 400,
+      200, 180, 120, 400
+    ),
+    nrow = 3, ncol = 4, byrow = TRUE
+  )
+  v_start_inside <- mean_segment_linearity_roi(p_start_inside, mask_cell5, gw, gh, img_w, img_h)
+  stopifnot(
+    "expected meanSegmentLinearityROI == 0.14676883630351673 (i==0-already-inside boundary case)" =
+      abs(v_start_inside - 0.14676883630351673) < 1e-9
+  )
+
   # ---- dedup regression + exact-value assert: see build_roi_seglin_fragment's docstring for the
   # full hand derivation (independently derived from raw coordinates, not by calling this
   # function). A dwell run of 3 consecutive inside-cell samples, followed by a genuine transit out

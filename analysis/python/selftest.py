@@ -2104,6 +2104,27 @@ def check_pt3_direct_unit_asserts():
         p_one_entry, mask_cell5, gw, gh, img_w, img_h
     )), "mean_segment_linearity_roi should be blank with only 1 ROI-entry boundary (no segment pair)"
 
+    # ---- i==0-already-inside boundary case: the path STARTS inside the ROI (no preceding
+    # OUTSIDE point exists at all), then exits, then re-enters -> boundary_idx=[0,2], 1 segment.
+    # None of the fixtures above exercise this branch (every other path starts OUTSIDE) --
+    # `inside and not prev_inside` is True at i=0 because `prev_inside` is initialized False, so
+    # this is a real, distinct code path (spec: "i==0, or the previous point's cell was OUTSIDE").
+    # Hand-derived: net=dist(p0,p2)=dist((150,150),(180,120))=sqrt(30^2+30^2)=42.42640687119285;
+    # total=dist(p0,p1)+dist(p1,p2)=dist((150,150),(50,50))+dist((50,50),(180,120))
+    #      =sqrt(20000)+sqrt(21800)=289.06958683964353 -> linearity=0.14676883630351673.
+    p_start_inside = [
+        [0, 150, 150, 400],   # cell(1,1), INSIDE -> BOUNDARY 1 (i==0, no preceding point)
+        [100, 50, 50, 400],   # cell(0,0), OUTSIDE -> exit
+        [200, 180, 120, 400], # cell(1,1), INSIDE -> BOUNDARY 2 (prev OUTSIDE)
+    ]
+    v_start_inside = bf_metrics.mean_segment_linearity_roi(
+        p_start_inside, mask_cell5, gw, gh, img_w, img_h
+    )
+    assert abs(v_start_inside - 0.14676883630351673) < 1e-9, (
+        f"expected meanSegmentLinearityROI == 0.14676883630351673 (i==0-already-inside boundary "
+        f"case), got {v_start_inside}"
+    )
+
     # ---- dedup regression + exact-value assert: see build_roi_seglin_fragment's docstring for
     # the full hand derivation (independently derived from raw coordinates, not by calling this
     # function). A dwell run of 3 consecutive inside-cell samples, followed by a genuine transit
