@@ -18,6 +18,7 @@ import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.images.ImageData;
 import qupath.lib.images.servers.ImageServer;
+import qupath.lib.images.servers.ImageServers;
 
 /**
  * Read-only slide opener shared by the quiz author and runner windows: given a slide URL
@@ -73,6 +74,59 @@ public final class QuizSlide {
                 Platform.runLater(() -> onError.accept(ex));
             }
         }, "atlas-quiz-open");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** True iff {@code uri} is an atlas Deep-Zoom descriptor (ends in {@code .dzi}, query stripped,
+     *  case-insensitive) — the only shape {@link #openAsync}'s {@link DziImageServer} path handles.
+     *  Everything else (local {@code file:} slides, other formats) opens via {@link #openSlideAsync}'s
+     *  standard-server path. */
+    public static boolean isAtlasDziUrl(String uri) {
+        if (uri == null || uri.isBlank())
+            return false;
+        String s = uri;
+        int q = s.indexOf('?');
+        if (q >= 0)
+            s = s.substring(0, q);
+        return s.toLowerCase(Locale.ROOT).endsWith(".dzi");
+    }
+
+    /**
+     * Open {@code uri} read-only into the active viewer, dispatching by kind: an atlas {@code .dzi}
+     * URL streams via {@link #openAsync} (unchanged); any other URI (a local {@code file:} slide,
+     * etc.) is built with QuPath's standard {@link ImageServers#buildServer(java.net.URI, String...)}
+     * off the FX thread, then applied inside {@link Platform#runLater}. Same {@code onDone}/{@code
+     * onError}/{@code stillWanted} contract as {@link #openAsync} — a local slide that can't be built
+     * (e.g. a shared tour whose local file the recipient lacks) reports via {@code onError}, so the
+     * caller can degrade gracefully instead of dead-ending.
+     */
+    public static void openSlideAsync(QuPathGUI qupath, String uri, Runnable onDone,
+            Consumer<Exception> onError, BooleanSupplier stillWanted) {
+        if (isAtlasDziUrl(uri)) {
+            openAsync(qupath, uri, onDone, onError, stillWanted);
+            return;
+        }
+        Thread t = new Thread(() -> {
+            try {
+                ImageServer<BufferedImage> server = ImageServers.buildServer(URI.create(uri));
+                ImageData<BufferedImage> imageData = new ImageData<>(server, ImageData.ImageType.OTHER);
+                Platform.runLater(() -> {
+                    if (stillWanted != null && !stillWanted.getAsBoolean())
+                        return;
+                    try {
+                        qupath.getViewer().setImageData(imageData);
+                        onDone.run();
+                    } catch (Exception ex) {
+                        logger.error("Failed to display local slide {}: {}", uri, ex.getMessage(), ex);
+                        onError.accept(ex);
+                    }
+                });
+            } catch (Exception ex) {
+                logger.error("Failed to open local slide {}: {}", uri, ex.getMessage(), ex);
+                Platform.runLater(() -> onError.accept(ex));
+            }
+        }, "atlas-tour-open-local");
         t.setDaemon(true);
         t.start();
     }
