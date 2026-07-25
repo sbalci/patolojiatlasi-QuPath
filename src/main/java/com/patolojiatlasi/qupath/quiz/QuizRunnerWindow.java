@@ -530,7 +530,7 @@ public class QuizRunnerWindow {
 
         String highlightGeoJson = q.getHighlightGeoJson();
         currentHighlightRoi = (highlightGeoJson == null || highlightGeoJson.isBlank())
-                ? null : parseGeometrySafely(highlightGeoJson);
+                ? null : parseGeometrySafely(highlightGeoJson, false); // auto-fired: log, don't modal
         boolean hasHighlight = currentHighlightRoi != null;
         highlightToggle.setVisible(hasHighlight);
         highlightToggle.setManaged(hasHighlight);
@@ -606,18 +606,32 @@ public class QuizRunnerWindow {
      * plane (see that method's Javadoc), so {@link ImagePlane#getDefaultPlane()} is passed here
      * without loss.
      */
+    /** User-initiated reveal parse (Göster): a malformed geometry raises a modal alert. */
     private ROI parseGeometrySafely(String geoJson) {
+        return parseGeometrySafely(geoJson, true);
+    }
+
+    /**
+     * Parse a GeoJSON geometry, returning {@code null} on any failure. {@code alertOnError} controls
+     * whether a parse failure raises a blocking modal: {@code true} for user-initiated reveals
+     * (Göster), {@code false} for the per-stop highlight parsed automatically in {@link
+     * #afterSlideReady} — a malformed highlight in a (possibly hand-edited/shared) tour pack should
+     * just show no overlay + a logged warning, not pop a modal on every stop-load and revisit.
+     */
+    private ROI parseGeometrySafely(String geoJson, boolean alertOnError) {
         if (geoJson == null || geoJson.isBlank())
             return null;
         try {
             return QuizGeometry.fromGeoJson(geoJson, ImagePlane.getDefaultPlane());
         } catch (Exception ex) {
-            logger.warn("Failed to parse quiz reveal geometry: {}", ex.getMessage());
-            Alert alert = new Alert(Alert.AlertType.ERROR,
-                    "Referans/hedef geometri okunamadı:\n\n" + ex.getMessage());
-            if (stage != null)
-                alert.initOwner(stage);
-            alert.showAndWait();
+            logger.warn("Failed to parse quiz geometry: {}", ex.getMessage());
+            if (alertOnError) {
+                Alert alert = new Alert(Alert.AlertType.ERROR,
+                        "Referans/hedef geometri okunamadı:\n\n" + ex.getMessage());
+                if (stage != null)
+                    alert.initOwner(stage);
+                alert.showAndWait();
+            }
             return null;
         }
     }
