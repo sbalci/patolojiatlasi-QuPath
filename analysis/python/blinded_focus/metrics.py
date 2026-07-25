@@ -1915,7 +1915,9 @@ def mean_segment_linearity(path, grid, gw, gh, img_w, img_h, top_n=5):
     attended regions tend to be far straighter than the whole meandering scanpath).
 
     **Pinned, deterministic segmentation** (uniform hotspot-based; the ROI-entry variant the spec
-    also mentions is intentionally NOT implemented -- noted as a future option):
+    also mentions is a separate function, :func:`mean_segment_linearity_roi`
+    (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) -- segmented at annotation
+    boundaries instead of hotspot cells):
 
     1. Compute the top-``top_n`` hotspot cells of ``grid`` via :func:`top_hotspots` (deterministic
        tie-break already built in).
@@ -1984,6 +1986,81 @@ def mean_segment_linearity(path, grid, gw, gh, img_w, img_h, top_n=5):
         if last_boundary_cell is None or cell != last_boundary_cell:
             boundary_idx.append(i)
         last_boundary_cell = cell
+    if len(boundary_idx) < 2:
+        return float("nan")
+    linearities = []
+    for j in range(len(boundary_idx) - 1):
+        seg = path[boundary_idx[j]: boundary_idx[j + 1] + 1]
+        if len(seg) >= 2:
+            linearities.append(linearity(seg))
+    if not linearities:
+        return float("nan")
+    return float(np.mean(linearities))
+
+
+def mean_segment_linearity_roi(path, mask, gw, gh, img_w, img_h):
+    """PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): mean :func:`linearity`
+    over the sub-paths a scanpath splits into at **annotation-ROI-entry** boundaries, reusing the
+    reader's own union annotation mask (:func:`blinded_focus.analyze.rasterize_feature_collection`
+    -- the SAME mask/native ``(gw, gh)`` :func:`dwell_in_mask_pct`/:func:`annotation_reentry_count`
+    already use). A complement to the hotspot-based :func:`mean_segment_linearity` (Roa-Peña
+    whole-path vs region-transit): this variant segments at entries into the reader's own
+    annotated region instead of at dwell-hotspot visits.
+
+    **Boundary definition** (deliberately simpler than :func:`mean_segment_linearity`'s
+    cell-identity dedup -- here the state is a single inside/outside boolean, not a specific cell
+    identity, so an outside-excursion is *required* between any two boundaries and the dedup falls
+    out of the state machine for free, needing no explicit "same cell as last boundary" check):
+
+    1. Walk every RAW path point (**no** run-length dedup of the walk itself, same rationale as
+       :func:`mean_segment_linearity` -- the 1:1 correspondence between a path INDEX and its point
+       must be preserved so a "boundary" marks an actual index to slice segments at) and map it to
+       a grid cell via the same floor/clamp convention used throughout this module
+       (:func:`visited_sequence`'s mapping). A point is **inside** iff its cell is ``True`` in
+       ``mask``.
+    2. A path point at index ``i`` is an **ROI-entry boundary** iff it is inside AND EITHER
+       ``i == 0`` (already inside at the very start) OR the immediately-preceding point's cell was
+       **outside** -- an outside-to-inside transition. This is checked purely via the inside/
+       outside boolean, not cell identity, so a maximal run of consecutive inside points (whether
+       it stays in one cell or wanders between several inside cells without ever leaving the
+       region) naturally collapses to exactly ONE boundary, at the run's first index -- no
+       separate dedup step is needed (unlike :func:`mean_segment_linearity`'s per-cell tracking):
+       reaching a second boundary structurally requires at least one intervening OUTSIDE point to
+       reset the state, so consecutive boundary indices are never adjacent.
+    3. Segments are the sub-paths **between consecutive boundary points** (boundary index ``b[k]``
+       to boundary index ``b[k+1]``, inclusive of both endpoints, same "shared endpoint" convention
+       as :func:`mean_segment_linearity`). Any portion of the path before the first boundary or
+       after the last is excluded, not counted as a leading/trailing segment. Fewer than 2
+       boundaries at all -> zero segments.
+    4. :func:`linearity` (unchanged, reused as-is) is computed on every segment with ``>= 2``
+       points; ``meanSegmentLinearityROI`` is the mean of those per-segment linearities.
+
+    ``float("nan")`` (blank) if: ``mask`` has no ``True`` cells (no annotation on this slide --
+    nothing to enter); ``path`` has fewer than 2 points; fewer than 2 ROI-entry boundaries are
+    found in the path (zero segments -- includes both "never entered" and "entered exactly
+    once, never re-entered"); or every segment found has fewer than 2 points (unreachable by the
+    structural argument in step 2 above -- two boundaries are always >= 2 path-indices apart, so
+    every segment spans >= 3 points -- kept as an explicit guard for defensiveness, mirroring
+    :func:`mean_segment_linearity`'s own analogous guard)."""
+    mask = np.asarray(mask).astype(bool).flatten()
+    if not mask.any():
+        return float("nan")
+    if not path or len(path) < 2:
+        return float("nan")
+    gw_i, gh_i = int(gw), int(gh)
+    img_w_f = float(img_w) if img_w else 1.0
+    img_h_f = float(img_h) if img_h else 1.0
+    boundary_idx = []
+    prev_inside = False
+    for i, pt in enumerate(path):
+        cx, cy = float(pt[1]), float(pt[2])
+        col = min(max(int(math.floor(cx / img_w_f * gw_i)), 0), gw_i - 1)
+        row = min(max(int(math.floor(cy / img_h_f * gh_i)), 0), gh_i - 1)
+        cell = row * gw_i + col
+        inside = bool(mask[cell])
+        if inside and not prev_inside:
+            boundary_idx.append(i)
+        prev_inside = inside
     if len(boundary_idx) < 2:
         return float("nan")
     linearities = []

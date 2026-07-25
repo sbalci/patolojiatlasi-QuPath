@@ -50,7 +50,16 @@ Output files (written to ``--out DIR``):
   :func:`blinded_focus.metrics.visit_count_jaccard`), path-only (blank without a path). Both
   columns are appended at the END of the CSV (after ``meanSegmentLinearity``), not interleaved
   with the columns they conceptually relate to, per the additive/append-only column-order
-  invariant.
+  invariant. (PT3, docs/superpowers/specs/2026-07-25-enrichment-polish.md P3, additive)
+  ``meanSegmentLinearityROI`` -- the ROI-entry-boundary complement to ``meanSegmentLinearity``:
+  mean :func:`blinded_focus.metrics.linearity` over sub-paths split at entries into the reader's
+  own union annotation mask (reusing :func:`rasterize_feature_collection`'s output at the
+  session's native ``(gw, gh)``, same mask ``dwellInAnnotationPct``/``annotationReentryCount``
+  use) instead of at dwell-hotspot cells; see
+  :func:`blinded_focus.metrics.mean_segment_linearity_roi` for the pinned algorithm. Path +
+  annotations only (blank with no annotations, no path, or fewer than 2 ROI-entry boundaries).
+  Appended at the END of the CSV (after ``visitCountJaccard``), same append-only convention as
+  the Tier 3 C6 pair above.
 - per slide: ``compare_<slug>.csv`` (pairwise cc/sim/iou, tidy long format — see below),
   ``consensus_<slug>.png``. Also carries a slide-level ``coincidenceLevel`` (one row) and a
   per-session ``regionCoveragePct`` (vs the slide consensus). (Tier 3 C6, appended) ``jsDivergence``
@@ -822,6 +831,12 @@ def analyze(
                 # visitCountJaccard is path-only (blank without a path), populated in the `if
                 # path:` block below.
                 "visitCountJaccard": "",
+                # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): appended at the
+                # END of metrics.csv's fieldnames (additive/append-only column order, same
+                # convention as the Tier 3 C6 pair above), not interleaved next to
+                # meanSegmentLinearity despite the conceptual relation. Path + annotations only
+                # (blank without a path, populated in the `if path:` block below).
+                "meanSegmentLinearityROI": "",
             }
 
             path = f.get("path")
@@ -903,6 +918,13 @@ def analyze(
                 # top_hotspots call uses), not the slide's common (tw, th) or a scanpath raster.
                 row["meanSegmentLinearity"] = m.mean_segment_linearity(
                     path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N
+                )
+                # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry
+                # segment linearity -- reuses this session's own NATIVE (gw, gh) union annotation
+                # mask (native_ann_mask, the SAME mask annotationReentryCount/dwellInAnnotationPct
+                # already use above), not the slide's common (tw, th).
+                row["meanSegmentLinearityROI"] = m.mean_segment_linearity_roi(
+                    path, native_ann_mask, gw, gh, img_w, img_h
                 )
                 # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the
                 # visit-count grid needs the session's own NATIVE (gw, gh) visited-cell sequence,
@@ -1541,7 +1563,12 @@ def analyze(
          "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
          # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
          # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
-         "annotatedAreaUnionPx", "visitCountJaccard"],
+         "annotatedAreaUnionPx", "visitCountJaccard",
+         # PT3 additive column (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3):
+         # appended at the very END, existing column order above (incl. Tier 1/2/3/C6) is
+         # unchanged -- see the module docstring's PT3 note for why this isn't interleaved next to
+         # meanSegmentLinearity despite the conceptual relation.
+         "meanSegmentLinearityROI"],
     )
 
     if any(r["diagnosis"] != "" for r in decision_rows):

@@ -659,6 +659,88 @@ def build_seglin_dwell_fragment():
     )
 
 
+ROI_SEGLIN_SLIDE_KEY = "sha256:selftest-slide-roi-seglin-0001"
+#: PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) fixture: a single schema/3
+#: path (5-element points) + one annotation Feature exercising `mean_segment_linearity_roi`'s
+#: dedup (a 3-point dwell run inside the ROI collapses to ONE boundary, not 3) and its
+#: 2-boundary/1-segment case. Its own small custom grid dims (gw=gh=4, img_w=img_h=400 -> cell =
+#: 100x100 image px), deliberately NOT the shared module GW/GH/IMG_W/IMG_H (8/8/2000/1500) --
+#: every coordinate/cell mapping below is exactly hand-derivable (independently verified against
+#: the implementation before this fixture was written; see docs/superpowers/sdd/pt3-report.md).
+#:
+#: Annotation: one rectangle covering exactly grid cell (row1, col1) -- x in [100,200], y in
+#: [100,200] -- so cell(1,1)'s center (150,150) is the ONLY cell center inside it (neighbouring
+#: cell centers are all 50px outside the rectangle on one axis). The rasterized union mask
+#: therefore has exactly 1 True cell, flat index 1*4+1=5.
+#:
+#: path (t, cx, cy, w, h), 7 points, mapped to grid cells (col=floor(cx/400*4), row=floor(cy/400*4)):
+#:   p0=(0,   50, 50)   -- cell(0,0)=0, OUTSIDE
+#:   p1=(100, 150,150)  -- cell(1,1)=5, INSIDE -> BOUNDARY 1 (prev OUTSIDE)
+#:   p2=(200, 160,140)  -- cell(1,1)=5, INSIDE -> dwell run, dedup (prev INSIDE -> NOT a new boundary)
+#:   p3=(300, 140,160)  -- cell(1,1)=5, INSIDE -> dwell run, dedup (same)
+#:   p4=(400, 350,50)   -- cell(0,3)=3, OUTSIDE -> exit
+#:   p5=(500, 50,350)   -- cell(3,0)=12, OUTSIDE -> wander (detour, not a straight line back)
+#:   p6=(600, 180,120)  -- cell(1,1)=5, INSIDE -> BOUNDARY 2 (prev OUTSIDE)
+#:
+#: boundary_idx = [1, 6] (only 2 boundaries -> exactly 1 segment, path[1:7] = p1..p6, 6 points).
+#: meanSegmentLinearityROI = linearity(p1..p6), hand-derived directly from the raw coordinates
+#: (net-displacement / total-path-length), independent of calling
+#: mean_segment_linearity_roi itself:
+#:   net   = dist(p1, p6) = dist((150,150),(180,120)) = sqrt(30^2+30^2) = 30*sqrt(2)
+#:         = 42.42640687119285
+#:   total = dist(p1,p2)+dist(p2,p3)+dist(p3,p4)+dist(p4,p5)+dist(p5,p6)
+#:         = sqrt(200)+sqrt(800)+sqrt(56200)+sqrt(180000)+sqrt(69800)
+#:         = 967.9527636781734
+#:   -> meanSegmentLinearityROI = 42.42640687119285 / 967.9527636781734 = 0.0438310715803678
+#:   (confirmed bit-identical against the implementation before this fixture was committed).
+#:
+#: Dedup-bite check: a NAIVE implementation with no run-dedup (every INSIDE point its own
+#: boundary: boundary_idx=[1,2,3,6]) would instead produce 3 segments -- (p1,p2) and (p2,p3), both
+#: trivial 2-point runs with linearity==1.0 EXACTLY, plus (p3,p4,p5,p6) with linearity==
+#: 0.061120401465477904 -- mean([1.0, 1.0, 0.061120401465477904]) == 0.687040133821826, measurably
+#: INFLATED toward 1.0 by the two trivial within-dwell segments (the same C4-dedup failure mode
+#: `mean_segment_linearity` was already fixed for -- see build_seglin_dwell_fragment). This
+#: fixture's correct value (0.0438310715803678) is clearly < 1 and clearly != the naive 0.687...
+#: value, so a regression to per-sample (undeduped) boundaries is caught, not silently masked.
+def build_roi_seglin_fragment():
+    rs_gw = rs_gh = 4
+    rs_img_w = rs_img_h = 400
+    grid = [0.0] * 16  # the recorded dwell grid is unrelated to this fixture's ROI-entry metric
+    path = [
+        [0, 50, 50, 400, 300],
+        [100, 150, 150, 400, 300],
+        [200, 160, 140, 400, 300],
+        [300, 140, 160, 400, 300],
+        [400, 350, 50, 400, 300],
+        [500, 50, 350, 400, 300],
+        [600, 180, 120, 400, 300],
+    ]
+    ann_fc = {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[100, 100], [200, 100], [200, 200], [100, 200], [100, 100]]],
+            },
+            "properties": {"name": "roi"},
+        }],
+    }
+    return {
+        "schema": "atlas-focus-contribution/3",
+        "slideKey": ROI_SEGLIN_SLIDE_KEY,
+        "sessionId": "roiseglin1",
+        "imageWidth": rs_img_w, "imageHeight": rs_img_h,
+        "gridWidth": rs_gw, "gridHeight": rs_gh,
+        "grid": grid,
+        "durationMs": 600,
+        "sampleCount": 7,
+        "date": "2026-07-25",
+        "path": path,
+        "annotations": ann_fc,
+    }
+
+
 C6_SLIDE_KEY = "sha256:selftest-slide-c6-0001"
 #: Tier 3 C6 fixture: its own small custom grid/image dims (GW=GH=4, IMG_W=IMG_H=400 -> cell =
 #: 100x100 image px), deliberately NOT the shared module GW/GH/IMG_W/IMG_H (8/8/2000/1500) --
@@ -1984,6 +2066,101 @@ def check_tier4_seglin_dwell_fixture(tmp):
     )
 
 
+def check_pt3_direct_unit_asserts():
+    """PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): direct, pipeline-
+    independent unit checks for ``mean_segment_linearity_roi`` -- TDD-style asserts on hand-built
+    inputs, bypassing the full ``analyze()`` pipeline entirely. Masks are hand-built boolean lists
+    (NOT run through ``rasterize_feature_collection``), so these asserts are independent of the
+    rasterizer's own correctness -- the rasterizer's cell-center-containment behaviour is verified
+    separately in :func:`check_pt3_roi_seglin_fixture`'s full-pipeline run."""
+    gw = gh = 4
+    img_w = img_h = 400
+    mask_cell5 = [False] * 16
+    mask_cell5[5] = True  # cell(row1, col1)
+
+    # ---- no annotations at all (empty mask) -> blank ----
+    p_any = [[0, 50, 50, 400], [100, 150, 150, 400]]
+    assert math.isnan(bf_metrics.mean_segment_linearity_roi(
+        p_any, [False] * 16, gw, gh, img_w, img_h
+    )), "mean_segment_linearity_roi should be blank when the mask has no True cells at all"
+
+    # ---- <2 path points -> blank ----
+    assert math.isnan(bf_metrics.mean_segment_linearity_roi(
+        [[0, 150, 150, 400]], mask_cell5, gw, gh, img_w, img_h
+    )), "mean_segment_linearity_roi should be blank for a <2-point path"
+    assert math.isnan(bf_metrics.mean_segment_linearity_roi(
+        [], mask_cell5, gw, gh, img_w, img_h
+    )), "mean_segment_linearity_roi should be blank for an empty path"
+
+    # ---- path never enters the annotated region -> 0 boundaries -> blank ----
+    p_never_enters = [[0, 50, 50, 400], [100, 350, 50, 400], [200, 50, 350, 400]]
+    assert math.isnan(bf_metrics.mean_segment_linearity_roi(
+        p_never_enters, mask_cell5, gw, gh, img_w, img_h
+    )), "mean_segment_linearity_roi should be blank when the path never enters the ROI"
+
+    # ---- exactly 1 ROI-entry boundary (enters once, never re-enters) -> blank ----
+    p_one_entry = [[0, 50, 50, 400], [100, 150, 150, 400], [200, 160, 140, 400]]
+    assert math.isnan(bf_metrics.mean_segment_linearity_roi(
+        p_one_entry, mask_cell5, gw, gh, img_w, img_h
+    )), "mean_segment_linearity_roi should be blank with only 1 ROI-entry boundary (no segment pair)"
+
+    # ---- dedup regression + exact-value assert: see build_roi_seglin_fragment's docstring for
+    # the full hand derivation (independently derived from raw coordinates, not by calling this
+    # function). A dwell run of 3 consecutive inside-cell samples, followed by a genuine transit
+    # out and back in, must collapse to exactly 2 boundaries (1 segment), NOT 4 boundaries (3
+    # segments, 2 of them trivial 2-point 1.0-linearity runs) ----
+    p_dwell_roi = [
+        [0, 50, 50, 400, 300],
+        [100, 150, 150, 400, 300],
+        [200, 160, 140, 400, 300],
+        [300, 140, 160, 400, 300],
+        [400, 350, 50, 400, 300],
+        [500, 50, 350, 400, 300],
+        [600, 180, 120, 400, 300],
+    ]
+    v_roi = bf_metrics.mean_segment_linearity_roi(p_dwell_roi, mask_cell5, gw, gh, img_w, img_h)
+    assert abs(v_roi - 0.0438310715803678) < 1e-9, (
+        f"expected meanSegmentLinearityROI == 0.0438310715803678 (single collapsed-dedup transit "
+        f"segment p1..p6), got {v_roi}"
+    )
+    assert abs(v_roi - 0.687040133821826) > 1e-6, (
+        "value must differ from the naive no-dedup mean 0.687040133821826 (2 trivial 2-point "
+        "1.0-linearity segments + the real transit) -- if this fails, the ROI-entry boundary "
+        "detection regressed to per-sample (undeduped) boundaries"
+    )
+
+
+def check_pt3_roi_seglin_fixture(tmp):
+    """PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) pipeline-level check: runs
+    :func:`build_roi_seglin_fragment` (a single path + one rectangular annotation) through the
+    full ``analyze()`` pipeline and asserts ``meanSegmentLinearityROI`` equals the hand-derived
+    value, exercising both the dwell-run dedup (3 consecutive inside-cell points collapse to ONE
+    boundary) and the rasterizer's cell-center-containment behaviour end-to-end (unlike
+    :func:`check_pt3_direct_unit_asserts`, which hand-builds the mask directly)."""
+    frag = build_roi_seglin_fragment()
+    in_dir = os.path.join(tmp, "in_roi_seglin")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir([frag], in_dir)
+    out_dir = os.path.join(tmp, "out_roi_seglin")
+    analyze([in_dir], out_dir)
+
+    metrics = pd.read_csv(os.path.join(out_dir, "metrics.csv"))
+    assert len(metrics) == 1, len(metrics)
+    row = metrics.iloc[0]
+    assert abs(row["meanSegmentLinearityROI"] - 0.0438310715803678) < 1e-9, (
+        f"expected meanSegmentLinearityROI == 0.0438310715803678 (single collapsed-dedup transit "
+        f"segment p1..p6), got {row['meanSegmentLinearityROI']}"
+    )
+    assert abs(row["meanSegmentLinearityROI"] - 0.687040133821826) > 1e-6, (
+        "value must differ from the naive no-dedup mean 0.687040133821826 -- if this fails, the "
+        "ROI-entry boundary detection regressed to per-sample (undeduped) boundaries"
+    )
+    # meanSegmentLinearity (the hotspot-based, PRE-EXISTING column) must be untouched by this new
+    # column's addition -- it has its own, unrelated hand-derivable value here, but the point of
+    # this assert is only that the column exists and is a valid [0,1] number (not the ROI value).
+    assert not pd.isna(row["meanSegmentLinearity"]), "meanSegmentLinearity should still be populated"
+
+
 def check_tier6_direct_unit_asserts():
     """Direct, pipeline-independent unit checks for the new Tier 3 C6 functions (``js_divergence``,
     ``top_k_frac_mask``/``precision_recall_at_topk``, ``visit_count_grid``/``visit_count_jaccard``,
@@ -2571,6 +2748,7 @@ def run():
             "nFixations", "meanFixationMs", "medianFixationMs", "sdFixationMs", "fixationsPerMin",
             "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
             "annotatedAreaUnionPx", "visitCountJaccard",
+            "meanSegmentLinearityROI",
         ]
         assert list(metrics.columns) == expected_cols, metrics.columns.tolist()
         assert metrics["dwellInAnnotationPct"].between(0, 100).all(), metrics["dwellInAnnotationPct"].tolist()
@@ -3029,6 +3207,24 @@ def run():
             "schema/2 (no path) should have blank meanSegmentLinearity"
         )
 
+        # --- PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry segment
+        # linearity -- s2 (has a path, but NO annotations at all) and s3 (no path, no annotations)
+        # must both be blank (the "no annotations -> blank" case), regardless of path. s1/s4 have
+        # annotations + paths but aren't guaranteed to actually cross an ROI-entry boundary twice
+        # by this fixture's design (untested here -- see the dedicated build_roi_seglin_fragment
+        # fixture below for an exact-value assert), so only bounds-check them if populated. ---
+        assert pd.isna(row_s2["meanSegmentLinearityROI"]), (
+            "meanSegmentLinearityROI should be blank for a session with a path but no annotations"
+        )
+        assert pd.isna(row_s3["meanSegmentLinearityROI"]), (
+            "meanSegmentLinearityROI should be blank for a session with no path and no annotations"
+        )
+        for row, label in ((row_s1, "s1"), (row_s4, "s4")):
+            if not pd.isna(row["meanSegmentLinearityROI"]):
+                assert -1e-9 <= row["meanSegmentLinearityROI"] <= 1.0 + 1e-9, (
+                    label, row["meanSegmentLinearityROI"],
+                )
+
         # --- Tier 3 C3 (DTW): scanpath_<slug>.csv gains dtwDistance, diagonal exactly 0.0
         # (self-comparison, by construction of the DP), off-diagonal non-negative and non-blank ---
         scan_files = [f for f in os.listdir(out_dir) if f.startswith("scanpath_")]
@@ -3350,6 +3546,11 @@ def run():
 
         # --- PT2 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P2): mouseICC ---
         check_mouse_icc_fixture(tmp)
+
+        # --- PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry segment
+        # linearity ---
+        check_pt3_direct_unit_asserts()
+        check_pt3_roi_seglin_fixture(tmp)
 
         print("OK: all selftest assertions passed")
     finally:

@@ -2209,7 +2209,9 @@ dtw_distance <- function(path_a, path_b) {
 #' Tier 3 C4: mean `linearity` over the sub-paths a scanpath splits into at the session's own
 #' top-`top_n` dwell hotspot cells -- exact port of `blinded_focus.metrics.mean_segment_linearity`
 #' (Python); see its docstring for the full pinned segmentation algorithm (deterministic,
-#' hotspot-based; the ROI-entry variant is intentionally NOT implemented).
+#' hotspot-based; the ROI-entry variant is a separate function, `mean_segment_linearity_roi`
+#' (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3) -- segmented at annotation
+#' boundaries instead of hotspot cells).
 #'
 #' **C4 dedup fix (2026-07-23, docs/superpowers/sdd/t4-report.md "C4 dedup fix" section):**
 #' consecutive samples landing in the SAME hotspot cell are collapsed to a single boundary (its
@@ -2255,6 +2257,84 @@ mean_segment_linearity <- function(path, grid, gw, gh, img_w, img_h, top_n = 5) 
       boundary_idx <- c(boundary_idx, i)
     }
     last_boundary_cell <- cell
+  }
+  if (length(boundary_idx) < 2) {
+    return(NaN)
+  }
+  linearities <- c()
+  for (j in seq_len(length(boundary_idx) - 1)) {
+    seg <- pm[boundary_idx[j]:boundary_idx[j + 1], , drop = FALSE]
+    if (nrow(seg) >= 2) {
+      linearities <- c(linearities, linearity(seg))
+    }
+  }
+  if (length(linearities) == 0) {
+    return(NaN)
+  }
+  mean(linearities)
+}
+
+#' PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): mean `linearity` over the
+#' sub-paths a scanpath splits into at **annotation-ROI-entry** boundaries -- exact port of
+#' `blinded_focus.metrics.mean_segment_linearity_roi` (Python). Reuses the reader's own union
+#' annotation mask (`rasterize_feature_collection` -- the SAME mask/native `(gw, gh)`
+#' `dwell_in_mask_pct`/`annotation_reentry_count` already use). A complement to the hotspot-based
+#' `mean_segment_linearity` (Roa-Pena whole-path vs region-transit): this variant segments at
+#' entries into the reader's own annotated region instead of at dwell-hotspot visits.
+#'
+#' **Boundary definition** (deliberately simpler than `mean_segment_linearity`'s cell-identity
+#' dedup -- here the state is a single inside/outside boolean, not a specific cell identity, so an
+#' outside-excursion is REQUIRED between any two boundaries and the dedup falls out of the state
+#' machine for free, needing no explicit "same cell as last boundary" check):
+#'
+#' 1. Walk every RAW path point (no run-length dedup of the walk itself, same rationale as
+#'    `mean_segment_linearity` -- the 1:1 correspondence between a path INDEX and its point must
+#'    be preserved) and map it to a grid cell via the same floor/clamp convention used throughout
+#'    this file (`visited_sequence`'s mapping, 0-based cell indices -- hence `mask[cell + 1L]`
+#'    below for R's 1-based indexing). A point is INSIDE iff its cell is `TRUE` in `mask`.
+#' 2. A path point at index `i` is an ROI-entry boundary iff it is inside AND EITHER `i == 1`
+#'    (R's first index, already inside at the very start) OR the immediately-preceding point's
+#'    cell was OUTSIDE -- an outside-to-inside transition. Checked purely via the inside/outside
+#'    boolean, not cell identity, so a maximal run of consecutive inside points (one cell or
+#'    several, as long as the region is never left) naturally collapses to exactly ONE boundary,
+#'    at the run's first index -- no separate dedup step needed: reaching a second boundary
+#'    structurally requires >=1 intervening OUTSIDE point, so consecutive boundary indices are
+#'    never adjacent.
+#' 3. Segments are the sub-paths between consecutive boundary points (inclusive of both endpoints,
+#'    same shared-endpoint convention as `mean_segment_linearity`). Fewer than 2 boundaries at all
+#'    -> zero segments.
+#' 4. `linearity` (unchanged, reused as-is) is computed on every segment with `>= 2` points;
+#'    `meanSegmentLinearityROI` is the mean of those per-segment linearities.
+#'
+#' `NaN` (blank) if: `mask` has no `TRUE` cells (no annotation on this slide); `path` has fewer
+#' than 2 points; fewer than 2 ROI-entry boundaries are found (zero segments); or every segment
+#' found has fewer than 2 points (unreachable by the structural argument in step 2 -- kept as an
+#' explicit guard for defensiveness, mirroring `mean_segment_linearity`'s own analogous guard).
+mean_segment_linearity_roi <- function(path, mask, gw, gh, img_w, img_h) {
+  mask <- as.logical(mask)
+  if (!any(mask)) {
+    return(NaN)
+  }
+  pm <- as_path_matrix(path)
+  n <- nrow(pm)
+  if (is.null(n) || n < 2) {
+    return(NaN)
+  }
+  gw_i <- as.integer(gw); gh_i <- as.integer(gh)
+  img_w_f <- if (!is.null(img_w) && length(img_w) && img_w != 0) as.numeric(img_w) else 1.0
+  img_h_f <- if (!is.null(img_h) && length(img_h) && img_h != 0) as.numeric(img_h) else 1.0
+  boundary_idx <- integer(0)
+  prev_inside <- FALSE
+  for (i in seq_len(n)) {
+    cx <- pm[i, 2]; cy <- pm[i, 3]
+    col <- min(max(as.integer(floor(cx / img_w_f * gw_i)), 0L), gw_i - 1L)
+    row <- min(max(as.integer(floor(cy / img_h_f * gh_i)), 0L), gh_i - 1L)
+    cell <- row * gw_i + col
+    inside <- mask[cell + 1L]
+    if (inside && !prev_inside) {
+      boundary_idx <- c(boundary_idx, i)
+    }
+    prev_inside <- inside
   }
   if (length(boundary_idx) < 2) {
     return(NaN)
@@ -3233,7 +3313,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # populated (0.0 with no annotations), like annotatedAreaPx above.
         annotatedAreaUnionPx = ann_area_union,
         # visitCountJaccard is path-only (NA without a path), populated in the path block below.
-        visitCountJaccard = NA
+        visitCountJaccard = NA,
+        # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): appended at the END of
+        # metrics.csv's fieldnames (additive/append-only column order, same convention as the
+        # Tier 3 C6 pair above), not interleaved next to meanSegmentLinearity despite the
+        # conceptual relation. Path + annotations only (NA without a path, populated in the path
+        # block below).
+        meanSegmentLinearityROI = NA
       )
 
       path <- f$path
@@ -3313,6 +3399,11 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
         # recorded dwell grid (same resolution hotspots_<slug>.csv's top_hotspots call uses), not
         # the slide's common (tw, th) or a scanpath raster.
         row$meanSegmentLinearity <- mean_segment_linearity(path, grid, gw, gh, img_w, img_h, HOTSPOT_TOP_N)
+        # PT3 (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): ROI-entry segment
+        # linearity -- reuses this session's own NATIVE (gw, gh) union annotation mask
+        # (native_ann_mask, the SAME mask annotationReentryCount/dwellInAnnotationPct already use
+        # above), not the slide's common (tw, th).
+        row$meanSegmentLinearityROI <- mean_segment_linearity_roi(path, native_ann_mask, gw, gh, img_w, img_h)
         # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): visit-count Jaccard -- the visit-count
         # grid needs the session's own NATIVE (gw, gh) visited-cell sequence, recomputed here (NOT
         # `path_seq[[sid]]`, which is built at the slide's common (tw, th) resolution for
@@ -3971,7 +4062,12 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       "mouseCoveragePct", "mouseEntropy", "meanSegmentLinearity",
       # Tier 3 C6 additive columns (docs/superpowers/specs/2026-07-23-...): appended, existing
       # column order above (incl. Tier 1/2/C1/C2/C4) is unchanged.
-      "annotatedAreaUnionPx", "visitCountJaccard"
+      "annotatedAreaUnionPx", "visitCountJaccard",
+      # PT3 additive column (docs/superpowers/specs/2026-07-25-enrichment-polish.md P3): appended
+      # at the very END, existing column order above (incl. Tier 1/2/3/C6) is unchanged -- see the
+      # PT3 note where meanSegmentLinearity is documented for why this isn't interleaved next to
+      # it despite the conceptual relation.
+      "meanSegmentLinearityROI"
     )
   )
 
