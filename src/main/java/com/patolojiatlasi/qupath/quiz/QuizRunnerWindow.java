@@ -64,8 +64,10 @@ import qupath.lib.roi.interfaces.ROI;
  * toggleable overlay independent of "Göster" (see {@link #afterSlideReady(QuizQuestion)}), an
  * {@link AtlasQuiz#isAllowBack()} of {@code false} makes "Önceki" forward-only, and slide URLs are
  * opened through {@link QuizSlide#openSlideAsync} so a local (non-atlas) tour slide opens the same
- * way a DZI quiz slide always has. {@link #show(QuPathGUI, boolean)}'s {@code tourMode} only changes
- * the progress label's framing ("Durak" vs "Soru") — it is the same player either way.
+ * way a DZI quiz slide always has. {@link #show(QuPathGUI, boolean)}'s {@code tourMode} changes the
+ * progress label's framing ("Durak" vs "Soru") and shows a one-time title/description intro before
+ * the first stop (see {@link #maybeShowTourIntro(AtlasQuiz)}) — otherwise it is the same player
+ * either way.
  */
 public class QuizRunnerWindow {
 
@@ -80,7 +82,8 @@ public class QuizRunnerWindow {
 
     // Set once, at construction, by whichever show(...) overload created this instance --
     // false for ordinary quiz play, true for guided-tour play. Never reassigned afterwards.
-    // The only thing it changes is progressLabel's framing in showQuestion ("Durak" vs "Soru");
+    // What it changes: progressLabel's framing in showQuestion ("Durak" vs "Soru") and a one-time
+    // title/description intro shown before the first stop on load (see maybeShowTourIntro);
     // everything else in this class is identical for both modes.
     private boolean tourMode = false;
 
@@ -206,10 +209,12 @@ public class QuizRunnerWindow {
     }
 
     /**
-     * Show (or focus) the single runner window. {@code tourMode} only changes {@link #showQuestion}'s
-     * progress-label framing ("Durak N / M" vs "Soru N / M") -- everything else (NARRATION render,
-     * per-stop highlight, {@code allowBack} gating, local-slide routing) applies identically to both
-     * quiz and tour play. Same single-window focus-if-open pattern as {@link #show(QuPathGUI)}: if a
+     * Show (or focus) the single runner window. {@code tourMode} changes {@link #showQuestion}'s
+     * progress-label framing ("Durak N / M" vs "Soru N / M") and shows a one-time title/description
+     * intro before the first stop (see {@link #maybeShowTourIntro(AtlasQuiz)}) -- everything else
+     * (NARRATION render, per-stop highlight, {@code allowBack} gating, local-slide routing) applies
+     * identically to both quiz and tour play. Same single-window focus-if-open pattern as
+     * {@link #show(QuPathGUI)}: if a
      * runner window is already open, it is simply brought to front (its existing mode, whichever that
      * was, is left unchanged).
      */
@@ -339,7 +344,38 @@ public class QuizRunnerWindow {
         leaveQuestion(this.quiz, this.currentIndex);
         this.quiz = loaded;
         titleLabel.setText(loaded.getTitle().isBlank() ? file.getName() : loaded.getTitle());
+        if (tourMode)
+            maybeShowTourIntro(loaded);
         showQuestion(1);
+    }
+
+    /**
+     * In guided-tour play ({@link #show(QuPathGUI, boolean)} with {@code tourMode == true}), show a
+     * one-time title/description intro before the first stop -- the tour's "cover slide". Skipped
+     * entirely (no modal) when the tour carries neither a title nor a description, and never shown
+     * for ordinary self-check play -- the sole caller in {@link #promptLoad()} gates on
+     * {@code tourMode}, so a plain quiz opens straight to its first question exactly as before. Fires
+     * once per load (tied to the load event, not to the question index), so revisiting stop 1 via
+     * "Önceki" in an {@code allowBack} tour does not re-show it.
+     */
+    private void maybeShowTourIntro(AtlasQuiz tour) {
+        String title = tour.getTitle();
+        String desc = tour.getDescription();
+        boolean hasTitle = title != null && !title.isBlank();
+        boolean hasDesc = desc != null && !desc.isBlank();
+        if (!hasTitle && !hasDesc)
+            return; // nothing to introduce -> don't pop an empty modal
+        Alert intro = new Alert(Alert.AlertType.INFORMATION);
+        intro.setTitle("Rehberli tur");
+        intro.setHeaderText(hasTitle ? title : "Rehberli tur");
+        intro.setContentText(hasDesc ? desc : "Tura başlamak için Başla'ya tıklayın.");
+        // Relabel the default OK button to "Başla" (tour-start affordance). An INFORMATION alert
+        // always has an OK button, but the pattern-match guards the cast defensively.
+        if (intro.getDialogPane().lookupButton(ButtonType.OK) instanceof Button b)
+            b.setText("Başla");
+        if (stage != null)
+            intro.initOwner(stage);
+        intro.showAndWait();
     }
 
     /**
