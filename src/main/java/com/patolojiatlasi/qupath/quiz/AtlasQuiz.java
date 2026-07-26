@@ -9,6 +9,7 @@ public class AtlasQuiz {
     private int formatVersion = AtlasQuizIO.FORMAT_VERSION;
     private String title = "";
     private String description = "";
+    private boolean allowBack = true;   // quiz-level: false = forward-only (Önceki disabled)
     private List<QuizQuestion> questions = new ArrayList<>();
 
     public int getFormatVersion() {
@@ -33,6 +34,14 @@ public class AtlasQuiz {
 
     public void setDescription(String d) {
         this.description = d == null ? "" : d;
+    }
+
+    public boolean isAllowBack() {
+        return allowBack;
+    }
+
+    public void setAllowBack(boolean allowBack) {
+        this.allowBack = allowBack;
     }
 
     public List<QuizQuestion> getQuestions() {

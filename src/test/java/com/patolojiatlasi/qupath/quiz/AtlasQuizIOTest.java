@@ -1,6 +1,7 @@
 package com.patolojiatlasi.qupath.quiz;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -167,5 +168,48 @@ class AtlasQuizIOTest {
         Files.writeString(f.toPath(), json + "\nGARBAGE");
 
         assertThrows(IOException.class, () -> AtlasQuizIO.read(f));
+    }
+
+    @Test
+    void readsExistingV1File() throws Exception {
+        // A minimal v1 quiz JSON (formatVersion=1, one MCQ) must still load under the v2 reader.
+        String v1 = "{\"formatVersion\":1,\"title\":\"t\",\"description\":\"\",\"questions\":["
+                + "{\"type\":\"MCQ\",\"slideUrl\":\"https://x/y.dzi\",\"prompt\":\"p\","
+                + "\"options\":[\"a\",\"b\"],\"correctIndex\":0}]}";
+        File f = File.createTempFile("quiz", ".json");
+        java.nio.file.Files.writeString(f.toPath(), v1);
+        AtlasQuiz q = AtlasQuizIO.read(f);
+        assertEquals(1, q.getQuestions().size());
+        assertTrue(q.isAllowBack(), "absent allowBack must default true");
+    }
+
+    @Test
+    void narrationRoundTripsAndValidates() throws Exception {
+        AtlasQuiz q = new AtlasQuiz();
+        q.setTitle("tour");
+        q.setAllowBack(false);
+        QuizQuestion s = new QuizQuestion();
+        s.setType(QuizType.NARRATION);
+        s.setSlideUrl("https://x/y.dzi");
+        s.setPrompt("Bu bölgeye bakın");     // caption
+        s.setHighlightGeoJson("{\"type\":\"Feature\"}");
+        QuizQuestion.Viewport vp = new QuizQuestion.Viewport();
+        vp.downsample = 4.0; vp.centerX = 100; vp.centerY = 200;
+        s.setViewport(vp);
+        q.getQuestions().add(s);
+        File f = File.createTempFile("tour", ".json");
+        AtlasQuizIO.write(q, f);
+        AtlasQuiz back = AtlasQuizIO.read(f);            // must not throw (NARRATION needs no answer fields)
+        QuizQuestion r = back.getQuestions().get(0);
+        assertEquals(QuizType.NARRATION, r.getType());
+        assertEquals("{\"type\":\"Feature\"}", r.getHighlightGeoJson());
+        assertEquals(4.0, r.getViewport().downsample);
+        assertFalse(back.isAllowBack());
+        assertEquals(AtlasQuizIO.FORMAT_VERSION, readFormatVersion(f)); // written as 2 (see helper below)
+    }
+
+    private static int readFormatVersion(File f) throws Exception {
+        return com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(f.toPath()))
+                .getAsJsonObject().get("formatVersion").getAsInt();
     }
 }

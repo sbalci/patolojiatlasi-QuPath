@@ -14,6 +14,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ChoiceBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
@@ -51,9 +52,12 @@ import qupath.lib.roi.interfaces.ROI;
  * (file read/write, dialog build) is quick synchronous work, so — per the task spec — everything
  * runs directly on the JavaFX application thread; no background {@code Thread} is spawned.
  * <p>
- * All four {@link QuizType} values can be authored here, including ANNOTATION/NAVIGATION, whose
+ * All five {@link QuizType} values can be authored here, including ANNOTATION/NAVIGATION, whose
  * reference/target geometry is captured from the currently-selected annotation on the open slide
- * (see {@link QuestionDialog#captureReference()}) rather than drawn inside this dialog itself.
+ * (see {@link QuestionDialog#captureReference()}) rather than drawn inside this dialog itself, and
+ * NARRATION, a caption-only stop with no answer/geometry widgets. Every stop, regardless of type,
+ * can also capture the viewer's current pan/zoom as a {@link QuizQuestion.Viewport} and an optional
+ * highlight overlay (see {@link QuestionDialog#selectedRoiOnCurrentSlide()}).
  */
 public class QuizAuthorWindow {
 
@@ -67,6 +71,7 @@ public class QuizAuthorWindow {
 
     private final TextField titleField = new TextField();
     private final TextField descriptionField = new TextField();
+    private final CheckBox allowBackCheck = new CheckBox("Geri gitmeye izin ver");
 
     private final ObservableList<QuizQuestion> items = FXCollections.observableArrayList();
     private final ListView<QuizQuestion> listView = new ListView<>(items);
@@ -107,7 +112,10 @@ public class QuizAuthorWindow {
         HBox fieldsRow = new HBox(8, new Label("Başlık:"), titleField, new Label("Açıklama:"), descriptionField);
         fieldsRow.setAlignment(Pos.CENTER_LEFT);
 
-        VBox top = new VBox(6, buttonsRow, fieldsRow);
+        allowBackCheck.setSelected(quiz.isAllowBack());
+        allowBackCheck.selectedProperty().addListener((o, was, now) -> quiz.setAllowBack(now));
+
+        VBox top = new VBox(6, buttonsRow, fieldsRow, allowBackCheck);
         top.setPadding(new Insets(8));
 
         listView.setPlaceholder(new Label("Henüz soru yok — \"Ekle\" ile başlayın"));
@@ -158,6 +166,7 @@ public class QuizAuthorWindow {
         quiz = new AtlasQuiz();
         titleField.setText("");
         descriptionField.setText("");
+        allowBackCheck.setSelected(quiz.isAllowBack());
         items.setAll(quiz.getQuestions());
     }
 
@@ -187,6 +196,7 @@ public class QuizAuthorWindow {
         quiz = loaded;
         titleField.setText(quiz.getTitle());
         descriptionField.setText(quiz.getDescription());
+        allowBackCheck.setSelected(quiz.isAllowBack());
         items.setAll(quiz.getQuestions());
     }
 
@@ -203,6 +213,12 @@ public class QuizAuthorWindow {
     private void saveQuiz() {
         quiz.setTitle(titleField.getText());
         quiz.setDescription(descriptionField.getText());
+        // Stamp the current format version on save: a quiz opened from an older v1 file and then
+        // edited here (adding NARRATION/highlight/allowBack — v2-only) must be written as v2 so its
+        // on-disk tag reflects its content (a genuinely-old reader then correctly rejects it rather
+        // than mis-reading v2 content as v1). Done here, not in AtlasQuizIO.write, so writing an
+        // explicit out-of-range version (e.g. a test) is still preserved verbatim.
+        quiz.setFormatVersion(AtlasQuizIO.FORMAT_VERSION);
 
         try {
             AtlasQuizIO.validate(quiz);
@@ -310,7 +326,7 @@ public class QuizAuthorWindow {
         private boolean confirmed = false;
 
         private final ChoiceBox<QuizType> typeChoice = new ChoiceBox<>(FXCollections.observableArrayList(
-                QuizType.MCQ, QuizType.FREETEXT, QuizType.ANNOTATION, QuizType.NAVIGATION));
+                QuizType.MCQ, QuizType.FREETEXT, QuizType.ANNOTATION, QuizType.NAVIGATION, QuizType.NARRATION));
         private final TextArea promptArea = new TextArea();
         private final TextArea explanationArea = new TextArea();
         private final Label slideLabel = new Label();
@@ -338,11 +354,24 @@ public class QuizAuthorWindow {
         // only asks for a plain "already stored" indicator there, not a re-rendered geometry.
         private ROI lastCapturedRoi;
 
+        // Captured by "Bu görünümü yakala" (all types) -- the learner's starting pan/zoom for this
+        // stop. Seeded from the existing question's stored Viewport when editing; left null if
+        // never captured (matches today's behavior of a stop with no recorded viewport).
+        private QuizQuestion.Viewport capturedViewport;
+
+        // Captured by "Vurguyu seçili anotasyondan al" (all types, optional) -- an overlay drawn
+        // on top of this stop's slide independent of any ANNOTATION/NAVIGATION reference/target
+        // geometry. Shares selectedRoiOnCurrentSlide() with captureReference() rather than
+        // duplicating the "selection must be on the bound slide" guard.
+        private String capturedHighlightGeoJson;
+
         private QuestionDialog(Stage owner, QuPathGUI qupath, QuizQuestion existing) {
             this.qupath = qupath;
             this.result = existing != null ? existing : new QuizQuestion();
             this.boundSlideUrl = existing != null ? existing.getSlideUrl() : null;
             this.boundSlideTitle = existing != null ? existing.getSlideTitle() : null;
+            this.capturedViewport = existing != null ? existing.getViewport() : null;
+            this.capturedHighlightGeoJson = existing != null ? existing.getHighlightGeoJson() : null;
 
             this.stage = new Stage();
             stage.initModality(Modality.WINDOW_MODAL);
@@ -414,6 +443,60 @@ public class QuizAuthorWindow {
             HBox slideRow = new HBox(8, bindBtn, slideLabel);
             slideRow.setAlignment(Pos.CENTER_LEFT);
 
+            // "Bu görünümü yakala" (all types): captures the viewer's current pan/zoom as this
+            // stop's starting Viewport. Built once here (not per-type, unlike typeSpecificBox), so
+            // captureViewBtn/viewportStatus are locals rather than fields.
+            Label viewportStatus = new Label(formatViewportStatus(capturedViewport));
+            Button captureViewBtn = new Button("Bu görünümü yakala");
+            captureViewBtn.setOnAction(e -> {
+                var viewer = qupath.getViewer();
+                if (viewer == null || viewer.getImageData() == null) {
+                    errorLabel.setText("Açık bir slayt yok — önce QuPath'te bir slayt açın.");
+                    return;
+                }
+                // Same bound-slide guard the reference/highlight captures use: refuse to store a
+                // viewport captured on a DIFFERENT slide than the stop is bound to (would silently
+                // attach the wrong slide's pan/zoom to this stop). Skipped when nothing is bound yet.
+                String liveUrl = QuizSlide.currentSlideUrl(viewer);
+                if (boundSlideUrl != null && !boundSlideUrl.isBlank() && !boundSlideUrl.equals(liveUrl)) {
+                    errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaydı açın "
+                            + "ya da yeniden bağlayın.");
+                    return;
+                }
+                QuizQuestion.Viewport vp = new QuizQuestion.Viewport();
+                vp.downsample = viewer.getDownsampleFactor();
+                vp.centerX = viewer.getCenterPixelX();
+                vp.centerY = viewer.getCenterPixelY();
+                capturedViewport = vp;
+                errorLabel.setText("");
+                viewportStatus.setText(formatViewportStatus(capturedViewport));
+            });
+            HBox viewportRow = new HBox(6, captureViewBtn, viewportStatus);
+            viewportRow.setAlignment(Pos.CENTER_LEFT);
+
+            // "Vurguyu seçili anotasyondan al" (all types, optional): an overlay independent of
+            // ANNOTATION/NAVIGATION's own reference/target geometry. Shares
+            // selectedRoiOnCurrentSlide() with captureReference() -- same "selection must be on
+            // the bound slide" guard, not duplicated.
+            Label highlightStatus = new Label(capturedHighlightGeoJson == null || capturedHighlightGeoJson.isBlank()
+                    ? "(Vurgu yok)" : "Vurgu alındı.");
+            Button highlightBtn = new Button("Vurguyu seçili anotasyondan al");
+            highlightBtn.setOnAction(e -> {
+                ROI roi = selectedRoiOnCurrentSlide();
+                if (roi == null)
+                    return; // selectedRoiOnCurrentSlide() already set errorLabel with the specific reason
+                capturedHighlightGeoJson = QuizGeometry.toGeoJson(roi);
+                errorLabel.setText("");
+                highlightStatus.setText("Vurgu alındı.");
+            });
+            Button clearHighlightBtn = new Button("Vurguyu temizle");
+            clearHighlightBtn.setOnAction(e -> {
+                capturedHighlightGeoJson = null;
+                highlightStatus.setText("(Vurgu yok)");
+            });
+            HBox highlightRow = new HBox(6, highlightBtn, clearHighlightBtn, highlightStatus);
+            highlightRow.setAlignment(Pos.CENTER_LEFT);
+
             Button okBtn = new Button("Tamam");
             okBtn.setOnAction(e -> onOk());
             Button cancelBtn = new Button("İptal");
@@ -432,6 +515,8 @@ public class QuizAuthorWindow {
                     typeSpecificBox,
                     new Label("Açıklama:"), explanationArea,
                     slideRow,
+                    viewportRow,
+                    highlightRow,
                     actions);
             root.setPadding(new Insets(12));
 
@@ -456,6 +541,10 @@ public class QuizAuthorWindow {
                 captureBtn.setOnAction(e -> captureReference());
                 updateGeometryStatusLabel();
                 typeSpecificBox.getChildren().addAll(captureBtn, geometryStatusLabel);
+            } else if (type == QuizType.NARRATION) {
+                // Caption-only stop: no answer/geometry widgets -- promptArea above already
+                // serves as the caption, and the shared explanation/viewport/highlight rows
+                // (outside typeSpecificBox) are enough. Leave typeSpecificBox empty.
             } else {
                 // MCQ is the default for a null/unrecognized value too.
                 Button addOptionBtn = new Button("Seçenek ekle");
@@ -466,14 +555,42 @@ public class QuizAuthorWindow {
         }
 
         /**
-         * "Referansı slayttan al": read the ROI of the currently-selected annotation on the open
-         * slide (same viewer/selection API as {@code AtlasBrowser}/{@code ProjectBuilderDialog}'s
-         * sibling dialogs use for selection state, but here against the hierarchy's
-         * {@code PathObjectSelectionModel} rather than a JavaFX list/tree selection). Refuses --
-         * leaving any previous capture untouched -- when no slide is open, nothing is selected, or
-         * the selected object has no ROI (e.g. a TMA core parent with no shape of its own).
+         * "Referansı slayttan al": capture the currently-selected annotation's ROI (via
+         * {@link #selectedRoiOnCurrentSlide()}) into {@link #capturedGeometryGeoJson} -- the shared
+         * holding field that {@link #onOk()} later commits to whichever of
+         * {@code referenceGeometryGeoJson}/{@code targetGeometryGeoJson} the chosen type owns.
+         * Refuses -- leaving any previous capture untouched -- under the same conditions as
+         * {@link #selectedRoiOnCurrentSlide()} (it has already set {@link #errorLabel} in that case).
          */
         private void captureReference() {
+            ROI roi = selectedRoiOnCurrentSlide();
+            if (roi == null)
+                return;
+            capturedGeometryGeoJson = QuizGeometry.toGeoJson(roi);
+            lastCapturedRoi = roi;
+            errorLabel.setText("");
+            updateGeometryStatusLabel();
+        }
+
+        /**
+         * The ROI of the currently-selected object on the open slide -- shared selection lookup
+         * used by both {@link #captureReference()} (ANNOTATION/NAVIGATION reference/target geometry)
+         * and the per-stop highlight capture (any type). Same viewer/selection API as
+         * {@code AtlasBrowser}/{@code ProjectBuilderDialog}'s sibling dialogs use for selection
+         * state, but here against the hierarchy's {@code PathObjectSelectionModel} rather than a
+         * JavaFX list/tree selection.
+         * <p>
+         * Returns {@code null} -- after setting {@link #errorLabel} with the specific reason -- when
+         * no slide is open, nothing is selected, the selected object has no ROI (e.g. a TMA core
+         * parent with no shape of its own), or the slide currently open in the viewer no longer
+         * matches {@link #boundSlideUrl}. That last guard matters because the Add/Edit dialog is
+         * only window-modal to the author window, not to QuPath's main window -- the instructor can
+         * switch the viewer's slide (or open a different one) after "Geçerli slayta bağla" but
+         * before capturing, and this refuses rather than silently storing geometry from the wrong
+         * slide. Leaves {@link #errorLabel} untouched on success; callers clear/set it as
+         * appropriate for their own capture.
+         */
+        private ROI selectedRoiOnCurrentSlide() {
             var viewer = qupath.getViewer();
             var imageData = viewer == null ? null : viewer.getImageData();
             var hierarchy = imageData == null ? null : imageData.getHierarchy();
@@ -481,23 +598,22 @@ public class QuizAuthorWindow {
             ROI roi = selected == null ? null : selected.getROI();
             if (roi == null) {
                 errorLabel.setText("Önce slayt üzerinde bir anotasyon seçin.");
-                return;
+                return null;
             }
-            // The Add/Edit dialog is only window-modal to the author window, not to QuPath's main
-            // window -- the instructor can switch the viewer's slide (or open a different one)
-            // after "Geçerli slayta bağla" but before clicking this button. Refuse a capture whose
-            // live slide no longer matches the one this question is bound to, rather than silently
-            // storing geometry from the wrong slide.
             String liveUrl = QuizSlide.currentSlideUrl(viewer);
             if (boundSlideUrl != null && !boundSlideUrl.isBlank() && !boundSlideUrl.equals(liveUrl)) {
                 errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaydı açın "
                         + "ya da yeniden bağlayın.");
-                return;
+                return null;
             }
-            capturedGeometryGeoJson = QuizGeometry.toGeoJson(roi);
-            lastCapturedRoi = roi;
-            errorLabel.setText("");
-            updateGeometryStatusLabel();
+            return roi;
+        }
+
+        /** Format {@link #capturedViewport} for {@code viewportStatus}, or a "not captured yet" placeholder. */
+        private static String formatViewportStatus(QuizQuestion.Viewport vp) {
+            if (vp == null)
+                return "(Görünüm yakalanmadı)";
+            return String.format(Locale.US, "Görünüm: %.1fx, (%.0f, %.0f)", vp.downsample, vp.centerX, vp.centerY);
         }
 
         /** Reflect {@link #capturedGeometryGeoJson}/{@link #lastCapturedRoi} in {@link #geometryStatusLabel}. */
@@ -640,13 +756,14 @@ public class QuizAuthorWindow {
                 }
                 referenceGeom = capturedGeometryGeoJson;
                 instruction = instructionArea.getText() == null ? "" : instructionArea.getText();
-            } else { // NAVIGATION
+            } else if (type == QuizType.NAVIGATION) {
                 if (capturedGeometryGeoJson == null || capturedGeometryGeoJson.isBlank()) {
                     errorLabel.setText("Önce \"Referansı slayttan al\" ile bir hedef bölge yakalayın.");
                     return;
                 }
                 targetGeom = capturedGeometryGeoJson;
-            }
+            } // else NARRATION: caption-only -- the prompt+slide checks above already cover
+              // everything it requires (mirrors AtlasQuizIO.validate's NARRATION case).
 
             if (result.getId() == null || result.getId().isBlank())
                 result.setId("q" + System.currentTimeMillis());
@@ -655,12 +772,14 @@ public class QuizAuthorWindow {
             result.setExplanation(explanationArea.getText());
             result.setSlideUrl(boundSlideUrl);
             result.setSlideTitle(boundSlideTitle);
+            result.setViewport(capturedViewport);
             result.setOptions(options);
             result.setCorrectIndex(correctIndex);
             result.setModelAnswer(modelAnswer);
             result.setInstruction(instruction);
             result.setReferenceGeometryGeoJson(referenceGeom);
             result.setTargetGeometryGeoJson(targetGeom);
+            result.setHighlightGeoJson(capturedHighlightGeoJson);
 
             confirmed = true;
             stage.close();

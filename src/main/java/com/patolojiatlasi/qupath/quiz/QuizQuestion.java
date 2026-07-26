@@ -19,6 +19,7 @@ public class QuizQuestion {
     private String instruction;                 // ANNOTATION
     private String referenceGeometryGeoJson;    // ANNOTATION
     private String targetGeometryGeoJson;       // NAVIGATION
+    private String highlightGeoJson;            // optional per-stop highlight overlay (any type)
 
     /** No-arg constructor for Gson deserialization. */
     public QuizQuestion() {
@@ -126,6 +127,14 @@ public class QuizQuestion {
 
     public void setTargetGeometryGeoJson(String targetGeometryGeoJson) {
         this.targetGeometryGeoJson = targetGeometryGeoJson;
+    }
+
+    public String getHighlightGeoJson() {
+        return highlightGeoJson;
+    }
+
+    public void setHighlightGeoJson(String highlightGeoJson) {
+        this.highlightGeoJson = highlightGeoJson;
     }
 
     /** Where the learner should start on the slide (full-resolution pixels). */
