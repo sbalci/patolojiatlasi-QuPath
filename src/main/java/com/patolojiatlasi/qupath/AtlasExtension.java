@@ -14,6 +14,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.patolojiatlasi.qupath.focus.FocusHeatmap;
+import com.patolojiatlasi.qupath.pathologycot.PathologyCotActions;
 import com.patolojiatlasi.qupath.research.BlindedResearch;
 
 import qupath.lib.common.Version;
@@ -151,11 +152,25 @@ public class AtlasExtension implements QuPathExtension {
                     new SeparatorMenuItem(),
                     compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
 
+            // Pathology-CoT group — turn a recorded blinded/focus fragment into a reviewable
+            // guided-tour draft, review it in the existing tour author, then export a reviewed
+            // tour + its slide as a self-contained case folder (crops + conversation.json).
+            MenuItem cotDraftItem = new MenuItem("Gezinme kaydından CoT taslağı oluştur…");
+            cotDraftItem.setOnAction(e -> PathologyCotActions.draftFromRecording(qupath));
+            MenuItem cotReviewItem = new MenuItem("CoT taslağını gözden geçir…");
+            cotReviewItem.setOnAction(e -> PathologyCotActions.reviewDraft(qupath));
+            MenuItem cotExportItem = new MenuItem("Pathology-CoT veri kümesi olarak dışa aktar…");
+            cotExportItem.setOnAction(e -> PathologyCotActions.exportDataset(qupath));
+            Menu cotMenu = new Menu("Pathology-CoT");
+            cotMenu.getItems().addAll(cotDraftItem, cotReviewItem, cotExportItem);
+
             Menu research = new Menu("Araştırma");
             research.getItems().addAll(
                     focusHeatmap.buildMenu(),
                     new SeparatorMenuItem(),
-                    flagProjectItem);
+                    flagProjectItem,
+                    new SeparatorMenuItem(),
+                    cotMenu);
 
             // "Görüntüyü döndür…" is promoted to its own top-level Extensions item (a sibling of the
             // "Patoloji Atlası" and "Araştırma" menus) rather than nested inside Araştırma, so this
