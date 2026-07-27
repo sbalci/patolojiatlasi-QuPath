@@ -28,8 +28,9 @@ import java.util.Map;
 /**
  * Writes a reviewed guided-tour {@link AtlasQuiz} (see {@code PathologyCotDraft}) out as a
  * self-contained "Pathology-CoT case folder": a slide {@code thumbnail.jpeg}, one crop per
- * NARRATION stop (inspect vs peek, named {@code box_N.jpeg} / {@code cyto_box_N.jpeg}), a
- * chat-style {@code conversation.json} transcript ({@link #buildConversation}), and a governance
+ * exportable NARRATION stop (inspect vs peek, named {@code box_N.jpeg} / {@code cyto_box_N.jpeg} —
+ * see {@link #buildConversation} for what makes a stop "exportable"), a chat-style
+ * {@code conversation.json} transcript ({@link #buildConversation}), and a governance
  * {@code README.txt} explaining that the folder is a consented, non-anonymized export.
  *
  * <p>{@link #buildConversation} is a pure helper (no image I/O) so the JSON turn structure is
@@ -61,33 +62,39 @@ public final class PathologyCotExport {
 
     /**
      * Build the {@code conversation.json} turn list for a reviewed quiz, without touching any
-     * image file. Only {@link QuizType#NARRATION} stops are exported (any other type is skipped
-     * defensively). {@code thumbW}/{@code thumbH} are the thumbnail image's own pixel dimensions
-     * (i.e. {@code thumbnail.jpeg}'s width/height, not the full-resolution slide's), used to clamp
-     * every inspect/peek bbox to the thumbnail's actual extent; {@code thumbDs} is the thumbnail's
+     * image file. Only {@link QuizType#NARRATION} stops that are "exportable" (see
+     * {@link #exportableStops}) — i.e. whose {@code highlightGeoJson} parses to an ROI with
+     * positive bounds width and height — are turned into planned-action tokens / image turns;
+     * a stop with missing, blank, or invalid geometry is skipped entirely by both this method and
+     * {@link #export}, so a {@code conversation.json} image reference always corresponds to a crop
+     * file {@code export} actually writes, and both number exportable stops {@code 1..M} in the same
+     * order. {@code thumbW}/{@code thumbH} are the thumbnail image's own pixel dimensions (i.e.
+     * {@code thumbnail.jpeg}'s width/height, not the full-resolution slide's), used to clamp every
+     * inspect/peek bbox to the thumbnail's actual extent; {@code thumbDs} is the thumbnail's
      * downsample, so each bbox in the output is the stop's slide-pixel ROI bounds scaled by
      * {@code 1/thumbDs} (rounded with {@link Math#round(double)}) — i.e. thumbnail-pixel coordinates.
      *
      * <p>Turn order: (1) a {@code user} turn with the task text + the thumbnail image; (2) an
      * {@code assistant} turn listing the planned {@code <inspect>}/{@code <peek>} actions, one per
-     * NARRATION stop; (3) per stop, a {@code user} turn carrying the crop image reference followed
-     * by an {@code assistant} turn with that stop's {@code explanation} (the region interpretation);
-     * (4) a final {@code assistant} turn with {@code <conclusion>...</conclusion>} built from the
-     * diagnosis/decision recorded in the quiz description.
+     * exportable NARRATION stop; (3) per exportable stop, a {@code user} turn carrying the crop
+     * image reference followed by an {@code assistant} turn with that stop's {@code explanation}
+     * (the region interpretation); (4) a final {@code assistant} turn with
+     * {@code <conclusion>...</conclusion>} built from the diagnosis/decision recorded in the quiz
+     * description.
      */
     public static List<Map<String, Object>> buildConversation(AtlasQuiz quiz, int thumbW, int thumbH, double thumbDs) {
         List<Map<String, Object>> turns = new ArrayList<>();
-        List<QuizQuestion> stops = narrationStops(quiz);
+        List<ExportableStop> stops = exportableStops(quiz);
 
         turns.add(turn("user", contentList(textPart(taskText(quiz)), imagePart("thumbnail.jpeg"))));
 
         StringBuilder plan = new StringBuilder("Planlanan adımlar:\n");
         boolean[] peekFlags = new boolean[stops.size()];
         for (int i = 0; i < stops.size(); i++) {
-            QuizQuestion q = stops.get(i);
-            boolean peek = isPeek(q.getViewport());
+            ExportableStop stop = stops.get(i);
+            boolean peek = isPeek(stop.question.getViewport());
             peekFlags[i] = peek;
-            int[] box = tokenBox(q, thumbDs, thumbW, thumbH);
+            int[] box = tokenBox(stop.roi, thumbDs, thumbW, thumbH);
             String tag = peek ? "peek" : "inspect";
             String fname = boxFileName(i + 1, peek);
             plan.append(i + 1).append(". ").append(token(tag, box)).append(" (").append(fname).append(")\n");
@@ -95,14 +102,14 @@ public final class PathologyCotExport {
         turns.add(turn("assistant", contentList(textPart(plan.toString().stripTrailing()))));
 
         for (int i = 0; i < stops.size(); i++) {
-            QuizQuestion q = stops.get(i);
+            ExportableStop stop = stops.get(i);
             String fname = boxFileName(i + 1, peekFlags[i]);
             turns.add(turn("user", contentList(imagePart(fname))));
-            String explanation = q.getExplanation() == null ? "" : q.getExplanation();
+            String explanation = stop.question.getExplanation() == null ? "" : stop.question.getExplanation();
             turns.add(turn("assistant", contentList(textPart(explanation))));
         }
 
-        String dx = extractDiagnosis(quiz.getDescription());
+        String dx = extractDiagnosis(quiz == null ? null : quiz.getDescription());
         turns.add(turn("assistant", contentList(textPart("<conclusion>" + dx + "</conclusion>"))));
         return turns;
     }
@@ -117,36 +124,69 @@ public final class PathologyCotExport {
         return stops;
     }
 
+    /** A NARRATION stop paired with its resolved highlight ROI; only stops that resolve to one
+     *  (see {@link #resolveHighlightRoi}) are "exportable" — see {@link #exportableStops}. */
+    private static final class ExportableStop {
+        final QuizQuestion question;
+        final ROI roi;
+
+        ExportableStop(QuizQuestion question, ROI roi) {
+            this.question = question;
+            this.roi = roi;
+        }
+    }
+
+    /**
+     * Ordered list of NARRATION stops that are "exportable" — i.e. {@link #resolveHighlightRoi}
+     * returns a non-null ROI for them — paired with that resolved ROI. Computed once and shared by
+     * {@link #buildConversation} (thumbnail-coordinate token/box) and {@link #export}
+     * (native-resolution crop) so a stop is counted in the shared {@code 1..M} numbering, gets an
+     * image turn/token, and gets a crop file written IFF it is in this list — keeping
+     * {@code conversation.json}'s references and the files {@code export} writes in exact lockstep.
+     * A NARRATION stop with missing/blank/malformed {@code highlightGeoJson}, or one whose geometry
+     * has non-positive bounds width/height, is excluded entirely (no turn, no token, no crop).
+     */
+    private static List<ExportableStop> exportableStops(AtlasQuiz quiz) {
+        List<ExportableStop> result = new ArrayList<>();
+        for (QuizQuestion q : narrationStops(quiz)) {
+            ROI roi = resolveHighlightRoi(q);
+            if (roi != null)
+                result.add(new ExportableStop(q, roi));
+        }
+        return result;
+    }
+
+    /** Resolves {@code q}'s {@code highlightGeoJson} to an ROI, or returns {@code null} if the
+     *  field is missing/blank, fails to parse, or parses to an ROI whose (int-truncated) bounds
+     *  width or height is non-positive — the same validity check {@code export}'s crop loop used
+     *  to decide whether to skip a stop, now shared via {@link #exportableStops}. */
+    private static ROI resolveHighlightRoi(QuizQuestion q) {
+        String hj = q.getHighlightGeoJson();
+        if (hj == null || hj.isBlank())
+            return null;
+        ROI roi;
+        try {
+            roi = QuizGeometry.fromGeoJson(hj, ImagePlane.getDefaultPlane());
+        } catch (RuntimeException e) {
+            return null; // malformed geometry
+        }
+        if ((int) roi.getBoundsWidth() <= 0 || (int) roi.getBoundsHeight() <= 0)
+            return null;
+        return roi;
+    }
+
     private static boolean isPeek(QuizQuestion.Viewport vp) {
         return vp != null && vp.downsample <= PEEK_DS_MAX;
     }
 
     /** ROI bbox (slide px) scaled to thumbnail px: {@code round(bounds / thumbDs)}, clamped to the
-     *  thumbnail extent. Falls back to the viewport center (zero-size box) when there is no usable
-     *  highlight geometry, so a stop missing/blank {@code highlightGeoJson} still yields a token. */
-    private static int[] tokenBox(QuizQuestion q, double thumbDs, int thumbW, int thumbH) {
-        double bx, by, bw, bh;
-        String hj = q.getHighlightGeoJson();
-        ROI roi = null;
-        if (hj != null && !hj.isBlank()) {
-            try {
-                roi = QuizGeometry.fromGeoJson(hj, ImagePlane.getDefaultPlane());
-            } catch (RuntimeException ignore) {
-                roi = null; // malformed geometry: fall back to viewport center below
-            }
-        }
-        if (roi != null) {
-            bx = roi.getBoundsX();
-            by = roi.getBoundsY();
-            bw = roi.getBoundsWidth();
-            bh = roi.getBoundsHeight();
-        } else {
-            QuizQuestion.Viewport vp = q.getViewport();
-            bx = vp != null ? vp.centerX : 0;
-            by = vp != null ? vp.centerY : 0;
-            bw = 0;
-            bh = 0;
-        }
+     *  thumbnail extent. Only called for exportable stops (see {@link #exportableStops}), whose
+     *  ROI is already known to be non-null with positive bounds. */
+    private static int[] tokenBox(ROI roi, double thumbDs, int thumbW, int thumbH) {
+        double bx = roi.getBoundsX();
+        double by = roi.getBoundsY();
+        double bw = roi.getBoundsWidth();
+        double bh = roi.getBoundsHeight();
         int x0 = clamp((int) Math.round(bx / thumbDs), 0, thumbW);
         int y0 = clamp((int) Math.round(by / thumbDs), 0, thumbH);
         int x1 = clamp((int) Math.round((bx + bw) / thumbDs), 0, thumbW);
@@ -223,9 +263,10 @@ public final class PathologyCotExport {
 
     /**
      * Export a reviewed Pathology-CoT tour + its slide into a case folder under {@code outDir}:
-     * {@code thumbnail.jpeg}, one {@code box_N.jpeg}/{@code cyto_box_N.jpeg} crop per NARRATION
-     * stop, {@code conversation.json} ({@link #buildConversation}), and a governance
-     * {@code README.txt}.
+     * {@code thumbnail.jpeg}, one {@code box_N.jpeg}/{@code cyto_box_N.jpeg} crop per exportable
+     * NARRATION stop (same {@code 1..M} set/order as {@link #buildConversation} — see
+     * {@link #exportableStops}), {@code conversation.json} ({@link #buildConversation}), and a
+     * governance {@code README.txt}.
      */
     public static void export(AtlasQuiz reviewed, ImageServer<BufferedImage> server, File outDir) throws IOException {
         outDir.mkdirs();
@@ -255,32 +296,22 @@ public final class PathologyCotExport {
                 RegionRequest.createInstance(server.getPath(), thumbDs, 0, 0, imgW, imgH));
         writeJpeg(thumbnail, new File(outDir, "thumbnail.jpeg"));
 
-        List<QuizQuestion> stops = narrationStops(reviewed);
+        // Same exportableStops() list buildConversation() used to number its tokens/turns — every
+        // stop here gets exactly the crop file conversation.json already references, and nothing
+        // else, so the two halves can never disagree about which box_i/cyto_box_i files exist.
+        List<ExportableStop> stops = exportableStops(reviewed);
         for (int i = 0; i < stops.size(); i++) {
-            QuizQuestion q = stops.get(i);
-            QuizQuestion.Viewport vp = q.getViewport();
-            // peek/inspect classification MUST match buildConversation's (shared isPeek) so the
-            // filename this loop writes is the same one conversation.json references.
+            ExportableStop stop = stops.get(i);
+            QuizQuestion.Viewport vp = stop.question.getViewport();
             boolean peek = isPeek(vp);
             double downsample = vp != null ? vp.downsample : 1.0;
             String fname = boxFileName(i + 1, peek);
 
-            String hj = q.getHighlightGeoJson();
-            if (hj == null || hj.isBlank())
-                continue; // guard: no highlight geometry to crop — the turn is still emitted above
-
-            ROI roi;
-            try {
-                roi = QuizGeometry.fromGeoJson(hj, ImagePlane.getDefaultPlane());
-            } catch (RuntimeException e) {
-                continue; // malformed geometry: skip the crop defensively, the turn is still emitted
-            }
+            ROI roi = stop.roi;
             int boundsX = (int) roi.getBoundsX();
             int boundsY = (int) roi.getBoundsY();
             int boundsW = (int) roi.getBoundsWidth();
             int boundsH = (int) roi.getBoundsHeight();
-            if (boundsW <= 0 || boundsH <= 0)
-                continue;
 
             BufferedImage crop = server.readRegion(
                     RegionRequest.createInstance(server.getPath(), downsample, boundsX, boundsY, boundsW, boundsH));
