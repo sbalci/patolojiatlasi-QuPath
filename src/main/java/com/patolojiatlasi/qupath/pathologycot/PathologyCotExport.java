@@ -170,6 +170,8 @@ public final class PathologyCotExport {
         } catch (RuntimeException e) {
             return null; // malformed geometry
         }
+        if (roi == null)
+            return null; // parsed to no geometry (e.g. an empty/unsupported GeoJSON shape)
         if ((int) roi.getBoundsWidth() <= 0 || (int) roi.getBoundsHeight() <= 0)
             return null;
         return roi;
@@ -267,8 +269,11 @@ public final class PathologyCotExport {
      * NARRATION stop (same {@code 1..M} set/order as {@link #buildConversation} — see
      * {@link #exportableStops}), {@code conversation.json} ({@link #buildConversation}), and a
      * governance {@code README.txt}.
+     *
+     * @return the number of ROI crops written (i.e. the exportable-stop count — see
+     *         {@link #exportableStops}), so a caller can report e.g. "Exported: N ROI".
      */
-    public static void export(AtlasQuiz reviewed, ImageServer<BufferedImage> server, File outDir) throws IOException {
+    public static int export(AtlasQuiz reviewed, ImageServer<BufferedImage> server, File outDir) throws IOException {
         outDir.mkdirs();
 
         int imgW = server.getWidth();
@@ -317,6 +322,7 @@ public final class PathologyCotExport {
                     RegionRequest.createInstance(server.getPath(), downsample, boundsX, boundsY, boundsW, boundsH));
             writeJpeg(crop, new File(outDir, fname));
         }
+        return stops.size();
     }
 
     /** Flattens {@code img} onto an opaque white background before writing as JPEG — JPEG has no
