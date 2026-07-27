@@ -20,7 +20,6 @@ public final class PathologyCotDiscretizer {
     static final int   VIEW_PX          = 1024;
     static final double PEEK_DS_MAX     = 1.5;
     static final double OVERVIEW_AREA_FRAC = 0.60;
-    static final double STATIC_MOVE_FRAC   = 0.5;
     static final int[] MAG_BINS = {5, 10, 20, 40};
 
     private PathologyCotDiscretizer() {}
@@ -51,16 +50,16 @@ public final class PathologyCotDiscretizer {
 
         // --- Stage 1: segment into STATIC / PAN / PEEK runs, split at idle gaps ---
         Run run = null;
-        for (int i = 0; i < path.size() - 1; i++) {
-            int[] a = path.get(i), b = path.get(i + 1);
-            long dt = (long) b[0] - a[0];
-            Mode mode = classify(a);
-            boolean idle = dt > IDLE_GAP_MS;
+        for (int i = 0; i < path.size(); i++) {
+            int[] pt = path.get(i);
+            Mode mode = classify(pt);
+            boolean idle = i > 0 && (long) pt[0] - path.get(i - 1)[0] > IDLE_GAP_MS;
             if (run == null || run.mode != mode || idle) {
                 flush(run, baseMag, imgW, imgH, actions);
                 run = new Run(); run.mode = mode;
             }
-            run.add(a, idle ? 0 : dt);
+            long dtNext = (i + 1 < path.size()) ? (long) path.get(i + 1)[0] - pt[0] : 0;
+            run.add(pt, dtNext > IDLE_GAP_MS ? 0 : dtNext);
         }
         flush(run, baseMag, imgW, imgH, actions);
 
@@ -146,10 +145,11 @@ public final class PathologyCotDiscretizer {
     }
     private static Behavior union(Behavior a, Behavior b) {
         int x = Math.min(a.x(), b.x()), y = Math.min(a.y(), b.y());
-        int x2 = Math.max(a.x()+a.w(), b.x()+b.w()), y2 = Math.max(a.y()+a.h(), b.y()+b.h());
+        long x2 = Math.max((long) a.x()+a.w(), (long) b.x()+b.w());
+        long y2 = Math.max((long) a.y()+a.h(), (long) b.y()+b.h());
         // keep the more specific (peek, else higher-mag) type/bin; combine time + dwell
         Behavior keep = specificity(a) >= specificity(b) ? a : b;
-        return new Behavior(keep.type(), keep.magBin(), x, y, x2 - x, y2 - y,
+        return new Behavior(keep.type(), keep.magBin(), x, y, (int) (x2 - x), (int) (y2 - y),
                 Math.min(a.startMs(), b.startMs()), Math.max(a.endMs(), b.endMs()), a.dwellMs()+b.dwellMs());
     }
     private static int specificity(Behavior b) {  // higher = more specific
@@ -166,7 +166,8 @@ public final class PathologyCotDiscretizer {
     }
     private static boolean contains(Behavior big, Behavior small) {
         return small.x() >= big.x() && small.y() >= big.y()
-                && small.x()+small.w() <= big.x()+big.w() && small.y()+small.h() <= big.y()+big.h();
+                && (long) small.x()+small.w() <= (long) big.x()+big.w()
+                && (long) small.y()+small.h() <= (long) big.y()+big.h();
     }
 
     /** Stage 6: resize bbox to the standard field of view for the mag bin, centered on the action.

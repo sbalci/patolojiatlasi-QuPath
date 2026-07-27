@@ -44,7 +44,39 @@ class PathologyCotDiscretizerTest {
         for (int t=0;t<=1500;t+=250) path.add(p(t, 5000,5000, 4096,4096, 4000));
         int base = 1500 + 70_000;  // > IDLE_GAP_MS
         for (int t=base;t<=base+1500;t+=250) path.add(p(t, 20000,20000, 4096,4096, 4000));
-        assertEquals(2, PathologyCotDiscretizer.discretize(path, 40.0, 100000, 80000).size());
+        List<Behavior> out = PathologyCotDiscretizer.discretize(path, 40.0, 100000, 80000);
+        assertEquals(2, out.size());
+        List<Behavior> sorted = new ArrayList<>(out);
+        sorted.sort(Comparator.comparingLong(Behavior::startMs));
+        Behavior first = sorted.get(0), second = sorted.get(1);
+        assertEquals(5000.0, first.centerX(), 120.0, "first action centerX should stay near the pre-gap centroid");
+        assertEquals(5000.0, first.centerY(), 120.0, "first action centerY should stay near the pre-gap centroid");
+        assertEquals(20000.0, second.centerX(), 120.0, "second action centerX should not be pulled toward the boundary point");
+        assertEquals(20000.0, second.centerY(), 120.0, "second action centerY should not be pulled toward the boundary point");
+        assertTrue(second.startMs() >= 71000,
+                "second action's startMs should not inherit the pre-gap timestamp 1500, was " + second.startMs());
+    }
+
+    @Test void pruneContainingRemovesLargerLowerMag() {
+        // a large 5x inspect (viewport 8192px @ dsMilli 8000, baseMag 40 -> 40/8=5x) held ~1.5s,
+        // immediately followed by a native-res (dsMilli 1000 -> 40x) peek at the same center: the
+        // 5x box fully contains the 40x box, so pruneContaining should drop the lower-mag one.
+        List<int[]> path = new ArrayList<>();
+        for (int t=0;t<=1500;t+=250) path.add(p(t, 7000,7000, 8192,8192, 8000));
+        for (int t=1750;t<=2000;t+=250) path.add(p(t, 7000,7000, 1024,1024, 1000));
+        List<Behavior> out = PathologyCotDiscretizer.discretize(path, 40.0, 100000, 80000);
+        assertEquals(1, out.size());
+        assertEquals(Behavior.Type.PEEK, out.get(0).type());
+    }
+
+    @Test void overviewAreaFilteredWhenBaseMagNull() {
+        // huge viewport (90000x90000 over a 100000x80000 image = 101% of image area) held static;
+        // baseMag is null so the low-mag half of the overview filter (in flush) is skipped, but the
+        // area-based half (stage 2, magBin-independent) must still drop it.
+        List<int[]> path = new ArrayList<>();
+        for (int t=0;t<=1500;t+=250) path.add(p(t, 50000,40000, 90000,90000, 4000));
+        List<Behavior> out = PathologyCotDiscretizer.discretize(path, null, 100000, 80000);
+        assertTrue(out.isEmpty());
     }
 
     @Test void emptyAndSinglePointAreSafe() {
