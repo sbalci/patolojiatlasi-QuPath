@@ -46,11 +46,13 @@ public final class PathologyCotDraft {
         String mag = b.magBin() == null ? "" : b.magBin() + " ";
         return i + ". " + mag + kind;
     }
-    /** downsample the runner should fly to: baseMag/bin (e.g. 10x on 40x → 4.0); fallback 1.0. */
+    /** downsample the runner should fly to: baseMag/bin (e.g. 10x on 40x → 4.0); fallback 1.0/4.0. */
     private static double downsampleFor(Behavior b, Double baseMag) {
+        if (b.type() == Behavior.Type.PEEK) return 1.0;   // peek = near-native res; magBin is a label, not a resize instruction
         if (baseMag != null && b.magBin() != null) {
-            try { return baseMag / Integer.parseInt(b.magBin().replace("x","")); } catch (Exception ignore) {}
+            int m = PathologyCotDiscretizer.magIntSafe(b.magBin());
+            if (m > 0) return baseMag / m;
         }
-        return b.type() == Behavior.Type.PEEK ? 1.0 : 4.0;
+        return 4.0;
     }
 }

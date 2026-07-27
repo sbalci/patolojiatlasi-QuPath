@@ -39,15 +39,6 @@ import java.util.Map;
  */
 public final class PathologyCotExport {
 
-    /**
-     * Native-resolution cutoff below/at which a NARRATION stop is classified as a quick "peek"
-     * rather than a deliberate "inspect". Matches {@code PathologyCotDiscretizer.PEEK_DS_MAX}
-     * (also {@code 1.5}); duplicated here rather than referenced because that constant is
-     * package-private and this class intentionally doesn't couple to the discretizer's internals.
-     * Keep the two values in sync if either changes.
-     */
-    static final double PEEK_DS_MAX = 1.5;
-
     /** Marker {@link PathologyCotDraft} prefixes a recorded diagnosis/decision with in the quiz description. */
     private static final String DX_MARKER = "Kaydedilen tanı/karar:";
 
@@ -178,7 +169,7 @@ public final class PathologyCotExport {
     }
 
     private static boolean isPeek(QuizQuestion.Viewport vp) {
-        return vp != null && vp.downsample <= PEEK_DS_MAX;
+        return vp != null && vp.downsample <= PathologyCotDiscretizer.PEEK_DS_MAX;
     }
 
     /** ROI bbox (slide px) scaled to thumbnail px: {@code round(bounds / thumbDs)}, clamped to the
@@ -217,14 +208,17 @@ public final class PathologyCotExport {
     }
 
     /** Extracts the recorded diagnosis/decision out of a quiz description written by
-     *  {@code PathologyCotDraft} (prefixed with {@link #DX_MARKER}, first line only); falls back to
-     *  the whole (trimmed) description when the marker isn't present. */
+     *  {@code PathologyCotDraft} (prefixed with {@link #DX_MARKER}, first line only, followed by a
+     *  blank line + boilerplate — see {@code PathologyCotDraft.buildDraft}). The description is a
+     *  freely-editable single-line field in the tour author, so when the marker is absent (removed
+     *  or never set) this returns {@code ""} rather than the whole edited text — an edited
+     *  description must never leak verbatim into {@code <conclusion>}. */
     private static String extractDiagnosis(String description) {
         if (description == null)
             return "";
         int idx = description.indexOf(DX_MARKER);
         if (idx < 0)
-            return description.trim();
+            return "";
         String rest = description.substring(idx + DX_MARKER.length());
         int nl = rest.indexOf('\n');
         return (nl >= 0 ? rest.substring(0, nl) : rest).trim();

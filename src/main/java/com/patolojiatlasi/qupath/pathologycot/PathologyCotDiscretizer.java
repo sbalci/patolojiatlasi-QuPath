@@ -72,6 +72,7 @@ public final class PathologyCotDiscretizer {
         mergeByIoU(actions);
         // --- Stage 4: prune a larger action that fully contains a smaller, higher-mag one ---
         pruneContaining(actions);
+        // Stage 5 (StayInspect vs PanInspect separation) intentionally deferred — see class Javadoc.
         // --- Stage 6: normalize each bbox to its magnification's standard field of view ---
         List<Behavior> normalized = new ArrayList<>();
         for (Behavior x : actions) normalized.add(normalize(x, baseMag, imgW, imgH));
@@ -156,7 +157,11 @@ public final class PathologyCotDiscretizer {
         int m = b.magBin() == null ? 0 : magIntSafe(b.magBin());
         return (b.type()==Behavior.Type.PEEK ? 1000 : 0) + m;
     }
-    private static int magIntSafe(String bin) {
+    /** Parses a mag-bin label like {@code "20x"} to its integer magnification, or {@code 0} for a
+     *  null/garbage bin (never throws) — shared with {@link PathologyCotDraft#downsampleFor} so
+     *  there is one source of truth for the "{@code Nx}" label format. Package-private by design. */
+    static int magIntSafe(String bin) {
+        if (bin == null) return 0;
         try { return Integer.parseInt(bin.replace("x","")); } catch (Exception e) { return 0; }
     }
 

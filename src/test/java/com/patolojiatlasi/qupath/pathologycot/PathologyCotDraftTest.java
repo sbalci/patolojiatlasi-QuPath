@@ -21,4 +21,19 @@ class PathologyCotDraftTest {
         assertTrue(q.getDescription().contains("benign"));
         assertTrue(q.isAllowBack());
     }
+
+    @Test void peekAlwaysReconstructsToNativeDownsample() {
+        // Regression for C1: a PEEK whose observed ds rounded to a magBin like "20x" must NOT have
+        // its viewport downsample reconstructed from that bin (baseMag/20 = 2.0 on a 40x slide,
+        // which PathologyCotExport.isPeek — downsample <= 1.5 — would then reclassify as inspect).
+        // Peek is near-native res by definition; magBin is a display label only.
+        List<Behavior> bs = List.of(
+            new Behavior(Behavior.Type.PEEK, "20x", 6000,6000, 1024,1024, 0,300,300));
+        AtlasQuiz q = PathologyCotDraft.buildDraft(bs, "https://x/y.dzi", "y", 40.0, Map.of());
+        assertEquals(1, q.getQuestions().size());
+        QuizQuestion.Viewport vp = q.getQuestions().get(0).getViewport();
+        assertNotNull(vp);
+        assertTrue(vp.downsample <= 1.5, "peek downsample must stay <= PEEK_DS_MAX, was " + vp.downsample);
+        assertEquals(1.0, vp.downsample, 1e-9);
+    }
 }

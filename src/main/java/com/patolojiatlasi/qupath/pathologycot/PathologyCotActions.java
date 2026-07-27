@@ -117,10 +117,14 @@ public final class PathologyCotActions {
             String slideTitle = slideTitle(vd, slideUrl);
             AtlasQuiz draft = PathologyCotDraft.buildDraft(
                     behaviors, slideUrl, slideTitle, fragment.baseMagnification(), fragment.decision());
-            AtlasQuizIO.write(draft, draftFile);
 
+            // Write the sidecar BEFORE the named draft artifact: if writeBehaviors throws partway
+            // through, nothing "complete-looking" has landed yet. Writing the draft last also means
+            // the success Alert below is only reachable once the draft file itself has landed.
             File behaviorsFile = siblingBehaviorsFile(draftFile);
             PathologyCotIO.writeBehaviors(behaviorsFile, fragment, behaviors);
+
+            AtlasQuizIO.write(draft, draftFile);
 
             QuizAuthorWindow.show(qupath);
             // QuizAuthorWindow has no public "load a pack from File" entry point (only its own
@@ -172,13 +176,15 @@ public final class PathologyCotActions {
 
             // Same failure class draftFromRecording's fragment/slide check guards against: a pack
             // authored against a different slide would otherwise silently pair its stored ROIs with
-            // crops from whatever slide happens to be open now. Compared by exact slideUrl (not the
-            // anonymized slideKey match used for fragments -- a quiz pack's slideUrl is already the
-            // plain DZI/file URL QuizSlide itself binds questions with, so a direct string compare is
-            // the right granularity here).
+            // crops from whatever slide happens to be open now. Compared via PathologyCotIO.slideKey
+            // (query-stripped -- e.g. the atlas's "?mpp=" query) rather than raw equality, matching
+            // draftFromRecording's own slide-match check just above; a quiz pack's slideUrl is the
+            // plain DZI/file URL QuizSlide binds questions with, so slideKey-vs-slideKey is the right
+            // granularity here (not the further anonymized slideKey hash used for fragments).
             String packSlideUrl = quiz.getQuestions().isEmpty() ? null : quiz.getQuestions().get(0).getSlideUrl();
             String openSlideUrl = QuizSlide.currentSlideUrl(qupath.getViewer());
-            if (packSlideUrl != null && !packSlideUrl.isBlank() && !packSlideUrl.equals(openSlideUrl)) {
+            if (packSlideUrl != null && !packSlideUrl.isBlank()
+                    && !PathologyCotIO.slideKey(packSlideUrl).equals(PathologyCotIO.slideKey(openSlideUrl))) {
                 Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
                         "Bu paket farklı bir slayta ait görünüyor (kayıtlı slayt açık slaytla eşleşmiyor). "
                                 + "Kırpmalar açık slayttan alınacak. Yine de devam edilsin mi?");
