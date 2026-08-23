@@ -92,6 +92,9 @@ Four question types are supported:
   single portable file you're free to email or hand out, and anything you draw while answering an
   annotation or navigation question is transient — it's cleared again as soon as you move to the
   next/previous question or close the window, so it never ends up saved in the project.
+- **No QuPath? No problem.** [`web-tour-player/`](web-tour-player/) is a single self-contained
+  HTML page that plays the same quiz/tour packs in a plain web browser — see its
+  [README](web-tour-player/README.md) for deployment and CORS notes.
 
 ---
 
