@@ -483,10 +483,9 @@
     // Newer-than-known format: keep playing (unknown fields are ignored) but say so visibly.
     var fv = typeof data.formatVersion === 'number' ? data.formatVersion : null;
     var newer = fv !== null && fv > KNOWN_FORMAT_VERSION;
-    els.tourTitle.textContent = title + (newer
-        ? ' — paket biçimi v' + fv + ' (bu oynatıcı v' + KNOWN_FORMAT_VERSION
-          + " bilir; bazı alanlar yorumlanamayabilir)"
-        : '');
+    els.tourTitle.textContent = !newer ? title
+        : (title ? title + ' ' : '') + '— paket biçimi v' + fv + ' (bu oynatıcı v'
+          + KNOWN_FORMAT_VERSION + ' bilir; bazı alanlar yorumlanamayabilir)';
     els.progressLabel.textContent = '';
 
     hide(els.dropzone);

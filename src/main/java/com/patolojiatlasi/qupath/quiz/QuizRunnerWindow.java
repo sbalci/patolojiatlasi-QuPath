@@ -421,7 +421,7 @@ public class QuizRunnerWindow {
         annotationBaselineViewer = null;
         annotationBaselineImageData = null;
 
-        progressLabel.setText((tourMode ? "Durak " : "Soru ") + currentIndex + " / " + n);
+        refreshProgressLabel();
         promptLabel.setText(q.getPrompt());
         setRevealVisible(false);
         setSlideStatus(null);
@@ -483,8 +483,8 @@ public class QuizRunnerWindow {
         // has been issued (see the stillWanted supplier passed to openSlideAsync below).
         final int myToken = ++loadToken;
 
-        String current = QuizSlide.currentSlideUrl(qupath.getViewer());
-        if (q.getSlideUrl() != null && q.getSlideUrl().equals(current)) {
+        String currentUrl = QuizSlide.currentSlideUrl(qupath.getViewer());
+        if (q.getSlideUrl() != null && q.getSlideUrl().equals(currentUrl)) {
             setControlsDisabled(false);
             afterSlideReady(q);
             return;
