@@ -84,3 +84,38 @@ their extension/server repos → clean-room only**).
   reflects into QuPath private internals (fragile), and our audience usually wants analysis tools.
 - **C5 Web tour player** (M–L, cross-repo) — play portable tour JSON on patolojiatlasi.com
   (their Zlib-licensed React viewer is a reference impl; 76 % preferred web).
+
+## Candidates from the CHCAPI review (2026-08-23 — UNRANKED, user decides ordering)
+
+Source: `docs/superpowers/2026-08-23-chcapi-feature-review.md` (Google's archived
+`qupath-chcapi-extension`, GPL-3.0-or-later → clean-room only; QuPath 0.3.0-era, dead since
+2021 — reviewed for its remote-slide-streaming patterns, not for use).
+
+- **G1 Persist parsed DZI descriptor per case** (S) — cache width/height/tileSize/overlap/
+  format/mpp in curated-project entries so slides open without the initial `.dzi` fetch; with a
+  refresh path (their `.mtd` cache had none and went silently stale).
+- **G2 Debug tile overlay** (S) — opt-in system property paints tile boundaries + level/col/row
+  on composited tiles in `DziImageServer`; cheap grid-bug diagnostic.
+- **G3 Deliberate tile-miss contract** (M) — today any non-200 → blank white, so a transient
+  network blip can be cached as a permanently white tile; split transient (re-query) from
+  definitive 404 (sparse-white). VERIFY QuPath 0.6 `AbstractTileableImageServer` null-vs-throw
+  caching semantics first.
+
+## Resource watchlist — webcam gaze channel (2026-08-23, user-requested; UNRANKED)
+
+Source: `brainstorming/webcam-eye-tracking-tools.md` (licenses + integration feasibility verified
+2026-08-23). Motivation: viewport logs show what was on screen, not where the eye was; mouse↔gaze
+coupling is only moderate (Raghunath 2012). Webcam gaze = zero-hardware middle tier between our
+viewport logging and Tobii-grade trackers, feeding the Pathology-CoT engine / blinded focus
+recording with a true gaze channel. Needs its own consent opt-in (webcam ≠ blinded viewport).
+
+- **W1 EyeTrax gaze sidecar for QuPath** (M) — MIT Python webcam gaze estimator
+  (github.com/ck-zhang/eyetrax): sidecar venv streams primary-screen (x,y) → JVM maps via the
+  existing mouse pipeline (`componentPointToImagePoint`) → gaze channel in the focus fragment
+  (schema `/5` → `/6`). Modal fullscreen calibration = explicit pre-session step. **No published
+  accuracy — in-house validation is a prerequisite for any scientific claim.**
+- **W2 WebGazer.js for the web atlas** (M, cross-repo, **GPL-3.0-or-later**) — browser-native
+  self-calibrating gaze (github.com/brownhci/WebGazer, Papoutsaki et al. IJCAI-16, ~4.17°/
+  100–250 px); pairs with C5 web tour player via OpenSeadragon coordinate APIs. Load as an
+  unmodified external script only — never bundle into MIT code. Upstream maintenance officially
+  ended 2026-02-24 (v3.5.3 final). NOT viable inside QuPath (JavaFX WebView lacks getUserMedia).
