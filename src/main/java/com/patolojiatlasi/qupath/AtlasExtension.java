@@ -149,8 +149,10 @@ public class AtlasExtension implements QuPathExtension {
             quizAuthorItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizAuthorWindow.show(qupath));
             MenuItem tourPlayItem = new MenuItem("Rehberli tur oynat…");
             tourPlayItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizRunnerWindow.show(qupath, true));
+            MenuItem quizBrowseItem = new MenuItem("Serbest inceleme (gizli cevaplar)…");
+            quizBrowseItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizBrowseWindow.show(qupath));
             Menu quizMenu = new Menu("Sınav / Quiz");
-            quizMenu.getItems().addAll(quizTakeItem, quizAuthorItem, tourPlayItem);
+            quizMenu.getItems().addAll(quizTakeItem, quizAuthorItem, tourPlayItem, quizBrowseItem);
 
             atlas.getItems().addAll(
                     browseItem,
