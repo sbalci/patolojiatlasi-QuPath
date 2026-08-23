@@ -26,6 +26,13 @@ to these sites:
 - **Türkçe:** [patolojiatlasi.com](https://www.patolojiatlasi.com/)
 - **English:** [histopathologyatlas.com](https://www.histopathologyatlas.com/)
 
+**Related work:** [QuPath Edu / OpenMicroanatomy](https://github.com/openmicroanatomy)
+(Yli-Hallila et al., *Journal of Anatomy* 2025;246(5):846–856,
+[doi:10.1111/joa.14172](https://doi.org/10.1111/joa.14172)) is a server-based QuPath teaching
+extension (workspaces, hidden-answer annotations, slide tours). This extension serves the same
+educational space with a deliberately serverless design: slides stream read-only from the public
+atlas, and every study artifact (quiz/tour packs, collections, recordings) is a portable local file.
+
 ---
 
 ## What it does

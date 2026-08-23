@@ -19,7 +19,7 @@
 | 3 | **Catalogue Coverage & QC Dashboard** | M | ✅ shipped (merged to master, unpushed) |
 | 4 | **Related-Content Navigator** | S | ✅ shipped (merged to master, unpushed) |
 | 5 | **Portable Collections / Bookmarks-History** | S | ✅ shipped (merged to master, unpushed) |
-| 6 | **Guided Teaching Tour** | M | queued |
+| 6 | **Guided Teaching Tour** | M | ✅ shipped (merged to master 3bcf68c, unpushed) |
 
 > **Out-of-band (user-requested 2026-07-20, ahead of #6): ✅ SHIPPED** — blinded temporal focus
 > recording: records viewed areas + dwell time silently (no in-app heatmap, data-only) for unbiased
@@ -59,3 +59,28 @@
 11. **Self-Assessment log** (M) — rate case → anonymized file; local review log feeds a progress view.
 12. **Agreement Map** (L) — draw/label ROI → anonymized GeoJSON (focus-contribution pattern);
     accumulate votes → per-pixel consensus overlay (reuses `FocusMap` grid). No writable backend.
+
+> **Also shipped out-of-band (2026-07-26): Pathology-CoT data engine** — clean-room AI Session
+> Recorder (Wang et al., *Nat Biomed Eng* 2026): recorded navigation → inspect/peek discretizer →
+> `behaviors.json` → reviewable tour draft → case-folder export. Merged to master `9914785`,
+> unpushed. See `docs/superpowers/plans/2026-07-26-pathology-cot-data-engine.md`.
+
+## Candidates from the QuPath Edu review (2026-08-23 — UNRANKED, user decides ordering)
+
+Source: `docs/superpowers/2026-08-23-qupath-edu-feature-review.md` (Yli-Hallila et al., *J Anat*
+2025;246(5):846–856, doi:10.1111/joa.14172 — survey-backed evidence per candidate; **no LICENSE on
+their extension/server repos → clean-room only**).
+
+- **C1 Annotation auto-scoring on reveal** (S) — IoU % + hit/miss (IoU > 0.3 or containment, the
+  Pathology-CoT criterion) of the learner's drawn annotation vs the stop's reference geometry, in
+  the quiz runner's ANNOTATION/NAVIGATION reveal. Leapfrogs QuPath Edu's unshipped exam
+  proof-of-concept; measurement-only output.
+- **C2 Hidden-answer browse mode** (M) — quiz pack rendered as clickable regions on a freely
+  browsed slide; click → prompt + "Cevabı göster". Their best-rated feature (47.5/50; 86.7 %
+  prefer concealed-then-reveal). Complements #10/#11.
+- **C3 Per-case description pane** (S) — Markdown case/slide description in the atlas browser /
+  on open (their 2nd-best feature, 43.5/50); catalog-metadata-fed, no WebView.
+- **C4 Basit görünüm / study mode** (M, deprioritized) — UI simplification; their approach
+  reflects into QuPath private internals (fragile), and our audience usually wants analysis tools.
+- **C5 Web tour player** (M–L, cross-repo) — play portable tour JSON on patolojiatlasi.com
+  (their Zlib-licensed React viewer is a reference impl; 76 % preferred web).
