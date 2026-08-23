@@ -37,7 +37,7 @@ public class AtlasCatalog {
 
     private static final Set<String> WANTED = Set.of(
             "stainname", "reponame", "titleEN", "titleTR", "organEN", "speciality",
-            "type", "url", "screenshot");
+            "type", "url", "screenshot", "descriptionTR", "descriptionEN");
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
@@ -46,28 +46,45 @@ public class AtlasCatalog {
 
     /** Load the catalog snapshot bundled inside the extension jar (offline, instant). */
     public static List<AtlasCase> loadBundled() {
-        List<AtlasCase> cases = new ArrayList<>();
         try (InputStream in = AtlasCatalog.class.getResourceAsStream("/catalog.json")) {
             if (in == null) {
                 logger.warn("Bundled catalog.json not found on classpath");
-                return cases;
+                return new ArrayList<>();
             }
             JsonObject root = JsonParser.parseReader(
                     new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
-            // Optional catalog-wide default pixel size (µm/px) applied to any image without its
-            // own "mpp". Absent (0) = no calibration, so nothing wrong is imposed by default.
-            double defaultMpp = d(root, "defaultMpp");
-            JsonArray arr = root.getAsJsonArray("cases");
-            for (JsonElement el : arr) {
-                JsonObject o = el.getAsJsonObject();
-                double mpp = o.has("mpp") ? d(o, "mpp") : defaultMpp;
-                cases.add(new AtlasCase(
-                        s(o, "reponame"), s(o, "stainname"), s(o, "image"),
-                        s(o, "titleEN"), s(o, "titleTR"), s(o, "organEN"),
-                        s(o, "speciality"), s(o, "type"), s(o, "dzi"), s(o, "thumb"), mpp));
-            }
+            return parseBundled(root);
         } catch (Exception e) {
             logger.error("Failed to read bundled catalog: {}", e.getMessage(), e);
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * Build cases from an already-parsed bundled-catalog root object (the {@code {"source": ...,
+     * "cases": [...]}} shape of {@code catalog.json}; {@code "defaultMpp"} is an optional
+     * catalog-wide field -- currently absent from the shipped {@code catalog.json}, but read here
+     * so it takes effect as soon as a future snapshot supplies it). Split out of
+     * {@link #loadBundled()} so tests can exercise the Gson-object parsing (including the optional
+     * {@code descriptionTR}/{@code descriptionEN} fields) without a classpath resource.
+     */
+    static List<AtlasCase> parseBundled(JsonObject root) {
+        List<AtlasCase> cases = new ArrayList<>();
+        // Optional catalog-wide default pixel size (µm/px) applied to any image without its
+        // own "mpp". Absent (0) = no calibration, so nothing wrong is imposed by default.
+        double defaultMpp = d(root, "defaultMpp");
+        JsonArray arr = root.getAsJsonArray("cases");
+        for (JsonElement el : arr) {
+            JsonObject o = el.getAsJsonObject();
+            double mpp = o.has("mpp") ? d(o, "mpp") : defaultMpp;
+            // "descriptionTR"/"descriptionEN" are optional, forward-compatible keys: not
+            // present in today's bundled catalog.json, read here so they light up as soon
+            // as the catalog snapshot starts supplying them.
+            cases.add(new AtlasCase(
+                    s(o, "reponame"), s(o, "stainname"), s(o, "image"),
+                    s(o, "titleEN"), s(o, "titleTR"), s(o, "organEN"),
+                    s(o, "speciality"), s(o, "type"), s(o, "dzi"), s(o, "thumb"), mpp,
+                    s(o, "descriptionTR"), s(o, "descriptionEN")));
         }
         return cases;
     }
@@ -87,7 +104,11 @@ public class AtlasCatalog {
      * Minimal parser for the atlas list.yaml. The file is machine-generated with a
      * very regular shape (a top-level list of mappings whose fields are simple
      * scalars), so we read the scalar fields we need line by line and ignore the
-     * nested sequences (authors, categories).
+     * nested sequences (authors, categories). Being line-based, it only understands
+     * single-line scalar values (plain or quoted) — YAML block/folded scalars
+     * ({@code |}, {@code >}) or multi-line strings for {@code descriptionTR}/
+     * {@code descriptionEN} (or any other key) are NOT supported and will not parse
+     * as expected.
      */
     static List<AtlasCase> parseList(String yaml) {
         List<Map<String, String>> records = new ArrayList<>();
@@ -115,7 +136,8 @@ public class AtlasCatalog {
             AtlasCase c = new AtlasCase(
                     r.get("reponame"), r.get("stainname"), image,
                     r.get("titleEN"), r.get("titleTR"), r.get("organEN"),
-                    r.get("speciality"), r.get("type"), dzi, r.get("screenshot"));
+                    r.get("speciality"), r.get("type"), dzi, r.get("screenshot"), 0.0,
+                    r.get("descriptionTR"), r.get("descriptionEN"));
             String key = c.getReponame() + "/" + image;
             AtlasCase existing = byKey.get(key);
             if (existing == null || (!existing.isPublished() && c.isPublished()))

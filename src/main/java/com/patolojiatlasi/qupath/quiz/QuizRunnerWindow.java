@@ -5,6 +5,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import javafx.geometry.Insets;
@@ -32,12 +33,15 @@ import javafx.stage.Stage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.locationtech.jts.geom.Geometry;
+
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.gui.viewer.QuPathViewer;
 import qupath.lib.images.ImageData;
 import qupath.lib.objects.PathObject;
 import qupath.lib.objects.hierarchy.PathObjectHierarchy;
 import qupath.lib.regions.ImagePlane;
+import qupath.lib.roi.ROIs;
 import qupath.lib.roi.interfaces.ROI;
 
 /**
@@ -578,6 +582,25 @@ public class QuizRunnerWindow {
         }
     }
 
+    /**
+     * The learner's transient annotations for the current ANNOTATION/NAVIGATION question -- i.e.
+     * {@link #annotationBaseline}'s complement in the pinned {@link #annotationBaselineViewer}'s
+     * current annotation objects -- or an empty set when there is no valid baseline (mirrors the
+     * same guards as {@link #clearTransientAnnotations()}: an invalid baseline, or the pinned
+     * viewer's image having changed since capture, both fail safe to "nothing drawn" rather than
+     * diffing against the wrong slide).
+     */
+    private Set<PathObject> learnerDrawnAnnotations() {
+        if (!annotationBaselineValid || annotationBaselineViewer == null)
+            return Set.of();
+        ImageData<BufferedImage> d = annotationBaselineViewer.getImageData();
+        if (d == null || d != annotationBaselineImageData)
+            return Set.of();
+        Set<PathObject> drawn = new HashSet<>(d.getHierarchy().getAnnotationObjects());
+        drawn.removeAll(annotationBaseline);
+        return drawn;
+    }
+
     /** "Göster": reveal the answer/explanation area for the current question. Idempotent. */
     private void revealAnswer() {
         if (quiz == null || currentIndex < 1)
@@ -605,7 +628,16 @@ public class QuizRunnerWindow {
                 ROI roi = parseGeometrySafely(q.getReferenceGeometryGeoJson());
                 if (roi != null) {
                     showRevealOverlay(roi);
-                    revealAnswerLabel.setText("Referans bölge slayt üzerinde gösteriliyor.");
+                    StringBuilder sb = new StringBuilder("Referans bölge slayt üzerinde gösteriliyor.");
+                    Geometry learner = QuizScoring.unionOf(learnerDrawnAnnotations());
+                    if (learner == null) {
+                        sb.append("\nÇizim yapılmadı — karşılaştırma yok.");
+                    } else {
+                        QuizScoring.Score s = QuizScoring.score(learner, roi.getGeometry());
+                        if (s != null)
+                            sb.append("\n").append(QuizScoring.formatScoreLine(s));
+                    }
+                    revealAnswerLabel.setText(sb.toString());
                 } else {
                     revealAnswerLabel.setText("Referans geometri mevcut değil.");
                 }
@@ -615,12 +647,28 @@ public class QuizRunnerWindow {
                 if (roi != null) {
                     showRevealOverlay(roi);
                     QuPathViewer viewer = qupath.getViewer();
+                    StringBuilder sb = new StringBuilder("Hedef bölgeye gidildi.");
                     if (viewer != null) {
+                        // Captured BEFORE the recenter below, so it reflects the learner's own
+                        // navigation rather than the reveal's recentred viewport.
+                        java.awt.Shape shape = viewer.getDisplayedRegionShape();
+                        if (shape != null) {
+                            java.awt.Rectangle vb = shape.getBounds();
+                            Geometry viewport = ROIs.createRectangleROI(vb.getX(), vb.getY(),
+                                    vb.getWidth(), vb.getHeight(), ImagePlane.getDefaultPlane()).getGeometry();
+                            QuizScoring.Score s = QuizScoring.score(viewport, roi.getGeometry());
+                            if (s != null) {
+                                String pct = String.format(Locale.US, "%.1f", s.iou() * 100.0);
+                                sb.append(s.hit()
+                                        ? "\nHedef bölge görüş alanınızdaydı (IoU %" + pct + ")."
+                                        : "\nHedef bölge görüş alanınızda değildi (IoU %" + pct + ").");
+                            }
+                        }
                         double cx = roi.getBoundsX() + roi.getBoundsWidth() / 2.0;
                         double cy = roi.getBoundsY() + roi.getBoundsHeight() / 2.0;
                         viewer.setDownsampleFactor(viewer.getDownsampleFactor(), cx, cy);
                     }
-                    revealAnswerLabel.setText("Hedef bölgeye gidildi.");
+                    revealAnswerLabel.setText(sb.toString());
                 } else {
                     revealAnswerLabel.setText("Hedef geometri mevcut değil.");
                 }

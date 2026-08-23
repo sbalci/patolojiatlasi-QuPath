@@ -22,6 +22,8 @@ public class AtlasCase {
     private final String dziUrl;
     private final String thumbUrl;
     private final double mpp;         // pixel size in microns/px; 0 = unknown
+    private final String descriptionTR; // optional; "" = not provided by the catalog
+    private final String descriptionEN; // optional; "" = not provided by the catalog
 
     public AtlasCase(String reponame, String stainname, String image, String titleEN,
                      String titleTR, String organEN, String speciality, String type,
@@ -33,6 +35,21 @@ public class AtlasCase {
     public AtlasCase(String reponame, String stainname, String image, String titleEN,
                      String titleTR, String organEN, String speciality, String type,
                      String dziUrl, String thumbUrl, double mpp) {
+        this(reponame, stainname, image, titleEN, titleTR, organEN, speciality, type,
+                dziUrl, thumbUrl, mpp, null, null);
+    }
+
+    /**
+     * Full constructor, adding the two optional catalog-fed description fields (a short
+     * free-text blurb, Turkish and/or English). Neither field exists in today's bundled
+     * {@code catalog.json} or upstream {@code list.yaml} yet; both are forward-compatible
+     * plumbing that lights up once the catalog starts supplying them. Either may be
+     * {@code null}.
+     */
+    public AtlasCase(String reponame, String stainname, String image, String titleEN,
+                     String titleTR, String organEN, String speciality, String type,
+                     String dziUrl, String thumbUrl, double mpp,
+                     String descriptionTR, String descriptionEN) {
         this.reponame = nz(reponame);
         this.stainname = nz(stainname);
         this.image = image == null || image.isBlank() ? "HE" : image;
@@ -44,6 +61,8 @@ public class AtlasCase {
         this.dziUrl = nz(dziUrl);
         this.thumbUrl = nz(thumbUrl);
         this.mpp = mpp > 0 ? mpp : 0.0;
+        this.descriptionTR = nz(descriptionTR);
+        this.descriptionEN = nz(descriptionEN);
     }
 
     public String getReponame() {
@@ -60,6 +79,23 @@ public class AtlasCase {
 
     public String getOrganEN() {
         return organEN;
+    }
+
+    public String getSpeciality() {
+        return speciality;
+    }
+
+    /**
+     * Short catalog-supplied description: Turkish preferred when non-blank, else English,
+     * else {@code ""} (never {@code null}). Neither field is populated by today's catalog,
+     * so this returns {@code ""} for every current case.
+     */
+    public String getDescription() {
+        if (!descriptionTR.isBlank())
+            return descriptionTR;
+        if (!descriptionEN.isBlank())
+            return descriptionEN;
+        return "";
     }
 
     public boolean isPublished() {

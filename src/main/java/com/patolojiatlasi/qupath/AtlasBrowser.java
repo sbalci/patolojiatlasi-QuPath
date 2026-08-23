@@ -4,6 +4,7 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import javafx.application.Platform;
@@ -17,6 +18,7 @@ import javafx.scene.control.Hyperlink;
 import javafx.scene.control.Label;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextField;
@@ -62,6 +64,8 @@ public class AtlasBrowser {
     private final ProgressIndicator progress = new ProgressIndicator();
     private final ImageView thumbView = new ImageView();
     private final Label infoLabel = new Label();
+    private final Label descriptionLabel = new Label();
+    private final ScrollPane descriptionScroll = new ScrollPane(descriptionLabel);
 
     private List<AtlasCase> allCases;
 
@@ -155,7 +159,16 @@ public class AtlasBrowser {
         thumbView.setPreserveRatio(true);
         infoLabel.setWrapText(true);
         infoLabel.setPadding(new Insets(6, 0, 0, 0));
-        VBox preview = new VBox(6, thumbView, infoLabel);
+        descriptionLabel.setWrapText(true);
+        descriptionLabel.setStyle("-fx-text-fill: #666666; -fx-font-size: 11px;");
+        descriptionLabel.setMaxWidth(210);
+        descriptionLabel.setVisible(false);
+        descriptionLabel.setManaged(false);
+        descriptionScroll.setFitToWidth(true);
+        descriptionScroll.setPrefViewportHeight(120);
+        descriptionScroll.setVisible(false);
+        descriptionScroll.setManaged(false);
+        VBox preview = new VBox(6, thumbView, infoLabel, descriptionScroll);
         preview.setPadding(new Insets(8));
         preview.setPrefWidth(240);
 
@@ -285,13 +298,27 @@ public class AtlasBrowser {
         if (c == null) {
             thumbView.setImage(null);
             infoLabel.setText("");
+            descriptionLabel.setText("");
+            descriptionLabel.setVisible(false);
+            descriptionLabel.setManaged(false);
+            descriptionScroll.setVisible(false);
+            descriptionScroll.setManaged(false);
             return;
         }
         infoLabel.setText(c.getTitle()
                 + "\n\nCategory: " + c.getCategory()
                 + (c.getOrganEN().isBlank() ? "" : "\nOrgan: " + c.getOrganEN())
+                + (c.getSpeciality().isBlank() ? "" : "\nSpeciality: " + c.getSpeciality())
                 + "\nStain: " + c.getImage()
+                + (c.getMpp() > 0 ? "\nmpp: " + String.format(Locale.US, "%.4f", c.getMpp()) + " µm/px" : "")
                 + "\n" + (c.isPublished() ? "Published" : "Unpublished"));
+        String description = c.getDescription();
+        boolean hasDescription = !description.isBlank();
+        descriptionLabel.setText(description);
+        descriptionLabel.setVisible(hasDescription);
+        descriptionLabel.setManaged(hasDescription);
+        descriptionScroll.setVisible(hasDescription);
+        descriptionScroll.setManaged(hasDescription);
         try {
             if (!c.getThumbUrl().isBlank())
                 thumbView.setImage(new Image(c.getThumbUrl(), 220, 0, true, true, true));

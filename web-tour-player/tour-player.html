@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<!--
+  Patoloji Atlası — standalone web tour/quiz player
+  ===================================================
+
+  Purpose
+  -------
+  A single, dependency-free (besides OpenSeadragon, loaded from a CDN) HTML page that plays a
+  quiz-pack / guided-tour-pack JSON file produced by the "Patoloji Atlası" QuPath extension's
+  author window (Extensions → Patoloji Atlası → Sınav / Quiz → Hazırla…, or the guided-tour
+  author). It lets anyone step through the same stops — slide, viewport, prompt, and (on
+  "Göster") the correct answer / model answer / reference-region overlay — in a plain web
+  browser, with no QuPath installation and no server component beyond the DZI image host and
+  wherever this file itself is hosted.
+
+  Pack contract (produced by com.patolojiatlasi.qupath.quiz.AtlasQuizIO, consumed verbatim)
+  -------------------------------------------------------------------------------------------
+  {
+    formatVersion: 1 | 2,
+    title: string, description: string, allowBack: boolean,
+    questions: [{
+      id, type: "MCQ" | "FREETEXT" | "ANNOTATION" | "NAVIGATION" | "NARRATION",
+      slideUrl, slideTitle, prompt, explanation,
+      viewport: { downsample, centerX, centerY } | null,   // full-res slide-pixel units
+      options: string[] | null, correctIndex: number | null,   // MCQ
+      modelAnswer: string | null,                               // FREETEXT
+      instruction: string | null,                               // ANNOTATION
+      referenceGeometryGeoJson: string | null,                  // ANNOTATION — bare GeoJSON geometry
+      targetGeometryGeoJson: string | null,                     // NAVIGATION — bare GeoJSON geometry
+      highlightGeoJson: string | null                           // optional, any type — bare GeoJSON geometry
+    }]
+  }
+  The three *GeometryGeoJson fields are JSON-encoded STRINGS holding a bare GeoJSON geometry
+  object (e.g. "{\"type\":\"Polygon\",\"coordinates\":[[[x,y],...]]}"), in full-resolution
+  slide-pixel coordinates — exactly what QuPath's ROI GeoJSON adapter writes (an optional extra
+  "plane" key may be present and is ignored here). This page parses them defensively: a
+  malformed or unparseable geometry simply shows no overlay — it never raises an error dialog.
+
+  Clean-room note & prior art
+  ----------------------------
+  This player is an independent, from-scratch implementation. OpenMicroanatomy / QuPath Edu
+  (Yli-Hallila et al., Journal of Anatomy 2025;246(5):846-856, doi:10.1111/joa.14172) ships a
+  comparable Zlib-licensed web client for its own server-hosted "slide tour" workspaces; it is
+  cited here as prior art in the same design space — no code from that project was viewed or
+  copied while writing this file. This player instead consumes a portable, serverless quiz/tour
+  JSON pack (see contract above) and needs nothing beyond the pack file itself, this HTML file,
+  and read access to the slides' DZI tile host.
+
+  Usage
+  -----
+    tour-player.html?tour=<url-to-a-pack.json>   — fetches and plays the pack directly
+    tour-player.html                              — pick a pack with the "Paket yükle…" button, or
+                                                      drag a *.json pack file onto the page (this
+                                                      path also works when opened from a local
+                                                      file:// URL, with no server at all)
+
+  OpenSeadragon is loaded from jsDelivr pinned to an exact release (not the floating "@4" major
+  tag) with a Subresource Integrity hash, so the script tag fails closed instead of silently
+  running a future, unreviewed CDN build; bump both the URL and the `integrity` hash together
+  when upgrading OpenSeadragon.
+
+  See web-tour-player/README.md for deployment notes, the CORS finding for the atlas's DZI host,
+  and known limitations (geometry overlays render as bounding-box outlines, not exact polygons).
+
+  License: MIT (same as the rest of this repository — see LICENSE).
+-->
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patoloji Atlası — Tur / Sınav Oynatıcı</title>
+<style>
+  :root {
+    --bg: #f6f5f2;
+    --panel-bg: #ffffff;
+    --ink: #1f2933;
+    --muted: #5b6b79;
+    --accent: #0f6e6e;
+    --accent-dark: #0b5454;
+    --border: #d8dee3;
+    --danger: #b3261e;
+    --danger-bg: #fbeceb;
+    --ok: #1e7d32;
+    --ok-bg: #eaf6ec;
+    --warn: #f0ad4e;
+    --radius: 6px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    background: var(--panel-bg);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .topbar .tour-title { font-weight: 600; }
+  .topbar .spacer { flex: 1 1 auto; }
+  .progress-label { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  button {
+    font: inherit;
+    padding: 8px 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: #fff;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent-dark); }
+  .btn-primary:hover:not(:disabled) { background: var(--accent-dark); }
+
+  .dropzone {
+    flex: 1;
+    margin: 24px;
+    border: 2px dashed var(--border);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+    background: var(--panel-bg);
+    transition: border-color .15s, background .15s;
+  }
+  .dropzone.drag { border-color: var(--accent); background: #eef6f6; }
+  .dropzone .dz-inner { max-width: 480px; }
+  .dropzone p { color: var(--muted); line-height: 1.5; }
+  .dropzone .link { color: var(--accent); text-decoration: underline; cursor: pointer; }
+  .load-error {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    background: var(--danger-bg);
+    color: var(--danger);
+    text-align: left;
+    white-space: pre-wrap;
+  }
+
+  .intro-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 32px;
+  }
+  .intro-panel .intro-box { max-width: 560px; }
+  .intro-panel h1 { margin: 0 0 12px; font-size: 1.5em; }
+  .intro-panel p { color: var(--muted); line-height: 1.6; white-space: pre-wrap; }
+
+  .player { flex: 1; display: flex; min-height: 0; }
+  .viewer { flex: 1 1 auto; min-width: 0; background: #000; position: relative; }
+  .sidepanel {
+    width: 360px;
+    flex: 0 0 360px;
+    overflow-y: auto;
+    padding: 16px;
+    background: var(--panel-bg);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  @media (max-width: 760px) {
+    .player { flex-direction: column; }
+    .viewer { height: 46vh; flex: none; }
+    .sidepanel { width: 100%; flex: 1 1 auto; border-left: none; border-top: 1px solid var(--border); }
+  }
+
+  .slide-status {
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    background: var(--danger-bg);
+    color: var(--danger);
+  }
+  .highlight-toggle { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+
+  .prompt { font-weight: 600; line-height: 1.4; margin: 0; }
+
+  .input-area { display: flex; flex-direction: column; gap: 6px; }
+  .input-area > p { margin: 0; color: var(--muted); }
+  .mcq-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+  }
+  .mcq-option input { margin-top: 3px; }
+  .mcq-option.correct { border-color: var(--ok); background: var(--ok-bg); }
+  .mcq-option.incorrect { border-color: var(--danger); background: var(--danger-bg); }
+  .freetext-input {
+    width: 100%;
+    font: inherit;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    resize: vertical;
+  }
+
+  .reveal-area { display: flex; flex-direction: column; gap: 6px; }
+  .reveal-area hr { border: none; border-top: 1px solid var(--border); margin: 4px 0; }
+  .reveal-answer { white-space: pre-wrap; margin: 0; }
+  .reveal-explanation { white-space: pre-wrap; margin: 0; font-style: italic; color: var(--muted); }
+
+  .nav-buttons {
+    margin-top: auto;
+    padding-top: 10px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    border-top: 1px solid var(--border);
+  }
+
+  [hidden] { display: none !important; }
+
+  /* Geometry overlays: positioned/sized by OpenSeadragon via addOverlay(el, viewportRect) */
+  .geo-overlay { box-sizing: border-box; pointer-events: none; }
+  .geo-overlay.reveal-box { border: 2px solid #d9534f; background: rgba(217, 83, 79, .10); }
+  .geo-overlay.highlight-box { border: 2px dashed var(--warn); background: rgba(240, 173, 78, .12); }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="topbar">
+    <button id="loadFileBtn" type="button">Paket yükle…</button>
+    <span id="tourTitle" class="tour-title"></span>
+    <div class="spacer"></div>
+    <span id="progressLabel" class="progress-label"></span>
+    <input type="file" id="fileInput" accept="application/json,.json" hidden>
+  </div>
+
+  <div id="dropzone" class="dropzone">
+    <div class="dz-inner">
+      <p>
+        Bir tur/sınav paketi (<code>.json</code>) buraya sürükleyip bırakın,
+        <span class="link" id="dzPickLink">bir dosya seçin</span>,
+        veya sayfayı <code>?tour=&lt;paket-adresi&gt;</code> parametresiyle açın.
+      </p>
+      <p id="loadError" class="load-error" hidden></p>
+    </div>
+  </div>
+
+  <div id="introPanel" class="intro-panel" hidden>
+    <div class="intro-box">
+      <h1 id="introTitle"></h1>
+      <p id="introDesc"></p>
+      <button id="startBtn" type="button" class="btn-primary">Başla</button>
+    </div>
+  </div>
+
+  <div id="playerPanel" class="player" hidden>
+    <div id="viewer" class="viewer"></div>
+    <aside class="sidepanel">
+      <p id="slideStatus" class="slide-status" hidden></p>
+      <label id="highlightToggleWrap" class="highlight-toggle" hidden>
+        <input type="checkbox" id="highlightToggle" checked> Vurguyu göster
+      </label>
+      <p id="prompt" class="prompt"></p>
+      <div id="inputArea" class="input-area"></div>
+      <div id="revealArea" class="reveal-area" hidden>
+        <hr>
+        <p id="revealAnswer" class="reveal-answer"></p>
+        <p id="revealExplanation" class="reveal-explanation"></p>
+      </div>
+      <div class="nav-buttons">
+        <button id="prevBtn" type="button">Önceki</button>
+        <button id="revealBtn" type="button" class="btn-primary">Göster</button>
+        <button id="nextBtn" type="button">Sonraki</button>
+      </div>
+    </aside>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/openseadragon@4.1.1/build/openseadragon/openseadragon.min.js"
+        integrity="sha384-SslUh5K0qRJYyxhoVK+XxSxjS0BNDdgc3cLvY4+nMEmnLtgdEK3UaBTDaHOk8T9S"
+        crossorigin="anonymous"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ---------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------
+  var state = {
+    quiz: null,             // the loaded pack (parsed JSON, AtlasQuiz shape)
+    currentIndex: 0,        // 1-based; 0 = nothing shown yet
+    viewer: null,            // OpenSeadragon.Viewer, created lazily on first stop
+    currentSlideUrl: null,   // query-stripped slideUrl currently open in `viewer`
+    loadToken: 0,            // guards against overlapping applySlide() calls
+    opening: false,          // true while a slide open is in flight
+    mcqRadios: null,         // current stop's MCQ <input type=radio> elements, in option order
+    revealOverlayEl: null,   // the "Göster" reference/target overlay div, if any
+    highlightOverlayEl: null,// the per-stop highlight overlay div, if any
+    currentHighlightBBox: null // {minX,minY,maxX,maxY} for the current stop's highlight, or null
+  };
+
+  var els = {};
+
+  function $(id) { return document.getElementById(id); }
+
+  function cacheEls() {
+    ['loadFileBtn', 'tourTitle', 'progressLabel', 'fileInput',
+     'dropzone', 'dzPickLink', 'loadError',
+     'introPanel', 'introTitle', 'introDesc', 'startBtn',
+     'playerPanel', 'viewer', 'slideStatus',
+     'highlightToggleWrap', 'highlightToggle',
+     'prompt', 'inputArea', 'revealArea', 'revealAnswer', 'revealExplanation',
+     'prevBtn', 'revealBtn', 'nextBtn'
+    ].forEach(function (id) { els[id] = $(id); });
+  }
+
+  function show(el) { el.hidden = false; }
+  function hide(el) { el.hidden = true; }
+
+  // ---------------------------------------------------------------------
+  // Loading: ?tour=<url> fetch, or file input / drag-drop (FileReader)
+  // ---------------------------------------------------------------------
+
+  function init() {
+    cacheEls();
+
+    // OpenSeadragon is loaded from a pinned, SRI-checked <script> tag above: if the CDN is
+    // unreachable, or a future re-pin's hash no longer matches what's served, the browser drops
+    // the script silently and `OpenSeadragon` is undefined here. Fail with a visible Turkish
+    // message rather than an unexplained crash the first time a stop tries to open a slide.
+    if (typeof OpenSeadragon === 'undefined') {
+      showLoadError('OpenSeadragon kütüphanesi yüklenemedi (CDN’ye erişilemiyor olabilir). '
+        + 'İnternet bağlantınızı kontrol edip sayfayı yeniden yükleyin.');
+      return;
+    }
+
+    els.loadFileBtn.addEventListener('click', function () { els.fileInput.click(); });
+    els.dzPickLink.addEventListener('click', function () { els.fileInput.click(); });
+    els.fileInput.addEventListener('change', function (e) {
+      var f = e.target.files && e.target.files[0];
+      if (f) readPackFile(f);
+      els.fileInput.value = ''; // allow re-picking the same filename later
+    });
+
+    els.dropzone.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      els.dropzone.classList.add('drag');
+    });
+    els.dropzone.addEventListener('dragleave', function () {
+      els.dropzone.classList.remove('drag');
+    });
+    els.dropzone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      els.dropzone.classList.remove('drag');
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) readPackFile(f);
+    });
+    // Drag-drop works anywhere on the page, not just the dropzone (e.g. loading a new pack
+    // while one is already playing) -- prevent the browser's default "navigate to file" first.
+    document.body.addEventListener('dragover', function (e) { e.preventDefault(); });
+    document.body.addEventListener('drop', function (e) {
+      if (e.target && els.dropzone.contains(e.target)) return; // dropzone's own handler covers this
+      e.preventDefault();
+      var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) readPackFile(f);
+    });
+
+    els.startBtn.addEventListener('click', startPlayer);
+    els.prevBtn.addEventListener('click', goPrev);
+    els.nextBtn.addEventListener('click', goNext);
+    els.revealBtn.addEventListener('click', revealAnswer);
+    els.highlightToggle.addEventListener('change', onHighlightToggle);
+
+    var params = new URLSearchParams(window.location.search);
+    var tourUrl = params.get('tour');
+    if (tourUrl) loadFromUrl(tourUrl);
+  }
+
+  function readPackFile(file) {
+    hideLoadError();
+    var reader = new FileReader();
+    reader.onload = function (e) {
+      var data;
+      try {
+        data = JSON.parse(String(e.target.result));
+      } catch (err) {
+        showLoadError('Dosya okunamadı: geçerli bir JSON değil (' + err.message + ').');
+        return;
+      }
+      applyLoadedPack(data);
+    };
+    reader.onerror = function () {
+      showLoadError('Dosya okunamadı: ' + file.name);
+    };
+    reader.readAsText(file);
+  }
+
+  function loadFromUrl(url) {
+    hideLoadError();
+    fetch(url)
+      .then(function (resp) {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.json();
+      })
+      .then(applyLoadedPack)
+      .catch(function (err) {
+        showLoadError('Tur/sınav paketi yüklenemedi (' + url + '):\n' + err.message
+          + '\n\nPaket dosyasının barındığı adres, bu sayfanın kaynağına (origin) CORS izni '
+          + 'vermelidir; ayrıntı için README.md dosyasına bakın.');
+      });
+  }
+
+  function showLoadError(msg) {
+    els.loadError.textContent = msg;
+    show(els.loadError);
+    // #loadError lives inside #dropzone, which is hidden once a pack is already playing (e.g. a
+    // mid-tour pack swap via drag-drop-anywhere, or a `?tour=` retry) -- in that case the panel
+    // holding this message is off-screen and would otherwise show nothing. window.alert() is the
+    // closest analogue to the desktop QuizRunnerWindow.promptLoad's modal alert; the currently
+    // playing pack/stop is left completely untouched, same as the desktop's "current state left
+    // untouched" contract on a failed load.
+    if (els.dropzone.hidden) window.alert(msg);
+  }
+  function hideLoadError() {
+    els.loadError.textContent = '';
+    hide(els.loadError);
+  }
+
+  /** Validate the parsed pack; return an error string, or null if it looks playable. */
+  function validatePack(data) {
+    if (!data || typeof data !== 'object')
+      return 'Geçersiz paket: JSON nesnesi değil.';
+    if (!Array.isArray(data.questions) || data.questions.length === 0)
+      return 'Bu pakette hiç durak (soru) yok.';
+    for (var i = 0; i < data.questions.length; i++) {
+      var q = data.questions[i];
+      if (!q || !q.type)
+        return 'Durak ' + (i + 1) + ': tür (type) belirtilmemiş.';
+      if (!q.slideUrl)
+        return 'Durak ' + (i + 1) + ': slayt adresi (slideUrl) belirtilmemiş.';
+    }
+    return null;
+  }
+
+  function applyLoadedPack(data) {
+    var err = validatePack(data);
+    if (err) { showLoadError(err); return; }
+
+    // Abandon whatever stop was on screen from a previous pack, same as leaving any other stop.
+    clearRevealOverlay();
+    clearHighlightOverlay();
+
+    state.quiz = data;
+    state.currentIndex = 0;
+    hideLoadError();
+
+    var title = (data.title || '').trim();
+    var desc = (data.description || '').trim();
+    els.tourTitle.textContent = title;
+    els.progressLabel.textContent = '';
+
+    hide(els.dropzone);
+    hide(els.playerPanel);
+
+    if (title || desc) {
+      els.introTitle.textContent = title || 'Rehberli tur';
+      els.introDesc.textContent = desc;
+      els.introDesc.hidden = !desc;
+      show(els.introPanel);
+    } else {
+      hide(els.introPanel);
+      startPlayer();
+    }
+  }
+
+  function startPlayer() {
+    hide(els.introPanel);
+    hide(els.dropzone);
+    show(els.playerPanel);
+    showQuestion(1);
+  }
+
+  // ---------------------------------------------------------------------
+  // OpenSeadragon viewer
+  // ---------------------------------------------------------------------
+
+  function ensureViewer() {
+    if (state.viewer) return state.viewer;
+    state.viewer = OpenSeadragon({
+      id: 'viewer',
+      prefixUrl: 'https://cdn.jsdelivr.net/npm/openseadragon@4.1.1/build/openseadragon/images/',
+      showNavigator: false,
+      visibilityRatio: 1,
+      constrainDuringPan: true,
+      gestureSettingsMouse: { clickToZoom: false }
+    });
+    return state.viewer;
+  }
+
+  /** Strip any query string from a slideUrl -- a "?mpp=..." suffix breaks OSD's DZI tile-path
+   *  derivation (it would otherwise be treated as part of the "<name>_files/" base path). */
+  function stripQuery(url) {
+    var idx = url.indexOf('?');
+    return idx === -1 ? url : url.substring(0, idx);
+  }
+
+  /**
+   * Open `q`'s slide unless it is already the one showing (reopen only when the slide changes
+   * between stops), then call `onReady()`. On failure, shows a persistent slide-status note and
+   * still calls `onReady()` so the learner can navigate past a missing slide.
+   */
+  function applySlide(q, onReady) {
+    var myToken = ++state.loadToken;
+    var cleanUrl = q.slideUrl ? stripQuery(q.slideUrl) : '';
+
+    if (!cleanUrl) {
+      setSlideStatus('Bu durağın slayt adresi yok.');
+      onReady();
+      return;
+    }
+
+    var viewer = ensureViewer();
+    if (cleanUrl === state.currentSlideUrl && viewer.world.getItemCount() > 0) {
+      onReady();
+      return;
+    }
+
+    state.opening = true;
+    setControlsDisabled(true);
+
+    function onOpen() {
+      viewer.removeHandler('open', onOpen);
+      viewer.removeHandler('open-failed', onFail);
+      if (myToken !== state.loadToken) return; // superseded by a later navigation
+      state.currentSlideUrl = cleanUrl;
+      state.opening = false;
+      setControlsDisabled(false);
+      onReady();
+    }
+    function onFail() {
+      viewer.removeHandler('open', onOpen);
+      viewer.removeHandler('open-failed', onFail);
+      if (myToken !== state.loadToken) return;
+      state.opening = false;
+      setControlsDisabled(false);
+      setSlideStatus('Slayt açılamadı: ' + (q.slideTitle || cleanUrl));
+      onReady();
+    }
+    viewer.addHandler('open', onOpen);
+    viewer.addHandler('open-failed', onFail);
+    viewer.open(cleanUrl);
+  }
+
+  /** Apply a stop's viewport (full-res slide-pixel centre + downsample) after the slide is ready. */
+  function applyViewport(vp) {
+    if (!vp || !state.viewer) return;
+    var item = state.viewer.world.getItemAt(0);
+    if (!item) return;
+    var widthPx = vp.downsample * state.viewer.container.clientWidth;
+    var heightPx = vp.downsample * state.viewer.container.clientHeight;
+    var rect = new OpenSeadragon.Rect(
+      vp.centerX - widthPx / 2,
+      vp.centerY - heightPx / 2,
+      widthPx, heightPx);
+    state.viewer.viewport.fitBounds(item.imageToViewportRectangle(rect), false);
+  }
+
+  // ---------------------------------------------------------------------
+  // Geometry overlays (bounding-box outline of the stored GeoJSON geometry)
+  // ---------------------------------------------------------------------
+
+  /** Recursively walk a GeoJSON `coordinates` array/tree, returning the [x,y] bounding box. */
+  function coordinatesBBox(coordinates) {
+    var b = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+    var any = false;
+    (function walk(node) {
+      if (!Array.isArray(node)) return;
+      if (node.length >= 2 && typeof node[0] === 'number' && typeof node[1] === 'number') {
+        any = true;
+        if (node[0] < b.minX) b.minX = node[0];
+        if (node[0] > b.maxX) b.maxX = node[0];
+        if (node[1] < b.minY) b.minY = node[1];
+        if (node[1] > b.maxY) b.maxY = node[1];
+      } else {
+        for (var i = 0; i < node.length; i++) walk(node[i]);
+      }
+    })(coordinates);
+    if (!any) return null;
+    // Guard against a degenerate (zero-area) box -- e.g. a bare Point geometry -- so the overlay
+    // div always has a visible, non-zero extent.
+    var minExtent = 1;
+    if (b.maxX - b.minX < minExtent) { b.minX -= minExtent / 2; b.maxX += minExtent / 2; }
+    if (b.maxY - b.minY < minExtent) { b.minY -= minExtent / 2; b.maxY += minExtent / 2; }
+    return b;
+  }
+
+  /** Parse a geometry STRING field defensively: null (no overlay) on any failure, never a throw. */
+  function tryParseGeometryBBox(geoJsonString) {
+    if (!geoJsonString) return null;
+    try {
+      var geom = JSON.parse(geoJsonString);
+      if (!geom || !geom.coordinates) return null;
+      return coordinatesBBox(geom.coordinates);
+    } catch (err) {
+      console.warn('Patoloji Atlası tur oynatıcı: geometri ayrıştırılamadı.', err);
+      return null;
+    }
+  }
+
+  function imageBBoxToViewportRect(bbox) {
+    var item = state.viewer.world.getItemAt(0);
+    if (!item) return null;
+    var rect = new OpenSeadragon.Rect(bbox.minX, bbox.minY, bbox.maxX - bbox.minX, bbox.maxY - bbox.minY);
+    return item.imageToViewportRectangle(rect);
+  }
+
+  function removeOverlayEl(el) {
+    if (!el || !state.viewer) return;
+    try { state.viewer.removeOverlay(el); } catch (err) { /* already gone -- ignore */ }
+  }
+
+  function addBBoxOverlay(bbox, cssClass) {
+    if (!state.viewer) return null;
+    var vpRect = imageBBoxToViewportRect(bbox);
+    if (!vpRect) return null;
+    var el = document.createElement('div');
+    el.className = 'geo-overlay ' + cssClass;
+    state.viewer.addOverlay(el, vpRect);
+    return el;
+  }
+
+  function showRevealOverlay(bbox) {
+    clearRevealOverlay();
+    state.revealOverlayEl = addBBoxOverlay(bbox, 'reveal-box');
+  }
+  function clearRevealOverlay() {
+    removeOverlayEl(state.revealOverlayEl);
+    state.revealOverlayEl = null;
+  }
+
+  function showHighlightOverlay(bbox) {
+    clearHighlightOverlay();
+    state.highlightOverlayEl = addBBoxOverlay(bbox, 'highlight-box');
+  }
+  function clearHighlightOverlay() {
+    removeOverlayEl(state.highlightOverlayEl);
+    state.highlightOverlayEl = null;
+  }
+
+  function onHighlightToggle() {
+    if (els.highlightToggle.checked && state.currentHighlightBBox) {
+      showHighlightOverlay(state.currentHighlightBBox);
+    } else {
+      clearHighlightOverlay();
+    }
+  }
+
+  /** Recentre the viewport on a bbox (used for the NAVIGATION reveal's "go to the target"). */
+  function flyToBBox(bbox) {
+    if (!state.viewer) return;
+    var vpRect = imageBBoxToViewportRect(bbox);
+    if (vpRect) state.viewer.viewport.fitBounds(vpRect, false);
+  }
+
+  // ---------------------------------------------------------------------
+  // Stops: progress label, prompt, type-specific input, reveal
+  // ---------------------------------------------------------------------
+
+  function showQuestion(i) {
+    var quiz = state.quiz;
+    if (!quiz || !quiz.questions || quiz.questions.length === 0) return;
+    var n = quiz.questions.length;
+    state.currentIndex = Math.max(1, Math.min(i, n));
+    var q = quiz.questions[state.currentIndex - 1];
+
+    els.progressLabel.textContent = 'Durak ' + state.currentIndex + ' / ' + n;
+    els.prompt.textContent = q.prompt || '';
+    setRevealVisible(false);
+    setSlideStatus(null);
+    clearRevealOverlay();
+    clearHighlightOverlay();
+    hide(els.highlightToggleWrap);
+    state.currentHighlightBBox = null;
+    buildInput(q);
+    updateNavButtons();
+
+    applySlide(q, function () { afterSlideReady(q); });
+  }
+
+  function afterSlideReady(q) {
+    applyViewport(q.viewport);
+
+    var hlBBox = tryParseGeometryBBox(q.highlightGeoJson);
+    state.currentHighlightBBox = hlBBox;
+    if (hlBBox) {
+      els.highlightToggle.checked = true;
+      show(els.highlightToggleWrap);
+      showHighlightOverlay(hlBBox);
+    } else {
+      hide(els.highlightToggleWrap);
+      clearHighlightOverlay();
+    }
+  }
+
+  function buildInput(q) {
+    els.inputArea.innerHTML = '';
+    state.mcqRadios = null;
+
+    switch (q.type) {
+      case 'MCQ': {
+        var options = q.options || [];
+        var radios = [];
+        options.forEach(function (opt, idx) {
+          var label = document.createElement('label');
+          label.className = 'mcq-option';
+          var radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = 'mcq-' + (q.id || state.currentIndex);
+          radio.value = String(idx);
+          var span = document.createElement('span');
+          span.textContent = opt;
+          label.appendChild(radio);
+          label.appendChild(span);
+          els.inputArea.appendChild(label);
+          radios.push(radio);
+        });
+        state.mcqRadios = radios;
+        break;
+      }
+      case 'FREETEXT': {
+        var ta = document.createElement('textarea');
+        ta.className = 'freetext-input';
+        ta.rows = 6;
+        ta.placeholder = 'Notlarınızı buraya yazın…';
+        els.inputArea.appendChild(ta);
+        break;
+      }
+      case 'ANNOTATION': {
+        var p1 = document.createElement('p');
+        p1.textContent = (q.instruction && q.instruction.trim())
+          ? q.instruction
+          : 'Referans bölgeyi görmek için Göster’e tıklayın.';
+        els.inputArea.appendChild(p1);
+        break;
+      }
+      case 'NAVIGATION': {
+        var p2 = document.createElement('p');
+        p2.textContent = 'Hedef bölgeyi görmek için Göster’e tıklayın.';
+        els.inputArea.appendChild(p2);
+        break;
+      }
+      case 'NARRATION':
+      default:
+        break; // caption-only stop -- promptLabel already shows q.prompt, no input widget
+    }
+  }
+
+  function selectedMcqIndex() {
+    if (!state.mcqRadios) return null;
+    for (var i = 0; i < state.mcqRadios.length; i++) {
+      if (state.mcqRadios[i].checked) return i;
+    }
+    return null;
+  }
+
+  function markMcqOptions(picked, correct) {
+    var labels = els.inputArea.querySelectorAll('label.mcq-option');
+    labels.forEach(function (label, idx) {
+      label.classList.remove('correct', 'incorrect');
+      if (idx === correct) label.classList.add('correct');
+      else if (idx === picked) label.classList.add('incorrect');
+    });
+  }
+
+  function revealAnswer() {
+    var quiz = state.quiz;
+    if (!quiz || state.currentIndex < 1) return;
+    var q = quiz.questions[state.currentIndex - 1];
+    var answerText = '';
+
+    switch (q.type) {
+      case 'MCQ': {
+        var options = q.options || [];
+        var correct = (typeof q.correctIndex === 'number') ? q.correctIndex : null;
+        var correctText = (correct !== null && correct >= 0 && correct < options.length)
+          ? options[correct] : '?';
+        answerText = 'Doğru cevap: ' + correctText;
+        var picked = selectedMcqIndex();
+        markMcqOptions(picked, correct);
+        if (picked !== null && picked !== correct) {
+          var pickedText = (picked >= 0 && picked < options.length) ? options[picked] : '?';
+          answerText += '\nSizin cevabınız: ' + pickedText;
+        }
+        break;
+      }
+      case 'FREETEXT': {
+        answerText = 'Model cevap: ' + (q.modelAnswer || '');
+        break;
+      }
+      case 'ANNOTATION': {
+        var refBBox = tryParseGeometryBBox(q.referenceGeometryGeoJson);
+        if (refBBox) {
+          showRevealOverlay(refBBox);
+          answerText = 'Referans bölge slaytta gösteriliyor.';
+        } else {
+          answerText = 'Referans geometri mevcut değil.';
+        }
+        break;
+      }
+      case 'NAVIGATION': {
+        var targetBBox = tryParseGeometryBBox(q.targetGeometryGeoJson);
+        if (targetBBox) {
+          showRevealOverlay(targetBBox);
+          flyToBBox(targetBBox);
+          answerText = 'Hedef bölge slaytta gösteriliyor.';
+        } else {
+          answerText = 'Hedef geometri mevcut değil.';
+        }
+        break;
+      }
+      case 'NARRATION':
+      default:
+        answerText = ''; // no "correct answer" line -- explanation only, below
+        break;
+    }
+
+    els.revealAnswer.textContent = answerText;
+    els.revealExplanation.textContent = q.explanation || '';
+    setRevealVisible(true);
+  }
+
+  function setRevealVisible(visible) {
+    els.revealArea.hidden = !visible;
+  }
+
+  function setSlideStatus(text) {
+    var has = !!(text && text.trim());
+    els.slideStatus.textContent = has ? text : '';
+    els.slideStatus.hidden = !has;
+  }
+
+  // ---------------------------------------------------------------------
+  // Navigation
+  // ---------------------------------------------------------------------
+
+  function allowBack() {
+    return !state.quiz || state.quiz.allowBack !== false;
+  }
+
+  function goPrev() {
+    if (!state.quiz || state.opening || !allowBack()) return;
+    var target = Math.max(1, state.currentIndex - 1);
+    if (target !== state.currentIndex) showQuestion(target);
+  }
+
+  function goNext() {
+    if (!state.quiz || state.opening) return;
+    var n = state.quiz.questions.length;
+    var target = Math.min(n, state.currentIndex + 1);
+    if (target !== state.currentIndex) showQuestion(target);
+  }
+
+  function updateNavButtons() {
+    els.prevBtn.disabled = state.currentIndex <= 1 || !allowBack();
+  }
+
+  function setControlsDisabled(disabled) {
+    els.revealBtn.disabled = disabled;
+    els.nextBtn.disabled = disabled;
+    if (disabled) els.prevBtn.disabled = true;
+    else updateNavButtons();
+  }
+
+  // ---------------------------------------------------------------------
+  init();
+})();
+</script>
+</body>
+</html>

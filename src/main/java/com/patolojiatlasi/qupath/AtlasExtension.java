@@ -6,6 +6,7 @@ import java.util.Optional;
 
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
@@ -58,6 +59,13 @@ public class AtlasExtension implements QuPathExtension {
     public void installExtension(QuPathGUI qupath) {
         this.qupath = qupath;
         try {
+            // Restore + clear any stale hidden-menu snapshot SimpleViewMode may still be holding
+            // from a previous install of this extension in the same JVM (reinstall/reload from the
+            // extension manager) -- a no-op if none, otherwise it puts back whatever Menu objects
+            // it had hidden (harmless even if those Menu instances are now detached) so the new
+            // CheckMenuItem below starts unchecked and consistent with the actual menu state.
+            SimpleViewMode.apply(qupath, false);
+
             // This extension's atlas-specific actions live under one top-level "Patoloji Atlası"
             // menu, grouped into sub-menus, instead of being scattered flat among the other
             // extensions' items in Extensions. The atlas-independent research tools (focus
@@ -75,6 +83,11 @@ public class AtlasExtension implements QuPathExtension {
             // link check, and drill-down into the project builder.
             MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
             coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
+
+            // Basit görünüm — hides QuPath's analysis-focused top-level menus (Analyze, Classify,
+            // Automate, TMA) so learners see a reading-focused UI; toggling off restores them.
+            CheckMenuItem simpleView = new CheckMenuItem("Basit görünüm (analiz menülerini gizle)");
+            simpleView.setOnAction(e -> SimpleViewMode.apply(qupath, simpleView.isSelected()));
 
             // Reorientation — a general any-slide viewing tool, added as its own top-level
             // Extensions item at the end of installExtension (not nested in the "Araştırma" menu,
@@ -143,12 +156,15 @@ public class AtlasExtension implements QuPathExtension {
             quizAuthorItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizAuthorWindow.show(qupath));
             MenuItem tourPlayItem = new MenuItem("Rehberli tur oynat…");
             tourPlayItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizRunnerWindow.show(qupath, true));
+            MenuItem quizBrowseItem = new MenuItem("Serbest inceleme (gizli cevaplar)…");
+            quizBrowseItem.setOnAction(e -> com.patolojiatlasi.qupath.quiz.QuizBrowseWindow.show(qupath));
             Menu quizMenu = new Menu("Sınav / Quiz");
-            quizMenu.getItems().addAll(quizTakeItem, quizAuthorItem, tourPlayItem);
+            quizMenu.getItems().addAll(quizTakeItem, quizAuthorItem, tourPlayItem, quizBrowseItem);
 
             atlas.getItems().addAll(
                     browseItem,
                     coverageItem,
+                    simpleView,
                     new SeparatorMenuItem(),
                     compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
 
