@@ -147,6 +147,14 @@ public class QuizBrowseWindow {
     // instance no longer showing anything. FX thread only.
     private boolean closed = false;
 
+    // Set transiently by clickFilter, around its stopsList.getSelectionModel().select(idx) call in
+    // the new-stop branch, so the selectedIndexProperty listener below can tell a click-originated
+    // selection change from a genuine list interaction (row click / keyboard) and never fly the
+    // viewer for the former. select() fires the listener synchronously on the FX thread, so a plain
+    // try/finally around the call is enough -- no re-entrancy to guard against. FX thread only;
+    // default false (the common/list-driven case flies, as before).
+    private boolean suppressFlyOnSelect = false;
+
     /** One distinct slide within a loaded pack: its URL plus the display title shown in the combo
      *  box (its {@code toString()} -- JavaFX's default ComboBox cell renders an item via
      *  {@code toString()} when no custom converter/cell-factory is set). */
@@ -166,12 +174,13 @@ public class QuizBrowseWindow {
      * click-terminating a pan/drag), converts the event's component-space point to image-space via
      * {@link QuPathViewer#componentPointToImagePoint(double, double, Point2D, boolean)}, and hands
      * it to {@link #pickStop(List, double, double)} against the live {@link #regions} field (read
-     * fresh on every click, so it always reflects whichever slide is currently open). A hit selects
-     * that stop in {@link #stopsList}, which drives {@link #selectStop(int, boolean)} (with
-     * {@code flyTo=true}, since this is the list-driven leg of the click) via the list's
-     * selection-index listener; a same-stop re-click calls {@link #selectStop(int, boolean)}
-     * directly with {@code flyTo=false} -- see that call site below for why a slide click never
-     * flies the viewer.
+     * fresh on every click, so it always reflects whichever slide is currently open). A slide click
+     * never flies the viewer, on either of its two paths: a same-stop re-click calls
+     * {@link #selectStop(int, boolean)} directly with {@code flyTo=false}; a click on a different
+     * stop selects it in {@link #stopsList} with {@link #suppressFlyOnSelect} held {@code true}
+     * around the call, so the selection-index listener it fires computes {@code flyTo=false} too
+     * (see that listener and {@link #suppressFlyOnSelect} for why). Only genuine list interaction --
+     * a row click or keyboard navigation on {@link #stopsList} itself -- flies the viewer.
      */
     private final EventHandler<MouseEvent> clickFilter = e -> {
         if (!e.isStillSincePress())
@@ -202,8 +211,18 @@ public class QuizBrowseWindow {
             // reason as the primary click path below.
             if (idx == stopsList.getSelectionModel().getSelectedIndex())
                 selectStop(idx, false);
-            else
-                stopsList.getSelectionModel().select(idx);
+            else {
+                // select() fires the selectedIndexProperty listener synchronously (still inside this
+                // call, on this FX-thread event), so suppressFlyOnSelect only needs to be true for
+                // the duration of the call itself -- the finally resets it immediately afterwards.
+                // This tells that listener the change is click-originated, so it must not fly.
+                suppressFlyOnSelect = true;
+                try {
+                    stopsList.getSelectionModel().select(idx);
+                } finally {
+                    suppressFlyOnSelect = false;
+                }
+            }
         } catch (Exception ex) {
             logger.debug("Quiz browse click handling failed: {}", ex.getMessage());
         }
@@ -279,8 +298,12 @@ public class QuizBrowseWindow {
                 });
             }
         });
+        // flyTo is !suppressFlyOnSelect: clickFilter's new-stop branch holds that flag true around
+        // its own select(idx) call, so a slide click landing here computes flyTo=false; every other
+        // trigger of this listener (row click, keyboard navigation, or a programmatic select/clear
+        // elsewhere in this class) leaves the flag false and flies as before.
         stopsList.getSelectionModel().selectedIndexProperty().addListener(
-                (obs, was, now) -> selectStop(now == null ? -1 : now.intValue(), true));
+                (obs, was, now) -> selectStop(now == null ? -1 : now.intValue(), !suppressFlyOnSelect));
 
         detailPromptLabel.setWrapText(true);
         detailPromptLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
@@ -510,12 +533,15 @@ public class QuizBrowseWindow {
      * Updates the detail pane (prompt + MCQ options, if any) and the region overlay's highlighted
      * index; only when {@code flyTo} is {@code true} and the stop carries a
      * {@link QuizQuestion.Viewport} does it also fly the pinned viewer to it. This is the single
-     * place both a {@link #stopsList} click/selection (list-driven paths pass {@code true} -- the
-     * existing recentre-on-select UX) and a {@link #clickFilter} slide click (which always passes
-     * {@code false}) converge: a learner who clicked a region already visible on screen must not
-     * have the viewer recentred under them -- with {@link QuizRunnerWindow} open on the same shared
-     * viewer, a slide click here (e.g. while placing an annotation vertex for a runner question)
-     * was flying the viewer mid-draw and corrupting the learner's in-progress answer there.
+     * place both a {@link #stopsList} click/selection and a {@link #clickFilter} slide click
+     * converge, and the two are kept strictly apart: every {@link #clickFilter} path passes (or
+     * causes {@link #suppressFlyOnSelect} to force) {@code flyTo=false} -- a learner who clicked a
+     * region already visible on screen must not have the viewer recentred under them -- while
+     * genuine {@link #stopsList} interaction (a row click or keyboard navigation) still passes
+     * {@code true}, the existing recentre-on-select UX. With {@link QuizRunnerWindow} open on the
+     * same shared viewer, a slide click here (e.g. while placing an annotation vertex for a runner
+     * question) was flying the viewer mid-draw and corrupting the learner's in-progress answer
+     * there -- the reason no click-originated path may ever fly.
      */
     private void selectStop(int idx, boolean flyTo) {
         // Stale-region guard (see clickFilter's identical check): if attachedViewer's slide no
