@@ -6,6 +6,7 @@ import java.util.Optional;
 
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
@@ -75,6 +76,11 @@ public class AtlasExtension implements QuPathExtension {
             // link check, and drill-down into the project builder.
             MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
             coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
+
+            // Basit görünüm — hides QuPath's analysis-focused top-level menus (Analyze, Classify,
+            // Automate, TMA) so learners see a reading-focused UI; toggling off restores them.
+            CheckMenuItem simpleView = new CheckMenuItem("Basit görünüm (analiz menülerini gizle)");
+            simpleView.setOnAction(e -> SimpleViewMode.apply(qupath, simpleView.isSelected()));
 
             // Reorientation — a general any-slide viewing tool, added as its own top-level
             // Extensions item at the end of installExtension (not nested in the "Araştırma" menu,
@@ -149,6 +155,7 @@ public class AtlasExtension implements QuPathExtension {
             atlas.getItems().addAll(
                     browseItem,
                     coverageItem,
+                    simpleView,
                     new SeparatorMenuItem(),
                     compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
 
