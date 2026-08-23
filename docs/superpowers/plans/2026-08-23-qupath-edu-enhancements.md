@@ -26,7 +26,7 @@ JavaFX, Gson, JUnit 5; OpenSeadragon (CDN) for C5.
   Feature ideas + published survey numbers (Yli-Hallila et al., *J Anat* 2025;246(5):846–856,
   doi:10.1111/joa.14172) are citable facts. Cite the paper in new-class Javadoc where a feature is
   inspired by it.
-- **No clinical interpretation** anywhere: scores are measurements (IoU %, hit/miss), никогда
+- **No clinical interpretation** anywhere: scores are measurements (IoU %, hit/miss), never
   diagnosis language. UI text Turkish; QuPath UI strings stay English.
 - **`String.format` pins `java.util.Locale.US`** (Turkish-locale JVM renders %f with comma).
 - **Do not modify** existing quiz classes except the minimal `QuizRunnerWindow.revealAnswer`

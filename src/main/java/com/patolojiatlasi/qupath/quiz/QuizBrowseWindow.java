@@ -58,7 +58,7 @@ import qupath.lib.roi.interfaces.ROI;
  * here — only the published feature idea and survey numbers, cited above.
  * <p>
  * Answers are never persisted or pre-shown: re-selecting a stop (from either the list or a slide
- * click) always starts from the hidden state again (see {@link #selectStop(int)}), and this window
+ * click) always starts from the hidden state again (see {@link #selectStop(int, boolean)}), and this window
  * carries no learner-attempt/scoring state at all (contrast {@link QuizRunnerWindow}'s
  * {@code annotationBaseline}/{@link QuizScoring} machinery, which this window has no need for since
  * nothing is drawn or answered here — only browsed).
@@ -105,6 +105,13 @@ public class QuizBrowseWindow {
     // stopRegionRoi). Rebuilt in afterSlideReady on every slide change/load.
     private List<QuizQuestion> stops = new ArrayList<>();
     private List<ROI> regions = new ArrayList<>();
+
+    // The slide URL that stops/regions/overlay were built for, set alongside them in
+    // afterSlideReady. Read by clickFilter and selectStop as a staleness guard: if another window
+    // (e.g. QuizRunnerWindow, open on the same viewer) swaps the slide underneath this one without
+    // this window knowing, a click landing inside a now-meaningless region must not act on it --
+    // see the guard in clickFilter/selectStop below.
+    private String regionsSlideUrl;
 
     // The stop currently shown in the detail pane, or null if none is selected. Set (and its
     // answer re-hidden) in selectStop; read by revealAnswer.
@@ -160,8 +167,11 @@ public class QuizBrowseWindow {
      * {@link QuPathViewer#componentPointToImagePoint(double, double, Point2D, boolean)}, and hands
      * it to {@link #pickStop(List, double, double)} against the live {@link #regions} field (read
      * fresh on every click, so it always reflects whichever slide is currently open). A hit selects
-     * that stop in {@link #stopsList}, which drives {@link #selectStop(int)} via the list's
-     * selection-index listener -- the single place both a slide click and a list click converge.
+     * that stop in {@link #stopsList}, which drives {@link #selectStop(int, boolean)} (with
+     * {@code flyTo=true}, since this is the list-driven leg of the click) via the list's
+     * selection-index listener; a same-stop re-click calls {@link #selectStop(int, boolean)}
+     * directly with {@code flyTo=false} -- see that call site below for why a slide click never
+     * flies the viewer.
      */
     private final EventHandler<MouseEvent> clickFilter = e -> {
         if (!e.isStillSincePress())
@@ -169,6 +179,16 @@ public class QuizBrowseWindow {
         QuPathViewer v = attachedViewer;
         if (v == null)
             return;
+        // Stale-region guard: if another window (e.g. QuizRunnerWindow, open on the same shared
+        // viewer) swapped the slide underneath this one without this window's own openSlide/
+        // afterSlideReady running, `regions` no longer describes what's on screen -- detach and
+        // bail rather than hit-test/select against geometry for a slide that's no longer open.
+        // (QuizRunnerWindow's symmetric exposure -- another window swapping the slide out from
+        // under IT -- is a pre-existing gap, deliberately not addressed here.)
+        if (!QuizSlide.currentSlideUrl(v).equals(regionsSlideUrl)) {
+            detachOverlayAndFilter();
+            return;
+        }
         try {
             Point2D p = v.componentPointToImagePoint(e.getX(), e.getY(), null, true);
             int idx = pickStop(regions, p.getX(), p.getY());
@@ -178,9 +198,10 @@ public class QuizBrowseWindow {
             // (select() is a no-op when the value doesn't change) -- so a second click on the same
             // region would otherwise silently do nothing. Route that case through selectStop
             // directly so "re-selecting re-hides (no persistence)" holds even for a same-stop
-            // re-click, not only for switching to a different stop.
+            // re-click, not only for switching to a different stop. flyTo=false here for the same
+            // reason as the primary click path below.
             if (idx == stopsList.getSelectionModel().getSelectedIndex())
-                selectStop(idx);
+                selectStop(idx, false);
             else
                 stopsList.getSelectionModel().select(idx);
         } catch (Exception ex) {
@@ -254,12 +275,12 @@ public class QuizBrowseWindow {
                 // already applied; for a same-row re-click it is the only thing that re-hides.
                 setOnMouseClicked(ev -> {
                     if (!isEmpty())
-                        selectStop(getIndex());
+                        selectStop(getIndex(), true);
                 });
             }
         });
         stopsList.getSelectionModel().selectedIndexProperty().addListener(
-                (obs, was, now) -> selectStop(now == null ? -1 : now.intValue()));
+                (obs, was, now) -> selectStop(now == null ? -1 : now.intValue(), true));
 
         detailPromptLabel.setWrapText(true);
         detailPromptLabel.setStyle("-fx-font-size: 14px; -fx-font-weight: bold;");
@@ -347,7 +368,8 @@ public class QuizBrowseWindow {
         stopItems.clear();
         stops = new ArrayList<>();
         regions = new ArrayList<>();
-        selectStop(-1);
+        regionsSlideUrl = null;
+        selectStop(-1, true);
         slideCombo.getItems().clear();
         for (Map.Entry<String, String> entry : distinct.entrySet())
             slideCombo.getItems().add(new SlideEntry(entry.getKey(), entry.getValue()));
@@ -438,6 +460,7 @@ public class QuizBrowseWindow {
                 .filter(q -> url != null && url.equals(q.getSlideUrl()))
                 .collect(Collectors.toList());
         regions = stops.stream().map(QuizBrowseWindow::stopRegionRoi).collect(Collectors.toList());
+        regionsSlideUrl = url;
         // clearSelection() before setAll: JavaFX's selection model does not reliably reset to -1
         // on an items-list replace (an index could survive/clamp onto the new, shorter/reordered
         // list), which would leave a stale row highlighted while the detail pane below has already
@@ -445,7 +468,7 @@ public class QuizBrowseWindow {
         // that stale row's own region click would then silently do nothing.
         stopsList.getSelectionModel().clearSelection();
         stopItems.setAll(stops);
-        selectStop(-1);
+        selectStop(-1, true);
 
         QuPathViewer viewer = qupath.getViewer();
         if (viewer == null)
@@ -484,13 +507,26 @@ public class QuizBrowseWindow {
      * Select stop {@code idx} (0-based into {@link #stops}, or any out-of-range value -- including
      * {@code -1} -- to select none): always re-hides the reveal area first, so re-selecting any stop
      * (including the one already selected) starts from the hidden state again -- no persistence.
-     * Updates the detail pane (prompt + MCQ options, if any), the region overlay's highlighted
-     * index, and -- if the stop carries a {@link QuizQuestion.Viewport} -- flies the pinned viewer
-     * to it. This is the single place both a {@link #stopsList} click and a {@link #clickFilter}
-     * slide click converge (the latter only ever calls {@code stopsList.getSelectionModel().select},
-     * which drives this method via the list's selection-index listener).
+     * Updates the detail pane (prompt + MCQ options, if any) and the region overlay's highlighted
+     * index; only when {@code flyTo} is {@code true} and the stop carries a
+     * {@link QuizQuestion.Viewport} does it also fly the pinned viewer to it. This is the single
+     * place both a {@link #stopsList} click/selection (list-driven paths pass {@code true} -- the
+     * existing recentre-on-select UX) and a {@link #clickFilter} slide click (which always passes
+     * {@code false}) converge: a learner who clicked a region already visible on screen must not
+     * have the viewer recentred under them -- with {@link QuizRunnerWindow} open on the same shared
+     * viewer, a slide click here (e.g. while placing an annotation vertex for a runner question)
+     * was flying the viewer mid-draw and corrupting the learner's in-progress answer there.
      */
-    private void selectStop(int idx) {
+    private void selectStop(int idx, boolean flyTo) {
+        // Stale-region guard (see clickFilter's identical check): if attachedViewer's slide no
+        // longer matches what regions/stops were built for, another window swapped the slide out
+        // from under this one -- detach and leave the browse UI as-is rather than act on geometry
+        // for a slide that isn't open any more.
+        if (attachedViewer != null && !QuizSlide.currentSlideUrl(attachedViewer).equals(regionsSlideUrl)) {
+            detachOverlayAndFilter();
+            return;
+        }
+
         setRevealVisible(false);
         revealAnswerLabel.setText("");
         revealExplanationLabel.setText("");
@@ -519,7 +555,7 @@ public class QuizBrowseWindow {
             overlay.setSelectedIndex(inRange ? idx : -1);
             if (attachedViewer != null) {
                 attachedViewer.repaint();
-                if (q != null) {
+                if (flyTo && q != null) {
                     QuizQuestion.Viewport vp = q.getViewport();
                     if (vp != null)
                         attachedViewer.setDownsampleFactor(vp.downsample, vp.centerX, vp.centerY);

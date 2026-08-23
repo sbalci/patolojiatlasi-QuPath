@@ -59,6 +59,13 @@ public class AtlasExtension implements QuPathExtension {
     public void installExtension(QuPathGUI qupath) {
         this.qupath = qupath;
         try {
+            // Restore + clear any stale hidden-menu snapshot SimpleViewMode may still be holding
+            // from a previous install of this extension in the same JVM (reinstall/reload from the
+            // extension manager) -- a no-op if none, otherwise it puts back whatever Menu objects
+            // it had hidden (harmless even if those Menu instances are now detached) so the new
+            // CheckMenuItem below starts unchecked and consistent with the actual menu state.
+            SimpleViewMode.apply(qupath, false);
+
             // This extension's atlas-specific actions live under one top-level "Patoloji Atlası"
             // menu, grouped into sub-menus, instead of being scattered flat among the other
             // extensions' items in Extensions. The atlas-independent research tools (focus

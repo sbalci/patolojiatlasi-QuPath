@@ -87,11 +87,19 @@ Four question types are supported:
   navigate to a region — then click **Göster** to reveal the correct MCQ option, the free-text
   model answer, or, for annotation/navigation questions, an overlay of the reference/target region
   drawn directly on the slide.
-- This is **self-study**: **there is no auto-grading** — **Göster** only overlays the reference for
-  a visual self-compare, nothing is scored. Nothing is saved anywhere either: the quiz-pack is a
-  single portable file you're free to email or hand out, and anything you draw while answering an
-  annotation or navigation question is transient — it's cleared again as soon as you move to the
-  next/previous question or close the window, so it never ends up saved in the project.
+- This is **self-study**, not a graded exam. For **multiple-choice** and **free-text** questions
+  there is no auto-grading at all — **Göster** only reveals the correct option or model answer for
+  a visual self-compare, nothing is scored. For **annotation** and **navigation** questions,
+  **Göster** additionally appends one measurement-only score line below the reference/target
+  overlay: IoU % plus a hit/miss verdict, where a hit is "IoU > 0.3 or containment" (annotation:
+  your drawn outline vs. the reference geometry; navigation: your viewport at reveal time vs. the
+  target geometry). This score is a geometric measurement, not a clinical judgement, and it is
+  **display-only**: it is never persisted, never written back into the quiz-pack, and disappears
+  like everything else in the reveal area as soon as you move on. Nothing is saved anywhere:
+  the quiz-pack is a single portable file you're free to email or hand out, and anything you draw
+  while answering an annotation or navigation question is transient — it's cleared again as soon as
+  you move to the next/previous question or close the window, so it never ends up saved in the
+  project.
 - **No QuPath? No problem.** [`web-tour-player/`](web-tour-player/) is a single self-contained
   HTML page that plays the same quiz/tour packs in a plain web browser — see its
   [README](web-tour-player/README.md) for deployment and CORS notes.

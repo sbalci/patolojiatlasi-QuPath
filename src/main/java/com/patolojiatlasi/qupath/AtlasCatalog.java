@@ -61,10 +61,12 @@ public class AtlasCatalog {
     }
 
     /**
-     * Build cases from an already-parsed bundled-catalog root object (the {@code {"defaultMpp":
-     * ..., "cases": [...]}} shape of {@code catalog.json}). Split out of {@link #loadBundled()}
-     * so tests can exercise the Gson-object parsing (including the optional {@code
-     * descriptionTR}/{@code descriptionEN} fields) without a classpath resource.
+     * Build cases from an already-parsed bundled-catalog root object (the {@code {"source": ...,
+     * "cases": [...]}} shape of {@code catalog.json}; {@code "defaultMpp"} is an optional
+     * catalog-wide field -- currently absent from the shipped {@code catalog.json}, but read here
+     * so it takes effect as soon as a future snapshot supplies it). Split out of
+     * {@link #loadBundled()} so tests can exercise the Gson-object parsing (including the optional
+     * {@code descriptionTR}/{@code descriptionEN} fields) without a classpath resource.
      */
     static List<AtlasCase> parseBundled(JsonObject root) {
         List<AtlasCase> cases = new ArrayList<>();

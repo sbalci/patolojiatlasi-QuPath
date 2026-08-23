@@ -83,12 +83,14 @@ player page — see "Deploying it" above.
   render the true polygon outline the way QuPath's own `QuizRevealOverlay` does. For a rectangle
   reference region this is exact; for an irregular polygon (e.g. a hand-drawn tumour outline) it
   is only an approximate envelope.
-- **No auto-grading or geometric comparison**, same as the desktop runner: "Göster" only reveals
-  the correct/model answer or overlays the reference/target region for a visual self-compare —
-  nothing is scored. Unlike the desktop `QuizRunnerWindow`, this web player also has no drawing
-  tools and no viewport-vs-target IoU/hit scoring for ANNOTATION/NAVIGATION stops (there is
-  nothing in a plain web viewer to draw with, or to score) — it only shows the reference/target
-  overlay.
+- **No auto-grading or geometric comparison, for any stop type.** "Göster" only reveals the
+  correct/model answer (MCQ/FREETEXT) or overlays the reference/target region (ANNOTATION/
+  NAVIGATION) for a visual self-compare — nothing is scored. This differs from the desktop
+  `QuizRunnerWindow`, which for MCQ/FREETEXT is likewise self-compare-only but for ANNOTATION/
+  NAVIGATION stops additionally computes a measurement-only IoU %/hit score (the learner's drawn
+  outline or viewport vs. the reference/target geometry). This web player has no drawing tools and
+  no viewport-vs-target scoring for ANNOTATION/NAVIGATION stops (there is nothing in a plain web
+  viewer to draw with, or to score against) — it only shows the reference/target overlay.
 - **Requires the DZI tile host to be reachable** from the learner's browser (network access,
   and, for the `.dzi` descriptor specifically, CORS — see above). Nothing is cached or mirrored by
   this player.

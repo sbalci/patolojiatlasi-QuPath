@@ -12,8 +12,10 @@ import com.google.gson.JsonParser;
 
 /**
  * Covers the optional {@code descriptionTR} / {@code descriptionEN} scalar fields that
- * {@link AtlasCatalog#parseList(String)} may pick up from {@code list.yaml}, and the
- * TR-first / EN-fallback resolution exposed by {@link AtlasCase#getDescription()}.
+ * {@link AtlasCatalog#parseList(String)} may pick up from {@code list.yaml} (and, via
+ * {@link AtlasCatalog#parseBundled(JsonObject)}, the same fields in the bundled
+ * {@code catalog.json} shape), and the TR-first / EN-fallback resolution exposed by
+ * {@link AtlasCase#getDescription()}.
  */
 class AtlasCatalogDescriptionTest {
 
