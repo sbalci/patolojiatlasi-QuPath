@@ -36,36 +36,69 @@ import qupath.lib.roi.interfaces.ROI;
  */
 public class QuizRevealOverlay extends AbstractOverlay {
 
-    private static final Color STROKE_COLOR = new Color(255, 0, 255); // magenta -- distinct from
-                                                                       // QuPath's default yellow/red
-                                                                       // annotation/selection colors
+    /** Reveal (answer) stroke: magenta -- distinct from QuPath's default yellow/red
+     *  annotation/selection colors. */
+    public static final Color REVEAL_COLOR = new Color(255, 0, 255);
+    /** Per-stop highlight stroke: amber -- distinct from {@link #REVEAL_COLOR} so a stop that shows
+     *  both its highlight and (after "Göster") its reference/target stays readable. */
+    public static final Color HIGHLIGHT_COLOR = new Color(255, 160, 0);
     private static final float STROKE_WIDTH_PX = 2.5f; // on-screen (component-space) width
 
     private final ROI roi;
+    private final Color strokeColor;
+    // The ImageData this overlay's geometry belongs to, or null for "any". When set, paintOverlay
+    // draws nothing while the viewer shows a different ImageData -- the stale-slide guard: another
+    // window (browse mode, File > Open…) can swap the slide under the viewer this overlay is
+    // attached to, and without the pin the ROI would keep painting in the OLD slide's pixel space
+    // over the NEW slide. Identity comparison is deliberate: the same slide reopened is a new
+    // ImageData, and the owning window re-shows its overlays on its own navigation anyway.
+    private final ImageData<BufferedImage> pinnedImageData;
 
     /**
+     * Reveal-colored overlay with no slide pin (legacy behaviour).
+     *
      * @param options overlay display options, from {@code viewer.getOverlayOptions()}
      * @param roi     the reference/target geometry to paint; may be {@code null} (paints nothing)
      */
     public QuizRevealOverlay(OverlayOptions options, ROI roi) {
+        this(options, roi, REVEAL_COLOR, null);
+    }
+
+    /**
+     * @param options         overlay display options, from {@code viewer.getOverlayOptions()}
+     * @param roi             the geometry to paint; may be {@code null} (paints nothing)
+     * @param strokeColor     {@link #REVEAL_COLOR}, {@link #HIGHLIGHT_COLOR}, or any color; null → reveal
+     * @param pinnedImageData the slide this geometry belongs to (typically {@code viewer.getImageData()}
+     *                        at creation); when non-null the overlay stays invisible while the viewer
+     *                        shows a different ImageData. May be {@code null} (always paints).
+     */
+    public QuizRevealOverlay(OverlayOptions options, ROI roi, Color strokeColor,
+                             ImageData<BufferedImage> pinnedImageData) {
         super(options);
         this.roi = roi;
+        this.strokeColor = strokeColor == null ? REVEAL_COLOR : strokeColor;
+        this.pinnedImageData = pinnedImageData;
         // AbstractOverlay's own opacity already defaults to 1.0 (javap-confirmed against 0.6.0),
         // so isVisible() is already true out of the box -- set explicitly anyway as cheap
         // insurance against that default ever changing upstream.
         setOpacity(1.0);
     }
 
+    /** True when this overlay would currently paint for {@code imageData} (pin check). */
+    public boolean appliesTo(ImageData<BufferedImage> imageData) {
+        return pinnedImageData == null || pinnedImageData == imageData;
+    }
+
     @Override
     public void paintOverlay(Graphics2D g2d, ImageRegion imageRegion, double downsampleFactor,
             ImageData<BufferedImage> imageData, boolean paintCompletely) {
-        if (roi == null)
+        if (roi == null || !appliesTo(imageData))
             return;
         Graphics2D g = (Graphics2D) g2d.create();
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g.setStroke(new BasicStroke((float) (STROKE_WIDTH_PX * downsampleFactor)));
-            g.setColor(STROKE_COLOR);
+            g.setColor(strokeColor);
             try {
                 g.draw(roi.getShape());
             } catch (UnsupportedOperationException noShape) {
