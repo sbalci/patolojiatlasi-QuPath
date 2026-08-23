@@ -46,32 +46,43 @@ public class AtlasCatalog {
 
     /** Load the catalog snapshot bundled inside the extension jar (offline, instant). */
     public static List<AtlasCase> loadBundled() {
-        List<AtlasCase> cases = new ArrayList<>();
         try (InputStream in = AtlasCatalog.class.getResourceAsStream("/catalog.json")) {
             if (in == null) {
                 logger.warn("Bundled catalog.json not found on classpath");
-                return cases;
+                return new ArrayList<>();
             }
             JsonObject root = JsonParser.parseReader(
                     new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
-            // Optional catalog-wide default pixel size (µm/px) applied to any image without its
-            // own "mpp". Absent (0) = no calibration, so nothing wrong is imposed by default.
-            double defaultMpp = d(root, "defaultMpp");
-            JsonArray arr = root.getAsJsonArray("cases");
-            for (JsonElement el : arr) {
-                JsonObject o = el.getAsJsonObject();
-                double mpp = o.has("mpp") ? d(o, "mpp") : defaultMpp;
-                // "descriptionTR"/"descriptionEN" are optional, forward-compatible keys: not
-                // present in today's bundled catalog.json, read here so they light up as soon
-                // as the catalog snapshot starts supplying them.
-                cases.add(new AtlasCase(
-                        s(o, "reponame"), s(o, "stainname"), s(o, "image"),
-                        s(o, "titleEN"), s(o, "titleTR"), s(o, "organEN"),
-                        s(o, "speciality"), s(o, "type"), s(o, "dzi"), s(o, "thumb"), mpp,
-                        s(o, "descriptionTR"), s(o, "descriptionEN")));
-            }
+            return parseBundled(root);
         } catch (Exception e) {
             logger.error("Failed to read bundled catalog: {}", e.getMessage(), e);
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * Build cases from an already-parsed bundled-catalog root object (the {@code {"defaultMpp":
+     * ..., "cases": [...]}} shape of {@code catalog.json}). Split out of {@link #loadBundled()}
+     * so tests can exercise the Gson-object parsing (including the optional {@code
+     * descriptionTR}/{@code descriptionEN} fields) without a classpath resource.
+     */
+    static List<AtlasCase> parseBundled(JsonObject root) {
+        List<AtlasCase> cases = new ArrayList<>();
+        // Optional catalog-wide default pixel size (µm/px) applied to any image without its
+        // own "mpp". Absent (0) = no calibration, so nothing wrong is imposed by default.
+        double defaultMpp = d(root, "defaultMpp");
+        JsonArray arr = root.getAsJsonArray("cases");
+        for (JsonElement el : arr) {
+            JsonObject o = el.getAsJsonObject();
+            double mpp = o.has("mpp") ? d(o, "mpp") : defaultMpp;
+            // "descriptionTR"/"descriptionEN" are optional, forward-compatible keys: not
+            // present in today's bundled catalog.json, read here so they light up as soon
+            // as the catalog snapshot starts supplying them.
+            cases.add(new AtlasCase(
+                    s(o, "reponame"), s(o, "stainname"), s(o, "image"),
+                    s(o, "titleEN"), s(o, "titleTR"), s(o, "organEN"),
+                    s(o, "speciality"), s(o, "type"), s(o, "dzi"), s(o, "thumb"), mpp,
+                    s(o, "descriptionTR"), s(o, "descriptionEN")));
         }
         return cases;
     }
