@@ -496,7 +496,8 @@ public class QuizBrowseWindow {
         QuPathViewer viewer = qupath.getViewer();
         if (viewer == null)
             return;
-        QuizRegionsOverlay ov = new QuizRegionsOverlay(viewer.getOverlayOptions(), regions);
+        QuizRegionsOverlay ov = new QuizRegionsOverlay(viewer.getOverlayOptions(), regions,
+                viewer.getImageData());   // pinned: stops painting if the slide is swapped underneath
         viewer.getCustomOverlayLayers().add(ov);
         viewer.getView().addEventFilter(MouseEvent.MOUSE_CLICKED, clickFilter);
         overlay = ov;

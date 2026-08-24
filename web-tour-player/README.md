@@ -7,7 +7,8 @@ a plain web browser. No QuPath installation, no build step, no server component 
 image host and wherever you put this one file.
 
 It reads the same `AtlasQuizIO` pack format the desktop `QuizRunnerWindow` reads
-(`formatVersion` 1 or 2; `title`/`description`/`allowBack` + an ordered `questions` array of
+(`formatVersion` 1 or 2 — a newer version still plays, with a visible notice in the title, since
+unknown fields are simply ignored; `title`/`description`/`allowBack` + an ordered `questions` array of
 MCQ / FREETEXT / ANNOTATION / NAVIGATION / NARRATION stops — see the header comment inside
 `tour-player.html` for the full field list). The three geometry fields
 (`referenceGeometryGeoJson`, `targetGeometryGeoJson`, `highlightGeoJson`) are parsed defensively:

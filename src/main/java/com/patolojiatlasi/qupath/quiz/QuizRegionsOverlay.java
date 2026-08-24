@@ -31,6 +31,9 @@ import qupath.lib.roi.interfaces.ROI;
 public class QuizRegionsOverlay extends AbstractOverlay {
 
     private final List<ROI> rois;
+    // See QuizRevealOverlay.pinnedImageData: identity pin so a slide swapped under the viewer by
+    // another window never gets these regions painted over it in the wrong pixel space.
+    private final ImageData<BufferedImage> pinnedImageData;
 
     /** -1 = nothing selected (every region drawn in the default, thinner style). */
     private volatile int selectedIndex = -1;
@@ -41,8 +44,20 @@ public class QuizRegionsOverlay extends AbstractOverlay {
      *                a {@code null} entry (a stop with no geometry) is skipped when painting
      */
     public QuizRegionsOverlay(OverlayOptions options, List<ROI> rois) {
+        this(options, rois, null);
+    }
+
+    /**
+     * @param pinnedImageData the slide these regions belong to (typically {@code viewer.getImageData()}
+     *                        at creation); when non-null the overlay paints nothing while the viewer
+     *                        shows a different ImageData -- the same stale-slide guard as
+     *                        {@link QuizRevealOverlay}. {@code null} = always paint.
+     */
+    public QuizRegionsOverlay(OverlayOptions options, List<ROI> rois,
+                              ImageData<BufferedImage> pinnedImageData) {
         super(options);
         this.rois = rois;
+        this.pinnedImageData = pinnedImageData;
         // AbstractOverlay's own opacity already defaults to 1.0 (javap-confirmed against 0.6.0,
         // see QuizRevealOverlay) -- set explicitly anyway as cheap insurance against that default
         // ever changing upstream.
@@ -59,6 +74,8 @@ public class QuizRegionsOverlay extends AbstractOverlay {
     @Override
     public void paintOverlay(Graphics2D g2d, ImageRegion region, double downsample,
             ImageData<BufferedImage> imageData, boolean paintCompletely) {
+        if (pinnedImageData != null && pinnedImageData != imageData)
+            return;   // stale-slide guard (see field comment)
         Graphics2D g = (Graphics2D) g2d.create();
         try {
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);

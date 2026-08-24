@@ -78,17 +78,21 @@ public class QuizRunnerWindow {
     private static final Logger logger = LoggerFactory.getLogger(QuizRunnerWindow.class);
 
     private static Stage stage;
+    // The runner instance behind `stage` (null when no window is open) -- lets a later
+    // show(qupath, tourMode) call switch the framing of an already-open window.
+    private static QuizRunnerWindow current;
 
     private final QuPathGUI qupath;
 
     private AtlasQuiz quiz;
     private int currentIndex = 0; // 1-based; 0 = no quiz loaded yet
 
-    // Set once, at construction, by whichever show(...) overload created this instance --
-    // false for ordinary quiz play, true for guided-tour play. Never reassigned afterwards.
-    // What it changes: progressLabel's framing in showQuestion ("Durak" vs "Soru") and a one-time
-    // title/description intro shown before the first stop on load (see maybeShowTourIntro);
-    // everything else in this class is identical for both modes.
+    // Set at construction by whichever show(...) overload created this instance -- false for
+    // ordinary quiz play, true for guided-tour play -- and switched by a later show(qupath, tourMode)
+    // call while this window is already open (focus-if-open honours the requested mode). What it
+    // changes: progressLabel's framing ("Durak" vs "Soru") and a one-time title/description intro
+    // shown before the first stop on load (see maybeShowTourIntro; not re-shown on a mode switch);
+    // everything else in this class is identical for both modes. FX-thread only.
     private boolean tourMode = false;
 
     // Guards overlapping slide opens: set true just before QuizSlide.openSlideAsync is called for
@@ -218,20 +222,32 @@ public class QuizRunnerWindow {
      * intro before the first stop (see {@link #maybeShowTourIntro(AtlasQuiz)}) -- everything else
      * (NARRATION render, per-stop highlight, {@code allowBack} gating, local-slide routing) applies
      * identically to both quiz and tour play. Same single-window focus-if-open pattern as
-     * {@link #show(QuPathGUI)}: if a
-     * runner window is already open, it is simply brought to front (its existing mode, whichever that
-     * was, is left unchanged).
+     * {@link #show(QuPathGUI)}: if a runner window is already open it is brought to front and, when
+     * the requested {@code tourMode} differs from its current one, switched to it (the progress
+     * label re-frames immediately; the one-time tour intro is not re-shown -- it belongs to load).
      */
     public static void show(QuPathGUI qupath, boolean tourMode) {
         if (stage != null) {
+            if (current != null && current.tourMode != tourMode) {
+                current.tourMode = tourMode;
+                current.refreshProgressLabel();
+            }
             stage.show();
             stage.toFront();
             return;
         }
         QuizRunnerWindow runner = new QuizRunnerWindow(qupath);
         runner.tourMode = tourMode;
+        current = runner;
         stage = runner.buildStage();
         stage.show();
+    }
+
+    /** Re-render the "Durak/Soru N / M" progress text for the current mode; no-op when nothing is loaded. */
+    private void refreshProgressLabel() {
+        if (quiz == null || currentIndex < 1 || quiz.getQuestions().isEmpty())
+            return;
+        progressLabel.setText((tourMode ? "Durak " : "Soru ") + currentIndex + " / " + quiz.getQuestions().size());
     }
 
     private Stage buildStage() {
@@ -307,6 +323,7 @@ public class QuizRunnerWindow {
             leaveQuestion(quiz, currentIndex);
             closed = true;
             stage = null;
+            current = null;
         });
         return s;
     }
@@ -404,7 +421,7 @@ public class QuizRunnerWindow {
         annotationBaselineViewer = null;
         annotationBaselineImageData = null;
 
-        progressLabel.setText((tourMode ? "Durak " : "Soru ") + currentIndex + " / " + n);
+        refreshProgressLabel();
         promptLabel.setText(q.getPrompt());
         setRevealVisible(false);
         setSlideStatus(null);
@@ -466,8 +483,8 @@ public class QuizRunnerWindow {
         // has been issued (see the stillWanted supplier passed to openSlideAsync below).
         final int myToken = ++loadToken;
 
-        String current = QuizSlide.currentSlideUrl(qupath.getViewer());
-        if (q.getSlideUrl() != null && q.getSlideUrl().equals(current)) {
+        String currentUrl = QuizSlide.currentSlideUrl(qupath.getViewer());
+        if (q.getSlideUrl() != null && q.getSlideUrl().equals(currentUrl)) {
             setControlsDisabled(false);
             afterSlideReady(q);
             return;
@@ -730,7 +747,8 @@ public class QuizRunnerWindow {
         if (viewer == null)
             return;
         removeRevealOverlay();
-        QuizRevealOverlay overlay = new QuizRevealOverlay(viewer.getOverlayOptions(), roi);
+        QuizRevealOverlay overlay = new QuizRevealOverlay(viewer.getOverlayOptions(), roi,
+                QuizRevealOverlay.REVEAL_COLOR, viewer.getImageData());   // pinned: stale-slide guard
         viewer.getCustomOverlayLayers().add(overlay);
         revealOverlay = overlay;
         revealOverlayViewer = viewer;
@@ -760,14 +778,17 @@ public class QuizRunnerWindow {
      * {@link #revealOverlay}/{@link #showRevealOverlay(ROI)} -- the highlight is shown as soon as
      * the stop's slide is ready (see {@link #afterSlideReady(QuizQuestion)}), independent of
      * "Göster", so both can be on screen at once for a NAVIGATION/ANNOTATION stop that also carries
-     * a highlight.
+     * a highlight -- which is why the highlight uses {@link QuizRevealOverlay#HIGHLIGHT_COLOR} (amber)
+     * rather than the reveal's magenta. Both overlays are pinned to the viewer's current ImageData
+     * so they stop painting if another window swaps the slide underneath (see QuizRevealOverlay).
      */
     private void showHighlightOverlay(ROI roi) {
         QuPathViewer viewer = qupath.getViewer();
         if (viewer == null)
             return;
         removeHighlightOverlay();
-        QuizRevealOverlay overlay = new QuizRevealOverlay(viewer.getOverlayOptions(), roi);
+        QuizRevealOverlay overlay = new QuizRevealOverlay(viewer.getOverlayOptions(), roi,
+                QuizRevealOverlay.HIGHLIGHT_COLOR, viewer.getImageData());   // amber + pinned
         viewer.getCustomOverlayLayers().add(overlay);
         highlightOverlay = overlay;
         highlightOverlayViewer = viewer;

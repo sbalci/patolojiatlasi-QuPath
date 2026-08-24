@@ -16,7 +16,10 @@
   Pack contract (produced by com.patolojiatlasi.qupath.quiz.AtlasQuizIO, consumed verbatim)
   -------------------------------------------------------------------------------------------
   {
-    formatVersion: 1 | 2,
+    formatVersion: 1 | 2,   // read, NOT gated: a newer version plays with a visible notice
+                            // (fields this player doesn't know are ignored; a future version that
+                            // REINTERPRETS an existing field would play with wrong semantics —
+                            // the desktop AtlasQuizIO, by contrast, rejects unknown versions)
     title: string, description: string, allowBack: boolean,
     questions: [{
       id, type: "MCQ" | "FREETEXT" | "ANNOTATION" | "NAVIGATION" | "NARRATION",
@@ -301,12 +304,13 @@
   // ---------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------
+  var KNOWN_FORMAT_VERSION = 2;   // newest AtlasQuizIO.FORMAT_VERSION this player was written against
   var state = {
     quiz: null,             // the loaded pack (parsed JSON, AtlasQuiz shape)
     currentIndex: 0,        // 1-based; 0 = nothing shown yet
     viewer: null,            // OpenSeadragon.Viewer, created lazily on first stop
     currentSlideUrl: null,   // query-stripped slideUrl currently open in `viewer`
-    loadToken: 0,            // guards against overlapping applySlide() calls
+    loadToken: 0,            // guards against overlapping applySlide() calls (also bumped on pack swap)
     opening: false,          // true while a slide open is in flight
     mcqRadios: null,         // current stop's MCQ <input type=radio> elements, in option order
     revealOverlayEl: null,   // the "Göster" reference/target overlay div, if any
@@ -464,6 +468,11 @@
     // Abandon whatever stop was on screen from a previous pack, same as leaving any other stop.
     clearRevealOverlay();
     clearHighlightOverlay();
+    // A mid-tour pack swap (drag-drop while a slide is still opening) must also supersede that
+    // in-flight open: bump the token so its onOpen/onFail callbacks become no-ops instead of
+    // applying the OLD pack's stop (viewport/highlight) on top of the new pack's state.
+    state.loadToken++;
+    state.opening = false;
 
     state.quiz = data;
     state.currentIndex = 0;
@@ -471,7 +480,12 @@
 
     var title = (data.title || '').trim();
     var desc = (data.description || '').trim();
-    els.tourTitle.textContent = title;
+    // Newer-than-known format: keep playing (unknown fields are ignored) but say so visibly.
+    var fv = typeof data.formatVersion === 'number' ? data.formatVersion : null;
+    var newer = fv !== null && fv > KNOWN_FORMAT_VERSION;
+    els.tourTitle.textContent = !newer ? title
+        : (title ? title + ' ' : '') + '— paket biçimi v' + fv + ' (bu oynatıcı v'
+          + KNOWN_FORMAT_VERSION + ' bilir; bazı alanlar yorumlanamayabilir)';
     els.progressLabel.textContent = '';
 
     hide(els.dropzone);
