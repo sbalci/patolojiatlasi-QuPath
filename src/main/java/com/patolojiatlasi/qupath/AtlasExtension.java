@@ -84,6 +84,14 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
             coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
 
+            // Pixel size (µm/px). DZI pyramids carry no MPP, so an atlas slide opens uncalibrated
+            // unless the catalogue or a ?mpp= query supplies one — and an uncalibrated image still
+            // reports getAveragedPixelSize() == 1.0, which µm-based tools (WSInfer's downsample
+            // computation among them) consume without checking. This turns the scanner mpp plus the
+            // export downsample ratio into a real calibration; nothing is applied automatically.
+            MenuItem pixelSizeItem = new MenuItem("Piksel boyutu ayarla…");
+            pixelSizeItem.setOnAction(e -> PixelSizeDialog.show(qupath));
+
             // Basit görünüm — hides QuPath's analysis-focused top-level menus (Analyze, Classify,
             // Automate, TMA) so learners see a reading-focused UI; toggling off restores them.
             CheckMenuItem simpleView = new CheckMenuItem("Basit görünüm (analiz menülerini gizle)");
@@ -164,6 +172,7 @@ public class AtlasExtension implements QuPathExtension {
             atlas.getItems().addAll(
                     browseItem,
                     coverageItem,
+                    pixelSizeItem,
                     simpleView,
                     new SeparatorMenuItem(),
                     compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);

@@ -544,7 +544,7 @@ public class AtlasBrowser {
         progress.setVisible(false);
         String cal = c.getMpp() > 0
                 ? "  (" + c.getMpp() + " µm/px)"
-                : "  (no µm/px calibration — set it in the Image tab if known)";
+                : "  (no µm/px calibration — Patoloji Atlası → Piksel boyutu ayarla…)";
         status.setText(prefix + c.getTitle() + cal);
     }
 
