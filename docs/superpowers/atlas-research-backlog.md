@@ -65,7 +65,7 @@
 > `behaviors.json` → reviewable tour draft → case-folder export. Merged to master `9914785`,
 > unpushed. See `docs/superpowers/plans/2026-07-26-pathology-cot-data-engine.md`.
 
-## Candidates from the QuPath Edu review (2026-08-23 — UNRANKED, user decides ordering)
+## Candidates from the QuPath Edu review (2026-08-23) — ✅ ALL FIVE SHIPPED (merged `2b7ca10`, polish `7a2a269`)
 
 Source: `docs/superpowers/2026-08-23-qupath-edu-feature-review.md` (Yli-Hallila et al., *J Anat*
 2025;246(5):846–856, doi:10.1111/joa.14172 — survey-backed evidence per candidate; **no LICENSE on
@@ -100,6 +100,31 @@ Source: `docs/superpowers/2026-08-23-chcapi-feature-review.md` (Google's archive
   network blip can be cached as a permanently white tile; split transient (re-query) from
   definitive 404 (sparse-white). VERIFY QuPath 0.6 `AbstractTileableImageServer` null-vs-throw
   caching semantics first.
+
+## Second-pass verified candidates from the QuPath Edu deep review (2026-08-30 — UNRANKED, user decides ordering)
+
+Source: `docs/superpowers/2026-08-30-qupath-edu-deep-review.md` (61-agent sweep → 3-lens panel →
+3 refuters each; 16 survived, D7 refuted as already shipped). Clean-room only (their repos are
+unlicensed). Suggested order by value ÷ effort: D1 → D3 → D4 → D5 → D17b → D11 → D12 → D13 → D14 →
+D2 → D8 → D9 → D15 → D17a → D10 → D6/D16.
+
+- **D1** explicit MCQ verdict on the desktop reveal (S; colour-blind-safe text+icon) — web already grades.
+- **D3** attempt-before-reveal for MCQ/FREETEXT with "Bilmiyorum, göster" escape (S).
+- **D4** dirty-state guard in `QuizAuthorWindow` (S) — their own docs admit the silent-loss footgun.
+- **D5** Basit görünüm resets the active tool to MOVE, restore on toggle-off (S).
+- **D17b** blinded projects auto-offer QuPath's core "Mask image names" pref (S; `PathPrefs.maskImageNamesProperty()`).
+- **D11** resume-where-you-left-off keyed by pack-content hash, no accounts (S).
+- **D12** end-of-run summary Alert (S; MCQ counts need D1).
+- **D13** session-only shuffle toggle, greyed in tour mode (S).
+- **D14** `AtlasCase.tags[]` + tag-chip filter (S; PathScribe evidence).
+- **D2** Anki deck export of MCQ/FREETEXT stops (S; Michigan SecondLook precedent).
+- **D8** local `catalog-descriptions-overrides.json` + edit dialog so the description pane has data (M).
+- **D9** project-level intro text as `project-info.json` sidecar + "Proje hakkında" panel (M).
+- **D15** annotation-embedded Q&A on any slide via explicitly-typed PathObject metadata (M; browse UI reused).
+- **D17a** per-pack `maskCaseTitles` pseudonyms for exam integrity (M).
+- **D10** in-app multi-rater decision concordance (κ) over blinded fragment `decision`s + `studyId` (M; sibling of #12).
+- **D6/D16** consent-gated learner session record → results export → offline cohort aggregation (+ completion attestation) (S → M → L).
+- Cross-cutting: one schema-version convention across the files D10/D14/D15/D16/D17 touch; never expose listings unauthenticated (design lesson from the live OpenMicroanatomy demo host).
 
 ## Resource watchlist — webcam gaze channel (2026-08-23, user-requested; UNRANKED)
 
