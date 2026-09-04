@@ -14,6 +14,7 @@ import javafx.scene.control.SeparatorMenuItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.patolojiatlasi.qupath.autoview.AutoviewControl;
 import com.patolojiatlasi.qupath.focus.FocusHeatmap;
 import com.patolojiatlasi.qupath.pathologycot.PathologyCotActions;
 import com.patolojiatlasi.qupath.research.BlindedResearch;
@@ -35,6 +36,9 @@ public class AtlasExtension implements QuPathExtension {
 
     /** Retained so Task 3's project-open/close hook can drive blinded recording on the same instance. */
     private FocusHeatmap focusHeatmap;
+
+    /** Built on first use — see the comment where the menu item is created. */
+    private AutoviewControl autoview;
 
     /** Retained so {@link #onProjectChanged} can own the consent {@link Alert} (stage owner lookup). */
     private QuPathGUI qupath;
@@ -97,13 +101,22 @@ public class AtlasExtension implements QuPathExtension {
             CheckMenuItem simpleView = new CheckMenuItem("Basit görünüm (analiz menülerini gizle)");
             simpleView.setOnAction(e -> SimpleViewMode.apply(qupath, simpleView.isSelected()));
 
-            // Reorientation — a general any-slide viewing tool, added as its own top-level
-            // Extensions item at the end of installExtension (not nested in the "Araştırma" menu,
-            // whose focus-heatmap sub-menu + flag-any-project are built further down).
+            // Reorientation and auto-sweep — general any-slide viewing tools, added as their own
+            // top-level Extensions items at the end of installExtension (not nested in the
+            // "Araştırma" menu, whose focus-heatmap sub-menu + flag-any-project are built further
+            // down).
             RotationControl rotation = new RotationControl(qupath);
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
             rotationItem.setOnAction(e -> rotation.show());
             this.focusHeatmap = new FocusHeatmap(qupath);
+
+            // Serpentine auto-sweep of the whole slide (or the selected annotation's bounding box),
+            // tile-aware so it never glides across un-rendered grey. Built lazily on first use: it
+            // holds persistent preferences in static initialisers, and a failure there would be an
+            // ExceptionInInitializerError, which the Exception catch below would NOT stop from
+            // taking the whole extension install down with it.
+            MenuItem autoviewItem = new MenuItem("Otomatik tarama…");
+            autoviewItem.setOnAction(e -> showAutoview(qupath));
             MenuItem flagProjectItem = new MenuItem("Mevcut projeyi araştırma projesi yap (gezinme kaydı)…");
             flagProjectItem.setOnAction(e -> flagCurrentProjectAsResearch(qupath));
 
@@ -197,10 +210,11 @@ public class AtlasExtension implements QuPathExtension {
                     new SeparatorMenuItem(),
                     cotMenu);
 
-            // "Görüntüyü döndür…" is promoted to its own top-level Extensions item (a sibling of the
-            // "Patoloji Atlası" and "Araştırma" menus) rather than nested inside Araştırma, so this
-            // general any-slide viewing tool is reachable in one click.
-            qupath.getMenu("Extensions", true).getItems().addAll(atlas, research, rotationItem);
+            // "Görüntüyü döndür…" and "Otomatik tarama…" are promoted to their own top-level
+            // Extensions items (siblings of the "Patoloji Atlası" and "Araştırma" menus) rather than
+            // nested inside Araştırma, so these general any-slide viewing tools are one click away.
+            qupath.getMenu("Extensions", true).getItems()
+                    .addAll(atlas, research, rotationItem, autoviewItem);
             logger.info("Patoloji Atlası extension installed");
         } catch (Exception e) {
             logger.error("Error installing Patoloji Atlası extension: {}", e.getMessage(), e);
@@ -249,6 +263,24 @@ public class AtlasExtension implements QuPathExtension {
      * open hook and the "Araştırma" menu's focus sub-menu drive. This is what lets a researcher use
      * blinded recording on their own project, not just one built from the atlas browser.
      */
+    /**
+     * Show the autoview control, building it on first use.
+     * <p>
+     * Catches {@link Throwable} rather than {@link Exception} on purpose: {@link AutoviewControl}
+     * creates persistent preferences in static initialisers, so a failure there arrives as an
+     * {@link ExceptionInInitializerError}. Swallowing it here costs one menu item; letting it out
+     * would cost the whole extension.
+     */
+    private void showAutoview(QuPathGUI qupath) {
+        try {
+            if (autoview == null)
+                autoview = new AutoviewControl(qupath, focusHeatmap);
+            autoview.show();
+        } catch (Throwable t) {
+            logger.error("Otomatik tarama açılamadı: {}", t.toString(), t);
+        }
+    }
+
     private void flagCurrentProjectAsResearch(QuPathGUI qupath) {
         Project<?> p = qupath.getProject();
         if (p == null) {

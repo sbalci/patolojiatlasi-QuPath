@@ -65,6 +65,15 @@ import qupath.lib.regions.ImageRegion;
  * <p>
  * All viewer/overlay access happens on the JavaFX thread (the sampling timer runs there); only file
  * writes are pushed to a background thread.
+ * <p>
+ * <b>This sampler cannot tell a programmatic viewer movement from a human one</b> — it only polls
+ * {@link QuPathViewer#getDisplayedRegionShape()} and has no idea what caused the view to change.
+ * Anything that drives the viewer automatically (see {@code autoview.AutoviewSweep}) must therefore
+ * hold a {@link #suppressTracking(String)} handle for its duration, or its synthetic motion is
+ * recorded as real viewing. Note that {@link #mainStageFocused()} already returns {@code false}
+ * while a separate control window holds focus, so a floating control pauses blinded accrual on its
+ * own; that is long-standing behaviour shared with {@code RotationControl} and is not what
+ * suppression is for.
  */
 public final class FocusHeatmap {
 
@@ -402,6 +411,65 @@ public final class FocusHeatmap {
         return blindedRecording;
     }
 
+    // --- suppression (programmatic viewer motion) ----------------------------
+
+    /**
+     * A handle for one active tracking suppression, from {@link #suppressTracking(String)}.
+     * {@link #close()} is idempotent, so a holder may safely close it on both a normal path and in a
+     * {@code finally} without underflowing the depth counter.
+     */
+    public interface Suppression extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    /** Nesting depth of open {@link Suppression} handles. JavaFX thread only. */
+    private int suppressCount;
+
+    /**
+     * Suppress dwell and scanpath accumulation while something is moving the viewer
+     * <em>programmatically</em>.
+     * <p>
+     * This sampler polls the visible region every {@link #SAMPLE_MS} ms and cannot distinguish a
+     * synthetic pan from a human one, so an automated sweep would otherwise deposit synthetic dwell
+     * into the {@link FocusMap} and append a point to the blinded scanpath on every tick —
+     * corrupting the heatmap, the contribution fragment's {@code path}, and everything downstream of
+     * it (the Pathology-CoT discretizer, the behaviours file, the CoT draft tour, and the
+     * aggregation scripts).
+     * <p>
+     * This is the same "a synthetic action must not look human" problem that
+     * {@code QuizBrowseWindow.suppressFlyOnSelect} and {@code RotationControl.syncing} solve, but
+     * those are same-callstack {@code try}/{@code finally} booleans. A suppression here spans
+     * minutes and has abnormal exits (window closed, slide changed, exception), hence a counted,
+     * idempotently-closeable handle rather than a bare flag.
+     * <p>
+     * Slide switching, fragment writing and checkpointing are deliberately <em>not</em> suppressed:
+     * a suppressed sweep still leaves the departing slide's real data intact and still saves it.
+     *
+     * @param reason short tag for the debug log, e.g. {@code "autoview"}
+     */
+    public Suppression suppressTracking(String reason) {
+        suppressCount++;
+        logger.debug("Focus tracking suppressed ({}), depth {}", reason, suppressCount);
+        return new Suppression() {
+            private boolean released;
+
+            @Override
+            public void close() {
+                if (released)
+                    return;
+                released = true;
+                suppressCount = Math.max(0, suppressCount - 1);
+                logger.debug("Focus tracking suppression released ({}), depth {}", reason, suppressCount);
+            }
+        };
+    }
+
+    /** True while any {@link Suppression} handle is open. */
+    public boolean isTrackingSuppressed() {
+        return suppressCount > 0;
+    }
+
     /** Record (or overwrite) the current slide's decision; stamps decisionMs relative to the slide's
      *  blinded-recording start, and stores promptShownMs (the dialog-shown moment, also relative to
      *  that same start, captured by the caller immediately before showing the dialog). FX thread
@@ -648,8 +716,13 @@ public final class FocusHeatmap {
             Shape shape = v.getDisplayedRegionShape();
             if (shape == null)
                 return;
-            Rectangle b = shape.getBounds();
-            currentMap.deposit(b.getX(), b.getY(), b.getWidth(), b.getHeight());
+            // Programmatic viewer motion is not human viewing -- see suppressTracking(). Only the
+            // deposit is gated: the overlay/window refresh below keeps running, so a visible heatmap
+            // stays live during a sweep (it simply stops growing) rather than appearing to freeze.
+            if (suppressCount == 0) {
+                Rectangle b = shape.getBounds();
+                currentMap.deposit(b.getX(), b.getY(), b.getWidth(), b.getHeight());
+            }
             if (++ticksSinceRefresh >= REFRESH_EVERY) {
                 ticksSinceRefresh = 0;
                 if (overlayVisible)
@@ -670,7 +743,12 @@ public final class FocusHeatmap {
      */
     private void tickBlinded(QuPathViewer v) {
         long now = System.currentTimeMillis();
-        boolean active = mainStageFocused() && v != null && v.getImageData() != null;
+        // suppressCount: a programmatic sweep must accrue neither dwell NOR a scanpath point -- see
+        // suppressTracking(). Folding it into `active` kills both at once, because
+        // FocusMap.activeDwellMs returns 0 when inactive and the blindedPath.add(...) below sits
+        // inside the same `ms > 0` branch as the deposit. lastTickMs still advances just below, so
+        // no elapsed time banks up behind the gate to be credited in a lump when suppression lifts.
+        boolean active = suppressCount == 0 && mainStageFocused() && v != null && v.getImageData() != null;
         long ms = FocusMap.activeDwellMs(now, lastTickMs, active, DT_CAP_MS);
         lastTickMs = now;
         if (ms > 0 && currentMap != null) {

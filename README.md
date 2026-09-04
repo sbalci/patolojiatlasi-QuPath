@@ -147,6 +147,35 @@ window appears alongside it with:
 
 ---
 
+## Automatic sweep (autoview)
+
+**Extensions → Otomatik tarama…** opens a small control panel that pans the slide for you in a
+serpentine — across, down a row, back, down again — the way you would screen a slide under a
+microscope, so you can watch rather than drag.
+
+- **Hız** is set in fields of view per second and read back as seconds per field. It is adjustable
+  while the sweep runs. Deliberately not µm/s: atlas slides open uncalibrated, so a physical unit
+  would be made up.
+- **Yön** sweeps in rows (horizontal) or columns (vertical), and **Başlangıç** picks which corner to
+  start from — all eight serpentine variants.
+- **Boş alanları atla** skips blank glass. A coarse tissue map is built from the slide thumbnail and
+  empty fields are dropped from the route, so a sweep does not spend minutes crossing background.
+  **Doku duyarlılığı** decides how faint a region still counts as tissue. Background polarity is
+  detected rather than assumed, so this works on dark-field and fluorescence too.
+- **Select an annotation first** to sweep only its bounding box; with nothing selected the whole
+  slide is swept. The sweep runs at whatever magnification you are already at.
+
+Because tiles stream over HTTP, the sweep **paces itself against the tile cache**: it checks how
+much of the view ahead has actually arrived and eases off when it hasn't, so it never glides across
+un-rendered grey. The progress bar and *alan i / N* readout track the route.
+
+The sweep stops on its own when you click or scroll in the viewer, change slides, rotate the image,
+or close the window — anything that suggests you have taken over. It refuses to start on a rotated
+image. While it runs, focus-heatmap and navigation recording are **suppressed**, so an automated
+sweep is never recorded as if you had looked there yourself.
+
+---
+
 ## Related-content navigator
 
 **Extensions → Patoloji Atlası → İlgili içerik…** opens a companion window that, for the atlas
