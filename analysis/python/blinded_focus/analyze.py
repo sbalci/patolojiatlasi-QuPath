@@ -72,7 +72,18 @@ Output files (written to ``--out DIR``):
   (10%) highest-dwell cells vs the SAME reference mask this file already compares against (whichever
   of ``--roi``/``--reference`` built it — see :func:`blinded_focus.metrics.precision_recall_at_topk`),
   separating "missed target" (low recall) from "wasted attention" (low precision). Blank if the
-  reference mask or the top-K set is empty.
+  reference mask or the top-K set is empty. (screening-efficiency, docs/superpowers/2026-09-12-
+  screening-efficiency-review.md, appended at the END) ``timeToFirstRefFixMs``,
+  ``timeToFirstRefFixLpfMs``, ``refFixTotalMs``, ``refFixTotalLpfMs``, ``refFixCount``,
+  ``refFixVisitCount``, ``firstRefFixDownsample``, ``firstRefFixMagnification`` — Abe et al.
+  (*Cancer Cytopathology* 2026;e70132, doi:10.1002/cncy.70132) "LPF main object" viewport-proxy
+  biomarkers vs the SAME reference mask; see :func:`blinded_focus.metrics.screening_efficiency`.
+  "LPF" (low-power field) = true magnification below the toolkit's own canonical 10x band cut
+  (:data:`blinded_focus.metrics.LPF_MAX_MAG`). Blank when the session has no path, the reference
+  mask is empty, or (the two ``*Lpf*`` fields only) magnification is not computable for some
+  on-reference fixation (e.g. no ``baseMagnification``). The 6 non-zoom fields (all but the two
+  ``firstRefFix*`` zoom columns) are also appended to :data:`NAV_ACCURACY_COLS` below, so
+  ``nav_accuracy.csv`` correlates them against graded diagnostic accuracy.
 - per slide, when the slide has >=2 sessions (Tier 3 C6): ``consensus_count_<slug>.csv`` — the
   spatial structure ``coincidenceLevel`` collapses to one scalar: for every grid cell (on the
   slide's common resampled grid) with ``nReaders`` (count of sessions whose own
@@ -499,11 +510,19 @@ def _fmt(x, nd=3):
 #: written to ``metrics.csv`` but never joined against graded accuracy. (``decisionLatencyMs``, the
 #: fourth recorded-but-uncorrelated dimension, is sourced directly from ``decision_rows`` rather
 #: than this metrics.csv-backed list -- see :func:`_nav_accuracy_rows`'s dedicated block below.)
+#: Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132, doi:10.1002/cncy.70132):
+#: 6 of :func:`blinded_focus.metrics.screening_efficiency`'s 8 fields (excluding
+#: ``firstRefFixDownsample``/``firstRefFixMagnification``, which describe a zoom LEVEL rather than
+#: a navigation-efficiency quantity) -- stamped in-memory-only onto ``metrics_rows`` in the
+#: reference/ROI comparison section below (only present on a session with a computable reference
+#: mask AND at least one on-reference fixation's magnification, per that function's blank rules).
 NAV_ACCURACY_COLS = [
     "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
     "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
     "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
     "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx",
+    "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+    "refFixCount", "refFixVisitCount",
 ]
 #: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or
 #: with zero variance on either side) :func:`_pearson_guarded` returns blank, never a numerically
@@ -1312,6 +1331,15 @@ def analyze(
                     )
 
             if ref_map is not None and ref_mask is not None:
+                # Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132,
+                # doi:10.1002/cncy.70132): lookup from sessionId -> this slide's ALREADY-APPENDED
+                # metrics_rows dict (slide_metric_rows' elements are the SAME dict objects stored
+                # in metrics_rows, not copies -- mutating one mutates the other), so the 6
+                # NAV_ACCURACY_COLS-listed screening fields below can be stamped in-memory-only,
+                # the same pattern decisionLatencyMs uses: metrics.csv's own fieldnames list is
+                # unchanged (extrasaction="ignore" drops unlisted keys silently at write time).
+                metrics_row_by_sid = {r["sessionId"]: r for r in slide_metric_rows}
+
                 def _ref_row(sid):
                     other = resampled[sid]
                     time_on = float(other[ref_mask].sum())
@@ -1323,6 +1351,25 @@ def analyze(
                     # --roi/--reference built it above) -- see
                     # blinded_focus.metrics.precision_recall_at_topk's docstring.
                     precision_at_topk, recall_val = m.precision_recall_at_topk(other, ref_mask)
+                    # Screening efficiency (Abe 2026): viewport-proxy analogues of the paper's LPF
+                    # main-object AOI biomarkers against the SAME ref_mask/(tw,th)/(img_w,img_h)
+                    # this row already uses above. See
+                    # docs/superpowers/2026-09-12-screening-efficiency-review.md. A grid-only
+                    # (schema /1-/2) fragment has no "path" key at all -- `.get("path")` degrades
+                    # to None, and screening_efficiency(None, ...) is a well-defined all-blank
+                    # result (fixations_idt(None) -> None), never a crash.
+                    se = m.screening_efficiency(
+                        frag_by_sid[sid].get("path"), frag_by_sid[sid].get("baseMagnification"),
+                        ref_mask, tw, th, img_w, img_h,
+                    )
+                    mrow = metrics_row_by_sid.get(sid)
+                    if mrow is not None:
+                        mrow["timeToFirstRefFixMs"] = se["timeToFirstRefFixMs"]
+                        mrow["timeToFirstRefFixLpfMs"] = se["timeToFirstRefFixLpfMs"]
+                        mrow["refFixTotalMs"] = se["refFixTotalMs"]
+                        mrow["refFixTotalLpfMs"] = se["refFixTotalLpfMs"]
+                        mrow["refFixCount"] = se["refFixCount"]
+                        mrow["refFixVisitCount"] = se["refFixVisitCount"]
                     return {
                         "session": labels.get(sid, sid),
                         "nss": m.nss(other, ref_mask),
@@ -1334,6 +1381,14 @@ def analyze(
                         "timeOffRefMs": time_off,
                         "precisionAtTopK": precision_at_topk,
                         "recall": recall_val,
+                        "timeToFirstRefFixMs": se["timeToFirstRefFixMs"],
+                        "timeToFirstRefFixLpfMs": se["timeToFirstRefFixLpfMs"],
+                        "refFixTotalMs": se["refFixTotalMs"],
+                        "refFixTotalLpfMs": se["refFixTotalLpfMs"],
+                        "refFixCount": se["refFixCount"],
+                        "refFixVisitCount": se["refFixVisitCount"],
+                        "firstRefFixDownsample": se["firstRefFixDownsample"],
+                        "firstRefFixMagnification": se["firstRefFixMagnification"],
                     }
 
                 ref_rows = [_ref_row(sid) for sid in session_ids if sid != reference]
@@ -1348,7 +1403,13 @@ def analyze(
                      "timeOnRefMs", "timeOffRefMs",
                      # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column
                      # order above is unchanged.
-                     "precisionAtTopK", "recall"],
+                     "precisionAtTopK", "recall",
+                     # Screening efficiency (Abe 2026, doi:10.1002/cncy.70132): appended, existing
+                     # column order above is unchanged. See
+                     # docs/superpowers/2026-09-12-screening-efficiency-review.md.
+                     "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs",
+                     "refFixTotalLpfMs", "refFixCount", "refFixVisitCount",
+                     "firstRefFixDownsample", "firstRefFixMagnification"],
                 )
                 reference_summaries.append({"slide": slide_key, "slug": slide_slug, "rows": ref_rows})
 

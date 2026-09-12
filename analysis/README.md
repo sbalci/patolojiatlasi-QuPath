@@ -98,7 +98,13 @@ environment you prefer.
 - **Reference comparison** (`--reference <sessionId>` = an expert's session, or `--roi` = a
   QuPath-exported GeoJSON): each participant's NSS/AUC/CC/IoU against the reference attended-map,
   fraction of the reference region covered, and **time-on-reference vs off**. *"Did the trainee look
-  where the expert (or the marked ROI) did?"*
+  where the expert (or the marked ROI) did?"* Also reports **screening-efficiency** viewport-proxy
+  metrics against that same reference region — time to first fixation, total fixation duration,
+  fixation/visit count, split at the toolkit's low-power (LPF) magnification band — echoing the
+  "LPF main object" gaze-AOI biomarkers of Abe N, Nishimura Y, Yamashita K, Kawamorita T, Takatori
+  Y, Murakumo Y, Furuta R. *Screening efficiency over experience: Rapid target detection in
+  low-power field as a modifiable cognitive biomarker for diagnostic accuracy in digital cytology.*
+  Cancer Cytopathology 2026;e70132. doi:[10.1002/cncy.70132](https://doi.org/10.1002/cncy.70132).
 - **Scanpath** (schema `/3`, `/4`): pairwise sequence similarity (Levenshtein over the visited-cell
   sequence) + per-session transition entropy. *"Do they navigate in the same order / systematically?"*
 - **Scanpath-rasterized fine heatmap** (`--figures`, schema `/3`/`/4`): rebuilds the dwell heatmap

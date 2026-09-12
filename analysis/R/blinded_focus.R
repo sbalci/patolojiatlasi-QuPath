@@ -2424,6 +2424,157 @@ mean_segment_linearity_roi <- function(path, mask, gw, gh, img_w, img_h) {
 }
 
 # ---------------------------------------------------------------------------
+# Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132, doi:10.1002/cncy.70132) --
+# viewport-proxy analogues of the paper's gaze-AOI "LPF main object" biomarkers, computed against
+# a reference mask (whichever of --roi/--reference built it -- see the reference/ROI comparison
+# section of analyze(), the SAME mask reference_<slug>.csv's nss/aucJudd/precisionAtTopK columns
+# already compare against). Exact port of blinded_focus.metrics.screening_efficiency (Python);
+# design rationale + construct-mapping table:
+# docs/superpowers/2026-09-12-screening-efficiency-review.md.
+# ---------------------------------------------------------------------------
+
+#: "Low-power field" cutoff (true objective magnification, x): a fixation's zoom strictly BELOW
+#: this is "low power". Matches the Python toolkit's `LPF_MAX_MAG` literal exactly -- see that
+#: docstring for the full rationale (anchors to the toolkit's own canonical `MAG_BAND_CUTS` 10.0
+#: boundary rather than a new literature-specific threshold; `mag == 10.0` itself is NOT
+#: low-power, matching `canonical_mag_band_labels`'s `findInterval` convention).
+LPF_MAX_MAG <- 10.0
+
+#: The always-blank template every early-return below builds from -- `NA_real_` (never `NULL`, so
+#: the returned list always subsets cleanly by name for `write_csv_tidy`'s `r[fieldnames]`) for
+#: every one of the 8 fields.
+.screening_efficiency_blank <- function() {
+  list(
+    timeToFirstRefFixMs = NA_real_, timeToFirstRefFixLpfMs = NA_real_,
+    refFixTotalMs = NA_real_, refFixTotalLpfMs = NA_real_,
+    refFixCount = NA_real_, refFixVisitCount = NA_real_,
+    firstRefFixDownsample = NA_real_, firstRefFixMagnification = NA_real_
+  )
+}
+
+#' Abe-2026-style screening-efficiency metrics of one session's scanpath against a reference mask
+#' -- exact port of `blinded_focus.metrics.screening_efficiency` (Python); see that function's
+#' docstring for the full algorithm description (never-crash guards, on-reference attribution via
+#' the same clamp+floor cell mapping `visited_sequence`/`mean_segment_linearity_roi` use, the
+#' zoom-at-fixation-start lookup, the LPF-blank rule). Returns a named list with the same 8 keys,
+#' `NA_real_` (never `NULL`) for every blank field.
+#'
+#' **First-index-with-time>=startMs (bisect_left equivalent):** the Python port uses
+#' `bisect.bisect_left` on the path's own timestamp list. This R port uses `sum(times < start_ms)
+#' + 1L` (1-based) instead of `findInterval` -- the COUNT of timestamps strictly LESS than
+#' `start_ms`, plus one, is exactly the 1-based position of the first timestamp `>= start_ms` in a
+#' sorted-ascending vector (by `bisect_left`'s own definition: "the leftmost insertion point that
+#' preserves sort order" is exactly the count of strictly-smaller elements) -- verified equivalent
+#' to `bisect_left`, NOT to plain `findInterval(start_ms, times)` (which would instead return the
+#' count of elements `<= start_ms`, i.e. the LAST matching index on a tie, the opposite of
+#' `bisect_left`'s leftmost-match semantics). This point always exists (`start_ms` is itself one
+#' of the path's own timestamps, by construction of `fixations_idt`).
+screening_efficiency <- function(path, base_mag, ref_mask, tw, th, img_w, img_h) {
+  fx <- fixations_idt(path)
+  if (is.null(fx)) {
+    return(.screening_efficiency_blank())
+  }
+  mask <- if (!is.null(ref_mask)) as.logical(ref_mask) else logical(0)
+  if (length(mask) == 0 || !any(mask)) {
+    return(.screening_efficiency_blank())
+  }
+  tw_i <- suppressWarnings(as.integer(tw))
+  th_i <- suppressWarnings(as.integer(th))
+  img_w_f <- suppressWarnings(as.numeric(img_w))
+  img_h_f <- suppressWarnings(as.numeric(img_h))
+  if (is.na(tw_i) || is.na(th_i) || is.na(img_w_f) || is.na(img_h_f) ||
+      tw_i <= 0 || th_i <= 0 || img_w_f <= 0 || img_h_f <= 0) {
+    return(.screening_efficiency_blank())
+  }
+
+  if (length(fx) == 0) {
+    out <- .screening_efficiency_blank()
+    out$refFixTotalMs <- 0.0
+    out$refFixTotalLpfMs <- 0.0
+    out$refFixCount <- 0L
+    out$refFixVisitCount <- 0L
+    return(out)
+  }
+
+  on_ref <- logical(length(fx))
+  for (i in seq_along(fx)) {
+    f <- fx[[i]]
+    col <- as.integer(floor(f$centerImageX / img_w_f * tw_i))
+    row <- as.integer(floor(f$centerImageY / img_h_f * th_i))
+    col <- min(max(col, 0L), tw_i - 1L)
+    row <- min(max(row, 0L), th_i - 1L)
+    on_ref[i] <- mask[row * tw_i + col + 1L]
+  }
+
+  ref_fix_count <- sum(on_ref)
+  visit_count <- 0L
+  prev_on <- FALSE
+  for (flag in on_ref) {
+    if (flag && !prev_on) {
+      visit_count <- visit_count + 1L
+    }
+    prev_on <- flag
+  }
+
+  pm <- as_path_matrix(path)
+  times <- pm[, 1]
+
+  .zoom_at_start <- function(start_ms) {
+    idx <- sum(times < start_ms) + 1L
+    if (idx > nrow(pm)) idx <- nrow(pm)
+    pt <- pm[idx, ]
+    ds <- if (length(pt) >= 6 && !is.na(pt[6]) && pt[6] > 0) pt[6] / 1000.0 else NA_real_
+    list(ds = ds, mag = true_magnification(pt, base_mag))
+  }
+
+  ref_fix_total_ms <- 0.0
+  time_to_first <- NA_real_
+  first_ds <- NA_real_
+  first_mag <- NA_real_
+  found_first <- FALSE
+  lpf_computable <- TRUE
+  lpf_total <- 0.0
+  time_to_first_lpf <- NA_real_
+
+  for (i in seq_along(fx)) {
+    if (!on_ref[i]) next
+    f <- fx[[i]]
+    ref_fix_total_ms <- ref_fix_total_ms + f$durationMs
+    z <- .zoom_at_start(f$startMs)
+    if (!found_first) {
+      time_to_first <- f$startMs
+      first_ds <- z$ds
+      first_mag <- if (is.null(z$mag)) NA_real_ else z$mag
+      found_first <- TRUE
+    }
+    if (is.null(z$mag)) {
+      lpf_computable <- FALSE
+    } else if (z$mag < LPF_MAX_MAG) {
+      lpf_total <- lpf_total + f$durationMs
+      if (is.na(time_to_first_lpf)) {
+        time_to_first_lpf <- f$startMs
+      }
+    }
+  }
+
+  if (!lpf_computable) {
+    lpf_total <- NA_real_
+    time_to_first_lpf <- NA_real_
+  }
+
+  list(
+    timeToFirstRefFixMs = time_to_first,
+    timeToFirstRefFixLpfMs = time_to_first_lpf,
+    refFixTotalMs = ref_fix_total_ms,
+    refFixTotalLpfMs = lpf_total,
+    refFixCount = ref_fix_count,
+    refFixVisitCount = visit_count,
+    firstRefFixDownsample = first_ds,
+    firstRefFixMagnification = first_mag
+  )
+}
+
+# ---------------------------------------------------------------------------
 # Inter-observer agreement
 # ---------------------------------------------------------------------------
 
@@ -3004,11 +3155,20 @@ CANONICAL_MAGBAND_COUNT <- length(MAG_BAND_LABELS)
 #: written to `metrics.csv` but never joined against graded accuracy. (`decisionLatencyMs`, the
 #: fourth recorded-but-uncorrelated dimension, is sourced directly from `decision_rows` rather than
 #: this metrics.csv-backed vector -- see `.nav_accuracy_rows`'s dedicated block below.)
+#: Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132, doi:10.1002/cncy.70132):
+#: 6 of `screening_efficiency`'s 8 fields (excluding `firstRefFixDownsample`/
+#: `firstRefFixMagnification`, which describe a zoom LEVEL rather than a navigation-efficiency
+#: quantity) -- stamped in-memory-only onto `metrics_rows` in the reference/ROI comparison section
+#: below (only present on a session with a computable reference mask AND at least one
+#: on-reference fixation's magnification, per that function's blank rules). Matches the Python
+#: toolkit's `NAV_ACCURACY_COLS` extension exactly (identical strings, same order).
 NAV_ACCURACY_COLS <- c(
   "avgZoom", "zoomVariance", "magnificationPercentage", "scanningRatePxPerMin",
   "drillingRatePerMin", "coveragePct", "dwellInAnnotationPct", "enrichmentRatio",
   "searchFocusRatio", "linearity", "pathVelocityPxPerSec", "entropy", "transitionEntropy",
-  "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx"
+  "durationMs", "cursorOverSlidePct", "mouseViewportCouplingPx",
+  "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+  "refFixCount", "refFixVisitCount"
 )
 #: Minimum sample size for a defensible point-biserial r at this pilot scale -- below this (or with
 #: zero variance on either side) `.pearson_guarded` returns `NaN` (blank), never a numerically
@@ -3839,6 +3999,30 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       }
 
       if (!is.null(ref_map) && !is.null(ref_mask)) {
+        # Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132,
+        # doi:10.1002/cncy.70132): computed ONCE per session here (not inside ref_row_fn below) so
+        # the metrics_rows stamp can use plain `<-` on the ALREADY-APPENDED entry by index --
+        # this file avoids `<<-` (superassignment) entirely, unlike the Python toolkit's closures,
+        # which mutate the same dict object by reference with no special scoping needed. Mirrors
+        # the Python port's in-memory-only stamp: metrics.csv's own fieldnames vector is unchanged
+        # (write_csv_tidy's `r[fieldnames]` subset drops unlisted keys silently at write time);
+        # .nav_accuracy_rows picks the 6 non-zoom fields up via NAV_ACCURACY_COLS instead. See
+        # docs/superpowers/2026-09-12-screening-efficiency-review.md.
+        se_by_sid <- list()
+        metrics_row_base_idx <- length(metrics_rows) - length(session_ids) + 1L
+        for (sid in session_ids) {
+          f <- by_session[[sid]]
+          se <- screening_efficiency(f$path, f$baseMagnification, ref_mask, tw, th, img_w, img_h)
+          se_by_sid[[sid]] <- se
+          mrow_idx <- metrics_row_base_idx + match(sid, session_ids) - 1L
+          metrics_rows[[mrow_idx]]$timeToFirstRefFixMs <- se$timeToFirstRefFixMs
+          metrics_rows[[mrow_idx]]$timeToFirstRefFixLpfMs <- se$timeToFirstRefFixLpfMs
+          metrics_rows[[mrow_idx]]$refFixTotalMs <- se$refFixTotalMs
+          metrics_rows[[mrow_idx]]$refFixTotalLpfMs <- se$refFixTotalLpfMs
+          metrics_rows[[mrow_idx]]$refFixCount <- se$refFixCount
+          metrics_rows[[mrow_idx]]$refFixVisitCount <- se$refFixVisitCount
+        }
+
         ref_row_fn <- function(sid) {
           other <- resampled[[sid]]
           time_on <- sum(other[ref_mask])
@@ -3849,6 +4033,7 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           # ref_mask this row already compares against (whichever of --roi/--reference built it
           # above) -- see precision_recall_at_topk's docs.
           pr <- precision_recall_at_topk(other, ref_mask)
+          se <- se_by_sid[[sid]]
           list(
             session = label_for(sid, labels),
             nss = nss(other, ref_mask),
@@ -3859,7 +4044,15 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
             timeOnRefMs = time_on,
             timeOffRefMs = time_off,
             precisionAtTopK = pr$precision,
-            recall = pr$recall
+            recall = pr$recall,
+            timeToFirstRefFixMs = se$timeToFirstRefFixMs,
+            timeToFirstRefFixLpfMs = se$timeToFirstRefFixLpfMs,
+            refFixTotalMs = se$refFixTotalMs,
+            refFixTotalLpfMs = se$refFixTotalLpfMs,
+            refFixCount = se$refFixCount,
+            refFixVisitCount = se$refFixVisitCount,
+            firstRefFixDownsample = se$firstRefFixDownsample,
+            firstRefFixMagnification = se$firstRefFixMagnification
           )
         }
         # Pre-existing latent bug fix (found by Tier 3 C6's roi-only/no-reference fixture, the
@@ -3882,7 +4075,13 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
           c("session", "nss", "aucJudd", "cc", "iou", "refCoveragePct", "timeOnRefMs", "timeOffRefMs",
             # Tier 3 C6 (docs/superpowers/specs/2026-07-23-...): appended, existing column order
             # above is unchanged.
-            "precisionAtTopK", "recall")
+            "precisionAtTopK", "recall",
+            # Screening efficiency (Abe 2026, doi:10.1002/cncy.70132): appended, existing column
+            # order above is unchanged. See
+            # docs/superpowers/2026-09-12-screening-efficiency-review.md.
+            "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs",
+            "refFixTotalLpfMs", "refFixCount", "refFixVisitCount",
+            "firstRefFixDownsample", "firstRefFixMagnification")
         )
         reference_summaries[[length(reference_summaries) + 1]] <- list(
           slide = slide_key, slug = slide_slug, rows = ref_rows

@@ -3289,6 +3289,298 @@ check_calibration_direct_unit_asserts <- function() {
   stopifnot(is.nan(calib0$gap) && is.nan(calib0$brier) && is.nan(calib0$conf_acc_r))
 }
 
+# ---------------------------------------------------------------------------
+# Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132, doi:10.1002/cncy.70132):
+# viewport-proxy analogues of the paper's "LPF main object" gaze-AOI biomarkers, computed against
+# a --roi/--reference mask (screening_efficiency). Design rationale + construct-mapping table:
+# docs/superpowers/2026-09-12-screening-efficiency-review.md. Exact port of the Python selftest's
+# equivalent section -- same slide-key naming, same hand-derived fixture, same fixed literals.
+# ---------------------------------------------------------------------------
+
+SCREENING_SLIDE_KEY <- "sha256:selftest-slide-screening-efficiency-0001"
+#: img 2000x1500, grid gw=gh=8 (cell = 250 x 187.5 image px) -- own dims per the C6-fixture
+#: convention, chosen so BOTH sessions share one native grid resolution (no NN resampling to
+#: reason about: the target-grid-dims pick (tw,th)=(8,8) trivially).
+SCREENING_IMG_W <- 2000; SCREENING_IMG_H <- 1500
+SCREENING_GW <- 8L; SCREENING_GH <- 8L
+#: baseMagnification for both sessions (schema/4+ field) -- a round number so
+#: true_magnification = 20.0 / (dsMilli/1000.0) works out to clean values below.
+SCREENING_BASE_MAG <- 20.0
+
+#' schema/5 fragment builder for the screening-efficiency fixtures below -- 8-element path points
+#' `[t, cx, cy, w, h, dsMilli, mouseX, mouseY]`; mouse is the off-slide sentinel `(-1, -1)`
+#' throughout (screening_efficiency never reads mouseX/mouseY -- only the shared schema is
+#' exercised, per the task brief's "own two /5 sessions" instruction). `grid` is an all-zero 8x8
+#' dwell array -- screening_efficiency never reads it either; only `path` + `baseMagnification`
+#' matter for the metric under test. `path` is a matrix of 6-element rows (`[t,cx,cy,w,h,dsMilli]`,
+#' same shape convention `build_magband_agreement_fixture` uses) -- the trailing `(-1,-1)` mouse
+#' pair is appended here.
+.screening_fragment <- function(session_id, path, duration_ms, sample_count) {
+  path_list <- lapply(seq_len(nrow(path)), function(i) c(as.numeric(path[i, ]), -1, -1))
+  list(
+    schema = "atlas-focus-contribution/5",
+    slideKey = SCREENING_SLIDE_KEY,
+    sessionId = session_id,
+    imageWidth = SCREENING_IMG_W, imageHeight = SCREENING_IMG_H,
+    gridWidth = SCREENING_GW, gridHeight = SCREENING_GH,
+    grid = rep(0.0, SCREENING_GW * SCREENING_GH),
+    durationMs = duration_ms,
+    sampleCount = sample_count,
+    date = "2026-09-12",
+    path = path_list,
+    baseMagnification = SCREENING_BASE_MAG
+  )
+}
+
+#' ROI: a rectangle covering EXACTLY cell(row=4, col=4)'s cell-center-containment test
+#' (`rasterize_roi` tests `((col+0.5)/gw*img_w, (row+0.5)/gh*img_h)` per cell). Cell(4,4)'s center
+#' is `((4.5/8)*2000, (4.5/8)*1500) = (1125, 843.75)`; neighbouring cell centers are >=125px away
+#' in x (875, 1375) and >=93.75px away in y (656.25, 1031.25), so the rectangle x=[1000,1250],
+#' y=[750,937.5] safely contains ONLY cell(4,4)'s center -> rasterizes to exactly flat index
+#' `4*8+4 == 36` (0-based). Matches the Python selftest's `build_screening_roi_fc` exactly.
+build_screening_roi_fc <- function() {
+  list(
+    type = "FeatureCollection",
+    features = list(list(
+      type = "Feature",
+      geometry = list(
+        type = "Polygon",
+        coordinates = list(list(
+          c(1000, 750), c(1250, 750), c(1250, 937.5), c(1000, 937.5), c(1000, 750)
+        ))
+      ),
+      properties = list()
+    ))
+  )
+}
+
+#' Hand-derivation (verified independently against `fixations_idt`'s documented I-DT algorithm
+#' before this fixture was run through the pipeline -- see scratchpad/check_screening.R's
+#' standalone confirmation, and the Python selftest's `build_screening_fixture` docstring for the
+#' full step-by-step derivation, IDENTICAL for this R port):
+#'
+#' "eff" (efficient reader): one fixation, startMs=1000.0, durationMs=1000.0, ON-reference,
+#'   dsMilli=5000 -> downsample=5.0, true_magnification=20.0/(5000/1000)=4.0 < LPF_MAX_MAG=10.0 ->
+#'   LPF. Expected reference_<slug>.csv row: timeToFirstRefFixMs=1000.0,
+#'   timeToFirstRefFixLpfMs=1000.0, refFixTotalMs=1000.0, refFixTotalLpfMs=1000.0, refFixCount=1,
+#'   refFixVisitCount=1, firstRefFixDownsample=5.0, firstRefFixMagnification=4.0.
+#'
+#' "ser" (serial reader): an OFF-reference fixation (startMs=0.0) then an ON-reference one
+#'   "late" (startMs=5000.0, dsMilli=500 -> downsample=0.5, true_magnification=40.0 -- NOT < 10.0,
+#'   but computable, so refFixTotalLpfMs is a well-defined 0.0, not blank; timeToFirstRefFixLpfMs
+#'   stays blank -- no qualifying fixation at all). Expected row: timeToFirstRefFixMs=5000.0,
+#'   timeToFirstRefFixLpfMs=<blank/NA>, refFixTotalMs=1000.0, refFixTotalLpfMs=0.0, refFixCount=1,
+#'   refFixVisitCount=1, firstRefFixDownsample=0.5, firstRefFixMagnification=40.0.
+build_screening_fixture <- function() {
+  path_eff <- matrix(
+    c(
+      0, 100, 100, 400, 300, 20000,
+      1000, 1125, 850, 400, 300, 5000,
+      1250, 1125, 850, 400, 300, 5000,
+      1500, 1125, 850, 400, 300, 5000,
+      1750, 1125, 850, 400, 300, 5000,
+      2000, 1125, 850, 400, 300, 5000,
+      2250, 100, 100, 400, 300, 20000
+    ),
+    ncol = 6, byrow = TRUE
+  )
+  path_ser <- matrix(
+    c(
+      0, 100, 100, 400, 300, 5000,
+      250, 100, 100, 400, 300, 5000,
+      500, 100, 100, 400, 300, 5000,
+      750, 100, 100, 400, 300, 5000,
+      1000, 100, 100, 400, 300, 5000,
+      5000, 1125, 850, 400, 300, 500,
+      5250, 1125, 850, 400, 300, 500,
+      5500, 1125, 850, 400, 300, 500,
+      5750, 1125, 850, 400, 300, 500,
+      6000, 1125, 850, 400, 300, 500
+    ),
+    ncol = 6, byrow = TRUE
+  )
+  f_eff <- .screening_fragment("eff", path_eff, duration_ms = 2250, sample_count = nrow(path_eff))
+  f_ser <- .screening_fragment("ser", path_ser, duration_ms = 6000, sample_count = nrow(path_ser))
+  list(f_eff, f_ser)
+}
+
+#' Direct, pipeline-independent unit checks for `screening_efficiency` -- TDD-style asserts on
+#' hand-built `(path, base_mag, ref_mask, tw, th, img_w, img_h)` inputs, bypassing the full
+#' `analyze()` pipeline entirely (mirrors the pipeline-level `check_screening_efficiency_fixture`
+#' below, which exercises the SAME function through the reference/ROI comparison section instead).
+#' Exact port of the Python selftest's equivalent function -- same fixtures, same literals.
+check_screening_efficiency_direct_unit_asserts <- function() {
+  tw <- SCREENING_GW; th <- SCREENING_GH
+  img_w <- as.numeric(SCREENING_IMG_W); img_h <- as.numeric(SCREENING_IMG_H)
+  mask <- rep(FALSE, tw * th)
+  mask[4L * tw + 4L + 1L] <- TRUE  # ROI == cell(4,4), same as build_screening_roi_fc
+
+  hold <- function(t0, cx, cy, ds, n = 5, step = 250.0) {
+    lapply(0:(n - 1), function(i) c(t0 + i * step, cx, cy, 400.0, 300.0, ds))
+  }
+
+  all_none_keys <- c(
+    "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+    "refFixCount", "refFixVisitCount", "firstRefFixDownsample", "firstRefFixMagnification"
+  )
+
+  # ---- fixations_idt(path) is NULL (path has < 2 points) -> all-NA list, whether path is a
+  # single-point list or NULL outright (a grid-only /1-/2 fragment's `$path`). ----
+  for (degenerate_path in list(list(c(0, 1125, 850, 400, 300, 5000)), NULL, list())) {
+    res <- screening_efficiency(degenerate_path, SCREENING_BASE_MAG, mask, tw, th, img_w, img_h)
+    stopifnot(all(sapply(all_none_keys, function(k) is.na(res[[k]]))))
+  }
+
+  # ---- empty ref_mask (no TRUE cell at all) -> all-NA, even with a perfectly good path. ----
+  good_path <- hold(0.0, 1125.0, 850.0, 5000.0)
+  res_empty_mask <- screening_efficiency(
+    good_path, SCREENING_BASE_MAG, rep(FALSE, tw * th), tw, th, img_w, img_h
+  )
+  stopifnot(all(sapply(all_none_keys, function(k) is.na(res_empty_mask[[k]]))))
+
+  # ---- on/off/on visit-count run logic: 4 fixations forced by idle gaps (dt=100000 >
+  # IDLE_GAP_MS=60000) between 4 static holds -- on-ref flags [TRUE, TRUE, FALSE, TRUE] (the task
+  # brief's own worked example) -> refFixVisitCount == 2, refFixCount == 3. Every on-ref hold uses
+  # the SAME ds=5000 -> mag=4.0<10 -> LPF, so refFixTotalMs == refFixTotalLpfMs == 3000.0 and
+  # timeToFirstRefFixMs == timeToFirstRefFixLpfMs == 0.0. ----
+  path_visit <- c(
+    hold(0.0, 1125.0, 850.0, 5000.0),
+    hold(101000.0, 1125.0, 850.0, 5000.0),
+    hold(202000.0, 100.0, 100.0, 5000.0),
+    hold(303000.0, 1125.0, 850.0, 5000.0)
+  )
+  res_visit <- screening_efficiency(path_visit, SCREENING_BASE_MAG, mask, tw, th, img_w, img_h)
+  stopifnot(res_visit$refFixCount == 3)
+  stopifnot(res_visit$refFixVisitCount == 2)
+  stopifnot(abs(res_visit$refFixTotalMs - 3000.0) < 1e-9)
+  stopifnot(abs(res_visit$refFixTotalLpfMs - 3000.0) < 1e-9)
+  stopifnot(abs(res_visit$timeToFirstRefFixMs - 0.0) < 1e-9)
+  stopifnot(abs(res_visit$timeToFirstRefFixLpfMs - 0.0) < 1e-9)
+  stopifnot(abs(res_visit$firstRefFixDownsample - 5.0) < 1e-9)
+  stopifnot(abs(res_visit$firstRefFixMagnification - 4.0) < 1e-9)
+
+  # ---- null base_mag: LPF fields (and firstRefFixMagnification) blank, but refFixTotalMs /
+  # refFixCount / refFixVisitCount / timeToFirstRefFixMs / firstRefFixDownsample are all STILL
+  # computed -- downsample never depends on base_mag, only magnification does. ----
+  res_null_mag <- screening_efficiency(good_path, NULL, mask, tw, th, img_w, img_h)
+  stopifnot(abs(res_null_mag$refFixTotalMs - 1000.0) < 1e-9)
+  stopifnot(res_null_mag$refFixCount == 1)
+  stopifnot(res_null_mag$refFixVisitCount == 1)
+  stopifnot(abs(res_null_mag$timeToFirstRefFixMs - 0.0) < 1e-9)
+  stopifnot(abs(res_null_mag$firstRefFixDownsample - 5.0) < 1e-9)
+  stopifnot(is.na(res_null_mag$firstRefFixMagnification))
+  stopifnot(is.na(res_null_mag$timeToFirstRefFixLpfMs))
+  stopifnot(is.na(res_null_mag$refFixTotalLpfMs))
+
+  # ---- schema/3 path (5-element points, no dsMilli at all): downsample AND magnification both
+  # blank (true_magnification itself needs length(point)>=6), so both LPF fields blank too -- but
+  # on-reference attribution needs only cx/cy, so those stay fully populated. A valid, non-null
+  # base_mag confirms the blank is due to point shape, not base_mag. ----
+  path_5elem <- lapply(0:4, function(i) c(i * 250.0, 1125.0, 850.0, 400.0, 300.0))
+  res_5elem <- screening_efficiency(path_5elem, SCREENING_BASE_MAG, mask, tw, th, img_w, img_h)
+  stopifnot(abs(res_5elem$refFixTotalMs - 1000.0) < 1e-9)
+  stopifnot(res_5elem$refFixCount == 1)
+  stopifnot(res_5elem$refFixVisitCount == 1)
+  stopifnot(abs(res_5elem$timeToFirstRefFixMs - 0.0) < 1e-9)
+  stopifnot(is.na(res_5elem$firstRefFixDownsample))
+  stopifnot(is.na(res_5elem$firstRefFixMagnification))
+  stopifnot(is.na(res_5elem$timeToFirstRefFixLpfMs))
+  stopifnot(is.na(res_5elem$refFixTotalLpfMs))
+}
+
+#' Pipeline-level check: runs `build_screening_fixture` (2 schema/5 sessions, a `--roi`-driven
+#' single-cell reference mask) through the full `analyze()` pipeline and asserts
+#' `reference_<slug>.csv`'s EXACT new column order plus every hand-derived value documented in
+#' that function's own docstring, at 1e-6 tolerance. Also extends the fixture with a tiny
+#' `--graded` CSV (Selftests item 5): confirms at least one new screening column produces a
+#' populated `nav_accuracy.csv` row (`timeToFirstRefFixMs`, n=2 -- both sessions have at least one
+#' on-reference fixation) and that a column blank for one session (`timeToFirstRefFixLpfMs`,
+#' blank for "ser") correctly drops that session from its row (n=1). Exact port of the Python
+#' selftest's equivalent function.
+check_screening_efficiency_fixture <- function(tmp) {
+  fragments <- build_screening_fixture()
+  in_dir <- file.path(tmp, "in_screening")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+  roi_path <- file.path(tmp, "screening_roi.geojson")
+  writeLines(jsonlite::toJSON(build_screening_roi_fc(), auto_unbox = TRUE), roi_path)
+
+  graded_csv_path <- file.path(tmp, "screening_graded.csv")
+  .write_simple_csv(
+    graded_csv_path, c("slideKey", "sessionId", "correct"),
+    list(c(SCREENING_SLIDE_KEY, "eff", "1"), c(SCREENING_SLIDE_KEY, "ser", "0"))
+  )
+
+  out_dir <- file.path(tmp, "out_screening")
+  analyze(list(in_dir), out_dir, roi = roi_path, graded_csv = graded_csv_path)
+
+  out_files <- list.files(out_dir)
+  ref_files <- out_files[startsWith(out_files, "reference_")]
+  stopifnot(length(ref_files) == 1)
+  ref <- utils::read.csv(file.path(out_dir, ref_files[1]), stringsAsFactors = FALSE)
+
+  expected_cols <- c(
+    "session", "nss", "aucJudd", "cc", "iou", "refCoveragePct",
+    "timeOnRefMs", "timeOffRefMs", "precisionAtTopK", "recall",
+    "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+    "refFixCount", "refFixVisitCount", "firstRefFixDownsample", "firstRefFixMagnification"
+  )
+  stopifnot(identical(colnames(ref), expected_cols))
+  stopifnot(setequal(ref$session, c("eff", "ser")))
+
+  row_eff <- ref[ref$session == "eff", ]
+  row_ser <- ref[ref$session == "ser", ]
+
+  # --- "eff": on-reference, LPF (mag=4.0 < 10.0) ---
+  stopifnot(abs(row_eff$timeToFirstRefFixMs - 1000.0) < 1e-6)
+  stopifnot(abs(row_eff$timeToFirstRefFixLpfMs - 1000.0) < 1e-6)
+  stopifnot(abs(row_eff$refFixTotalMs - 1000.0) < 1e-6)
+  stopifnot(abs(row_eff$refFixTotalLpfMs - 1000.0) < 1e-6)
+  stopifnot(row_eff$refFixCount == 1)
+  stopifnot(row_eff$refFixVisitCount == 1)
+  stopifnot(abs(row_eff$firstRefFixDownsample - 5.0) < 1e-6)
+  stopifnot(abs(row_eff$firstRefFixMagnification - 4.0) < 1e-6)
+
+  # --- "ser": on-reference "late", NOT LPF (mag=40.0) -- refFixTotalLpfMs is a well-defined 0.0
+  # (magnification WAS computable, just not low-power), timeToFirstRefFixLpfMs is blank (no
+  # qualifying fixation at all) -- the two distinct branches of the LPF-blank rule. ---
+  stopifnot(abs(row_ser$timeToFirstRefFixMs - 5000.0) < 1e-6)
+  stopifnot("ser has no qualifying LPF fixation -> should be blank" = is.na(row_ser$timeToFirstRefFixLpfMs))
+  stopifnot(abs(row_ser$refFixTotalMs - 1000.0) < 1e-6)
+  stopifnot(
+    "ser's on-ref fixation has a COMPUTABLE (non-LPF) magnification -> refFixTotalLpfMs should be 0.0, not blank" =
+      abs(row_ser$refFixTotalLpfMs - 0.0) < 1e-6
+  )
+  stopifnot(row_ser$refFixCount == 1)
+  stopifnot(row_ser$refFixVisitCount == 1)
+  stopifnot(abs(row_ser$firstRefFixDownsample - 0.5) < 1e-6)
+  stopifnot(abs(row_ser$firstRefFixMagnification - 40.0) < 1e-6)
+
+  # --- nav_accuracy.csv (Selftests item 5): the 6 non-zoom screening columns are stamped
+  # in-memory onto metrics_rows and joined via NAV_ACCURACY_COLS, same as any other navigation
+  # metric ---
+  nav <- utils::read.csv(file.path(out_dir, "nav_accuracy.csv"), stringsAsFactors = FALSE)
+  for (col in c(
+    "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+    "refFixCount", "refFixVisitCount"
+  )) {
+    stopifnot(col %in% nav$metric)
+  }
+
+  # timeToFirstRefFixMs: BOTH sessions have an on-reference fixation -> n=2.
+  ttfr <- nav[nav$metric == "timeToFirstRefFixMs", ]
+  stopifnot(ttfr$n == 2)
+  stopifnot(abs(ttfr$meanCorrect - 1000.0) < 1e-6)   # "eff", correct=1
+  stopifnot(abs(ttfr$meanIncorrect - 5000.0) < 1e-6) # "ser", correct=0
+
+  # timeToFirstRefFixLpfMs: "ser"'s value is blank -> excluded from the join entirely -> n=1
+  # (only "eff" contributes) -- confirms a blank screening column degrades the SAME way any other
+  # blank NAV_ACCURACY_COLS metric already does, not a new code path.
+  ttfrl <- nav[nav$metric == "timeToFirstRefFixLpfMs", ]
+  stopifnot(ttfrl$n == 1)
+  stopifnot(abs(ttfrl$meanCorrect - 1000.0) < 1e-6)
+}
+
 run <- function() {
   tmp <- tempfile(pattern = "bfa-r-selftest-")
   dir.create(tmp)
@@ -4278,6 +4570,12 @@ run <- function() {
   check_pt4_magband_agreement_frac_fixture(tmp)
   check_pt4_magband_agreement_partial_fixture(tmp)
   check_pt4_tercile_scheme_no_file(tmp)
+
+  # --- Screening efficiency (Abe et al. 2026, doi:10.1002/cncy.70132): viewport-proxy LPF
+  # main-object biomarkers vs a --roi/--reference mask, in reference_<slug>.csv and
+  # nav_accuracy.csv ---
+  check_screening_efficiency_direct_unit_asserts()
+  check_screening_efficiency_fixture(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }
