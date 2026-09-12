@@ -2222,9 +2222,11 @@ def screening_efficiency(path, base_mag, ref_mask, tw, th, img_w, img_h):
 
     **Never-crash guards (all-``None`` dict, checked before any fixation-level work):**
     ``fixations_idt(path)`` is ``None`` (path has fewer than 2 points -- see that function);
-    ``ref_mask`` is ``None``/has no ``True`` cell (nothing to attribute a fixation to); or
+    ``ref_mask`` is ``None``/has no ``True`` cell (nothing to attribute a fixation to);
     ``tw``/``th``/``img_w``/``img_h`` is not a positive number (a degenerate grid/image would make
-    every cell-mapping division by zero or produce a meaningless single-cell mask).
+    every cell-mapping division by zero or produce a meaningless single-cell mask); or ``ref_mask``'s
+    flat length doesn't equal ``tw*th`` (a mismatched mask would otherwise index out of range on the
+    very first fixation).
 
     **On-reference attribution:** a fixation is on-reference iff its ``(centerImageX,
     centerImageY)`` maps to a ``True`` cell of ``ref_mask`` (flat, row-major, length
@@ -2282,6 +2284,12 @@ def screening_efficiency(path, base_mag, ref_mask, tw, th, img_w, img_h):
     except (TypeError, ValueError):
         return _screening_efficiency_blank()
     if tw_i <= 0 or th_i <= 0 or img_w_f <= 0 or img_h_f <= 0:
+        return _screening_efficiency_blank()
+    # Finding 3 (.superpowers/sdd/task-screening-report.md): a `ref_mask` whose flat length
+    # doesn't match `tw_i*th_i` would make the `mask[row * tw_i + col]` lookup below raise
+    # IndexError (out of range) -- validate BEFORE any indexing, same blank-not-crash convention
+    # every other malformed-input guard above already uses.
+    if mask.size != tw_i * th_i:
         return _screening_efficiency_blank()
 
     if not fx:

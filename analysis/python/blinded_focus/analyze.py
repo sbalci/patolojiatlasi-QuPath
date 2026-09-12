@@ -1331,6 +1331,18 @@ def analyze(
                     )
 
             if ref_map is not None and ref_mask is not None:
+                # Finding 1 (.superpowers/sdd/task-screening-report.md): img_w/img_h are only
+                # explicitly (re)assigned above inside the `if roi_rings:` branch. On a
+                # --reference-only run (no --roi), img_w/img_h were never set in THIS scope, so
+                # without this explicit re-derivation they would silently fall back to whatever
+                # the EARLIER per-session hotspots loop (~line 1155, `img_w = f.get("imageWidth",
+                # 1)`) left behind after its last iteration -- the LAST session's own
+                # imageWidth/imageHeight (defaulting to 1 for a fragment lacking them), not
+                # necessarily this slide's canonical dims. Re-derive from the SAME source and
+                # defaulting the --roi branch above uses (sessions[0], the first-loaded session)
+                # so both paths agree, whether or not the roi_rings branch already ran.
+                img_w = sessions[0][1].get("imageWidth", 1)
+                img_h = sessions[0][1].get("imageHeight", 1)
                 # Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132,
                 # doi:10.1002/cncy.70132): lookup from sessionId -> this slide's ALREADY-APPENDED
                 # metrics_rows dict (slide_metric_rows' elements are the SAME dict objects stored

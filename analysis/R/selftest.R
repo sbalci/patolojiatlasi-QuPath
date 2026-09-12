@@ -3315,7 +3315,9 @@ SCREENING_BASE_MAG <- 20.0
 #' matter for the metric under test. `path` is a matrix of 6-element rows (`[t,cx,cy,w,h,dsMilli]`,
 #' same shape convention `build_magband_agreement_fixture` uses) -- the trailing `(-1,-1)` mouse
 #' pair is appended here.
-.screening_fragment <- function(session_id, path, duration_ms, sample_count) {
+#' `grid` defaults to an all-zero 8x8 dwell array; callers that need a non-degenerate `--reference
+#' SESSIONID` mask (Finding 1's regression fixture) pass an explicit `grid`.
+.screening_fragment <- function(session_id, path, duration_ms, sample_count, grid = NULL) {
   path_list <- lapply(seq_len(nrow(path)), function(i) c(as.numeric(path[i, ]), -1, -1))
   list(
     schema = "atlas-focus-contribution/5",
@@ -3323,7 +3325,7 @@ SCREENING_BASE_MAG <- 20.0
     sessionId = session_id,
     imageWidth = SCREENING_IMG_W, imageHeight = SCREENING_IMG_H,
     gridWidth = SCREENING_GW, gridHeight = SCREENING_GH,
-    grid = rep(0.0, SCREENING_GW * SCREENING_GH),
+    grid = if (!is.null(grid)) grid else rep(0.0, SCREENING_GW * SCREENING_GH),
     durationMs = duration_ms,
     sampleCount = sample_count,
     date = "2026-09-12",
@@ -3486,6 +3488,33 @@ check_screening_efficiency_direct_unit_asserts <- function() {
   stopifnot(is.na(res_5elem$firstRefFixMagnification))
   stopifnot(is.na(res_5elem$timeToFirstRefFixLpfMs))
   stopifnot(is.na(res_5elem$refFixTotalLpfMs))
+
+  # ---- Finding 2 (.superpowers/sdd/task-screening-report.md): a NULL/zero-length dim
+  # (tw/th/img_w/img_h) must degrade to the all-NA blank list, NOT error. Pre-fix, `as.integer(
+  # NULL)` -> `integer(0)`, and OR-ing `is.na(integer(0))` (a zero-length logical) into the guard
+  # chain silently collapsed to `NA`, so the enclosing `if (...)` raised "missing value where
+  # TRUE/FALSE needed" instead of returning blank -- unlike the Python port, whose `int(tw)`/
+  # `float(img_w)` `try/except` already handled a None dim correctly (see this same block in
+  # selftest.py). ----
+  for (bad_dims in list(
+    list(NULL, th, img_w, img_h), list(tw, NULL, img_w, img_h),
+    list(tw, th, NULL, img_h), list(tw, th, img_w, NULL)
+  )) {
+    res_none_dim <- screening_efficiency(
+      good_path, SCREENING_BASE_MAG, mask, bad_dims[[1]], bad_dims[[2]], bad_dims[[3]], bad_dims[[4]]
+    )
+    stopifnot(all(sapply(all_none_keys, function(k) is.na(res_none_dim[[k]]))))
+  }
+
+  # ---- Finding 3 (.superpowers/sdd/task-screening-report.md): a ref_mask whose length
+  # doesn't equal tw*th must degrade to the all-NA blank list, not silently index out-of-range
+  # (returning NA into `on_ref`, which then poisons the `flag && !prev_on` visit-count logic with
+  # an `if (NA)` error downstream). ----
+  wrong_len_mask <- rep(TRUE, tw * th - 1L)  # deliberately mismatched vs. tw*th
+  res_wrong_len <- screening_efficiency(
+    good_path, SCREENING_BASE_MAG, wrong_len_mask, tw, th, img_w, img_h
+  )
+  stopifnot(all(sapply(all_none_keys, function(k) is.na(res_wrong_len[[k]]))))
 }
 
 #' Pipeline-level check: runs `build_screening_fixture` (2 schema/5 sessions, a `--roi`-driven
@@ -3579,6 +3608,109 @@ check_screening_efficiency_fixture <- function(tmp) {
   ttfrl <- nav[nav$metric == "timeToFirstRefFixLpfMs", ]
   stopifnot(ttfrl$n == 1)
   stopifnot(abs(ttfrl$meanCorrect - 1000.0) < 1e-6)
+}
+
+#' Finding 1 (.superpowers/sdd/task-screening-report.md): the eff/ser paths are IDENTICAL to
+#' `build_screening_fixture` -- only "eff"'s `grid` and the presence of a third, dims-less session
+#' change. "eff" gets a single non-zero cell at flat index `4*8+4+1==37` (1-based; cell(4,4), the
+#' EXACT cell `build_screening_roi_fc`'s rectangle covers) so a plain `--reference eff` run (NO
+#' `--roi`) thresholds to the SAME single-cell mask the `--roi` fixture uses (`ref_grid >
+#' IOU_THRESH * max(ref_grid)` keeps only the one nonzero cell) -- letting a `--reference`-only
+#' run's "eff" screening columns be compared directly against `check_screening_efficiency_fixture`'s
+#' hand-derived `--roi` values above ("ser" is untouched, still all-zero grid, irrelevant to the
+#' reference mask since only `resampled[[reference]]` builds it).
+#'
+#' A THIRD fragment, sessionId `"zzz-nodim"` (named to sort LAST: `load_fragments` reads a
+#' directory via `sort(list.files(p, pattern = "\\.json$", ...))`, and each fragment is written to
+#' `<sessionId>.json`, so `"eff.json" < "ser.json" < "zzz-nodim.json"` alphabetically -- making
+#' `"zzz-nodim"` the LAST entry of both the loaded fragment list and the insertion-ordered
+#' `by_session`/`session_ids`), is schema/2 (grid-only, no `path` element at all) and carries
+#' NEITHER `imageWidth` NOR `imageHeight`. On the PRE-FIX code, the hotspots loop's plain `if
+#' (!is.null(f$imageWidth)) f$imageWidth else 1` for this LAST session leaves `img_w <- img_h <- 1`
+#' sitting in the enclosing scope once that loop finishes, and the `--reference`-only branch below
+#' (no `--roi`) never reassigns it (only the `--roi` branch does) -- so "eff"'s on-reference
+#' cell-mapping would be computed against a degenerate 1x1 "image" instead of the true 2000x1500,
+#' corrupting the clamp+floor cell lookup and producing screening values that do NOT match the
+#' `--roi` run's "eff" row. With the fix (deriving `img_w`/`img_h` from `session_ids[1]` -- "eff"
+#' itself -- right in this block, same as the `--roi` branch), the two runs agree exactly.
+build_screening_reference_only_fixture <- function() {
+  path_eff <- matrix(
+    c(
+      0, 100, 100, 400, 300, 20000,
+      1000, 1125, 850, 400, 300, 5000,
+      1250, 1125, 850, 400, 300, 5000,
+      1500, 1125, 850, 400, 300, 5000,
+      1750, 1125, 850, 400, 300, 5000,
+      2000, 1125, 850, 400, 300, 5000,
+      2250, 100, 100, 400, 300, 20000
+    ),
+    ncol = 6, byrow = TRUE
+  )
+  path_ser <- matrix(
+    c(
+      0, 100, 100, 400, 300, 5000,
+      250, 100, 100, 400, 300, 5000,
+      500, 100, 100, 400, 300, 5000,
+      750, 100, 100, 400, 300, 5000,
+      1000, 100, 100, 400, 300, 5000,
+      5000, 1125, 850, 400, 300, 500,
+      5250, 1125, 850, 400, 300, 500,
+      5500, 1125, 850, 400, 300, 500,
+      5750, 1125, 850, 400, 300, 500,
+      6000, 1125, 850, 400, 300, 500
+    ),
+    ncol = 6, byrow = TRUE
+  )
+  eff_grid <- rep(0.0, SCREENING_GW * SCREENING_GH)
+  eff_grid[4L * SCREENING_GW + 4L + 1L] <- 1.0  # cell(4,4) -- same cell the --roi fixture covers
+  f_eff <- .screening_fragment(
+    "eff", path_eff, duration_ms = 2250, sample_count = nrow(path_eff), grid = eff_grid
+  )
+  f_ser <- .screening_fragment("ser", path_ser, duration_ms = 6000, sample_count = nrow(path_ser))
+  f_third <- list(
+    schema = "atlas-focus-contribution/2",
+    slideKey = SCREENING_SLIDE_KEY,
+    sessionId = "zzz-nodim",
+    gridWidth = SCREENING_GW, gridHeight = SCREENING_GH,
+    grid = rep(0.0, SCREENING_GW * SCREENING_GH),
+    durationMs = 1000.0,
+    sampleCount = 4,
+    date = "2026-09-12"
+    # deliberately NO imageWidth/imageHeight, NO path -- grid-only schema/2 fragment.
+  )
+  list(f_eff, f_ser, f_third)
+}
+
+#' Finding 1 regression test: a `--reference eff` run with NO `--roi` (three sessions on the
+#' slide, the third grid-only/dims-less and last-iterated -- see
+#' `build_screening_reference_only_fixture`) must produce the EXACT SAME "eff" screening columns
+#' as the `--roi`-driven `check_screening_efficiency_fixture` above, at `1e-6` tolerance -- both
+#' runs compare "eff" against the identical single-cell reference mask (cell(4,4)) using "eff"'s
+#' own true 2000x1500 image dimensions.
+check_screening_efficiency_reference_only_regression <- function(tmp) {
+  fragments <- build_screening_reference_only_fixture()
+  in_dir <- file.path(tmp, "in_screening_refonly")
+  dir.create(in_dir, showWarnings = FALSE, recursive = TRUE)
+  write_fragments_to_dir(fragments, in_dir)
+
+  out_dir <- file.path(tmp, "out_screening_refonly")
+  analyze(list(in_dir), out_dir, reference = "eff")
+
+  out_files <- list.files(out_dir)
+  ref_files <- out_files[startsWith(out_files, "reference_")]
+  stopifnot(length(ref_files) == 1)
+  ref <- utils::read.csv(file.path(out_dir, ref_files[1]), stringsAsFactors = FALSE)
+  row_eff <- ref[ref$session == "eff", ]
+
+  # Same hand-derived "eff" values as check_screening_efficiency_fixture's --roi run.
+  stopifnot(abs(row_eff$timeToFirstRefFixMs - 1000.0) < 1e-6)
+  stopifnot(abs(row_eff$timeToFirstRefFixLpfMs - 1000.0) < 1e-6)
+  stopifnot(abs(row_eff$refFixTotalMs - 1000.0) < 1e-6)
+  stopifnot(abs(row_eff$refFixTotalLpfMs - 1000.0) < 1e-6)
+  stopifnot(row_eff$refFixCount == 1)
+  stopifnot(row_eff$refFixVisitCount == 1)
+  stopifnot(abs(row_eff$firstRefFixDownsample - 5.0) < 1e-6)
+  stopifnot(abs(row_eff$firstRefFixMagnification - 4.0) < 1e-6)
 }
 
 run <- function() {
@@ -4576,6 +4708,9 @@ run <- function() {
   # nav_accuracy.csv ---
   check_screening_efficiency_direct_unit_asserts()
   check_screening_efficiency_fixture(tmp)
+  # Finding 1 (.superpowers/sdd/task-screening-report.md): --reference-only (no --roi) must
+  # not leak img_w/img_h from the earlier hotspots loop.
+  check_screening_efficiency_reference_only_regression(tmp)
 
   cat("OK: all selftest assertions passed\n")
 }

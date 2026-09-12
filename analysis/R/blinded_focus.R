@@ -2482,8 +2482,24 @@ screening_efficiency <- function(path, base_mag, ref_mask, tw, th, img_w, img_h)
   th_i <- suppressWarnings(as.integer(th))
   img_w_f <- suppressWarnings(as.numeric(img_w))
   img_h_f <- suppressWarnings(as.numeric(img_h))
-  if (is.na(tw_i) || is.na(th_i) || is.na(img_w_f) || is.na(img_h_f) ||
-      tw_i <= 0 || th_i <= 0 || img_w_f <= 0 || img_h_f <= 0) {
+  # Finding 2 (.superpowers/sdd/task-screening-report.md): a NULL/zero-length tw/th/img_w/
+  # img_h (e.g. `as.integer(NULL)` -> `integer(0)`) must NOT reach a bare `is.na(x) || ...` chain
+  # -- `is.na(integer(0))` is `logical(0)`, and OR-ing a zero-length logical into the chain
+  # collapses to `NA` rather than raising, so the ENCLOSING `if (...)` below errors with "missing
+  # value where TRUE/FALSE needed" instead of returning the well-defined blank result Python's
+  # `int(tw)`/`float(img_w)` `try/except` already produces for the same NULL input. `.bad_dim`
+  # checks `length(x) != 1L` FIRST in its own short-circuited `||` (one variable at a time, never
+  # combining a length-0 result across variables), so a NULL/zero-length dim is caught before
+  # `is.na()`/`<= 0` ever see it.
+  .bad_dim <- function(x) length(x) != 1L || is.na(x) || x <= 0
+  if (.bad_dim(tw_i) || .bad_dim(th_i) || .bad_dim(img_w_f) || .bad_dim(img_h_f)) {
+    return(.screening_efficiency_blank())
+  }
+  # Finding 3 (.superpowers/sdd/task-screening-report.md): a `ref_mask` whose flat length
+  # doesn't match `tw_i*th_i` would make the `mask[row * tw_i + col + 1L]` lookup below return
+  # `NA` (out-of-range R indexing) -- validate BEFORE any indexing, same blank-not-crash
+  # convention every other malformed-input guard above already uses.
+  if (length(mask) != tw_i * th_i) {
     return(.screening_efficiency_blank())
   }
 
@@ -3999,6 +4015,18 @@ analyze <- function(inputs, out_dir, reference = NULL, roi = NULL, labels_csv = 
       }
 
       if (!is.null(ref_map) && !is.null(ref_mask)) {
+        # Finding 1 (.superpowers/sdd/task-screening-report.md): img_w/img_h are only
+        # explicitly (re)assigned above inside the `if (!is.null(roi_rings))` branch. On a
+        # --reference-only run (no --roi), img_w/img_h were never set in THIS scope, so without
+        # this explicit re-derivation they would silently fall back to whatever the EARLIER
+        # per-session hotspots loop (~line 3822, `img_w <- if (!is.null(f$imageWidth)) ... else
+        # 1`) left behind after its last iteration -- the LAST session's own
+        # imageWidth/imageHeight (defaulting to 1 for a fragment lacking them), not necessarily
+        # this slide's canonical dims. Re-derive from the SAME source and defaulting the --roi
+        # branch above uses (session_ids[1], the first-loaded session) so both paths agree,
+        # whether or not the roi_rings branch already ran.
+        img_w <- by_session[[session_ids[1]]]$imageWidth; if (is.null(img_w)) img_w <- 1
+        img_h <- by_session[[session_ids[1]]]$imageHeight; if (is.null(img_h)) img_h <- 1
         # Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132,
         # doi:10.1002/cncy.70132): computed ONCE per session here (not inside ref_row_fn below) so
         # the metrics_rows stamp can use plain `<-` on the ALREADY-APPENDED entry by index --

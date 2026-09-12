@@ -3312,20 +3312,21 @@ SCREENING_GW = SCREENING_GH = 8
 SCREENING_BASE_MAG = 20.0
 
 
-def _screening_fragment(session_id, path, duration_ms, sample_count):
+def _screening_fragment(session_id, path, duration_ms, sample_count, grid=None):
     """schema/5 fragment builder for the screening-efficiency fixtures below -- 8-element path
     points ``[t, cx, cy, w, h, dsMilli, mouseX, mouseY]``; mouse is the off-slide sentinel
     ``(-1, -1)`` throughout (screening_efficiency never reads mouseX/mouseY -- only the shared
-    schema is exercised, per the task brief's "own two /5 sessions" instruction). ``grid`` is an
-    all-zero 8x8 dwell array -- screening_efficiency never reads it either; only ``path`` +
-    ``baseMagnification`` matter for the metric under test."""
+    schema is exercised, per the task brief's "own two /5 sessions" instruction). ``grid`` defaults
+    to an all-zero 8x8 dwell array -- screening_efficiency never reads it either; only ``path`` +
+    ``baseMagnification`` matter for the metric under test. Callers that need a non-degenerate
+    ``--reference SESSIONID`` mask (Finding 1's regression fixture) pass an explicit ``grid``."""
     return {
         "schema": "atlas-focus-contribution/5",
         "slideKey": SCREENING_SLIDE_KEY,
         "sessionId": session_id,
         "imageWidth": SCREENING_IMG_W, "imageHeight": SCREENING_IMG_H,
         "gridWidth": SCREENING_GW, "gridHeight": SCREENING_GH,
-        "grid": [0.0] * (SCREENING_GW * SCREENING_GH),
+        "grid": list(grid) if grid is not None else [0.0] * (SCREENING_GW * SCREENING_GH),
         "durationMs": duration_ms,
         "sampleCount": sample_count,
         "date": "2026-09-12",
@@ -3508,6 +3509,27 @@ def check_screening_efficiency_direct_unit_asserts():
     assert res_5elem["timeToFirstRefFixLpfMs"] is None, res_5elem
     assert res_5elem["refFixTotalLpfMs"] is None, res_5elem
 
+    # ---- Finding 2 (.superpowers/sdd/task-screening-report.md): None dims (tw/th/img_w/
+    # img_h) never raise -- Python's `int(tw)`/`float(img_w)` inside the `try/except` already
+    # degrades a None to a caught TypeError -> all-None, so this locks in behaviour that was
+    # already correct (the R port needed an explicit length-guard fix for the equivalent case;
+    # see check_screening_efficiency_direct_unit_asserts in selftest.R). ----
+    for bad_dims in (
+        (None, th, img_w, img_h), (tw, None, img_w, img_h),
+        (tw, th, None, img_h), (tw, th, img_w, None),
+    ):
+        res_none_dim = bf_metrics.screening_efficiency(good_path, SCREENING_BASE_MAG, mask, *bad_dims)
+        assert all(res_none_dim[k] is None for k in all_none_keys), (bad_dims, res_none_dim)
+
+    # ---- Finding 3 (.superpowers/sdd/task-screening-report.md): a ref_mask whose flat length
+    # doesn't equal tw*th must degrade to all-None, not raise IndexError from the
+    # `mask[row*tw_i+col]` lookup once fixation processing starts. ----
+    wrong_len_mask = np.ones(tw * th - 1, dtype=bool)  # deliberately mismatched vs. tw*th
+    res_wrong_len = bf_metrics.screening_efficiency(
+        good_path, SCREENING_BASE_MAG, wrong_len_mask, tw, th, img_w, img_h
+    )
+    assert all(res_wrong_len[k] is None for k in all_none_keys), res_wrong_len
+
 
 def check_screening_efficiency_fixture(tmp):
     """Pipeline-level check: runs :func:`build_screening_fixture` (2 schema/5 sessions, a
@@ -3605,6 +3627,110 @@ def check_screening_efficiency_fixture(tmp):
     ttfrl = by_metric["timeToFirstRefFixLpfMs"]
     assert int(ttfrl["n"]) == 1, ttfrl
     assert abs(ttfrl["meanCorrect"] - 1000.0) < 1e-6, ttfrl
+
+
+#: Finding 1 (.superpowers/sdd/task-screening-report.md): the eff/ser paths are IDENTICAL to
+#: build_screening_fixture -- only "eff"'s `grid` and the presence of a third, dims-less session
+#: change. "eff" gets a single non-zero cell at flat index 4*8+4==36 (cell(4,4), the EXACT cell
+#: build_screening_roi_fc's rectangle covers) so that a plain `--reference eff` run (NO --roi)
+#: thresholds to the SAME single-cell mask the --roi fixture uses
+#: (`ref_grid > IOU_THRESH * ref_grid.max()` keeps only the one nonzero cell) -- letting a
+#: --reference-only run's "eff" screening columns be compared directly against
+#: check_screening_efficiency_fixture's hand-derived --roi values above ("ser" is untouched,
+#: still all-zero grid, irrelevant to the reference mask since only `resampled[reference]` builds
+#: it).
+def build_screening_reference_only_fixture():
+    """Regression fixture for the leaked-img_w/img_h bug (Finding 1): a ``--reference eff`` run
+    with NO ``--roi`` must derive ``img_w``/``img_h`` the SAME way the ``--roi`` branch does
+    (``sessions[0]``'s own ``imageWidth``/``imageHeight``, i.e. "eff"'s own 2000x1500 here since
+    "eff" sorts first alphabetically -- see below), not from whatever the EARLIER hotspots loop
+    (``for sid in session_ids: img_w = f.get("imageWidth", 1)``) happened to leave lying around in
+    the enclosing scope after its last iteration.
+
+    A THIRD fragment, sessionId ``"zzz-nodim"`` (named to sort LAST: fragments are loaded from a
+    directory via ``sorted(glob.glob(os.path.join(dir, "**", "*.json")))``, and each fragment is
+    written to ``<sessionId>.json``, so ``"eff.json" < "ser.json" < "zzz-nodim.json"`` alphabetically
+    -- making ``"zzz-nodim"`` the LAST entry of both the loaded fragment list and the
+    insertion-ordered ``by_session``/``session_ids``), is schema/2 (grid-only, no ``"path"`` key at
+    all) and carries NEITHER ``imageWidth`` NOR ``imageHeight``. On the PRE-FIX code, the hotspots
+    loop's plain ``f.get("imageWidth", 1)`` / ``f.get("imageHeight", 1)`` for this LAST session
+    leaves ``img_w = img_h = 1`` sitting in the enclosing scope once that loop finishes, and the
+    ``--reference``-only branch below (no ``--roi``) never reassigns it (only the ``--roi`` branch
+    does) -- so "eff"'s on-reference cell-mapping would be computed against a degenerate 1x1
+    "image" instead of the true 2000x1500, corrupting the clamp+floor cell lookup and producing
+    screening values that do NOT match the ``--roi`` run's "eff" row. With the fix (deriving
+    ``img_w``/``img_h`` from ``sessions[0]`` -- "eff" itself -- right in this block, same as the
+    ``--roi`` branch), the two runs agree exactly."""
+    path_eff = [
+        [0, 100, 100, 400, 300, 20000],
+        [1000, 1125, 850, 400, 300, 5000],
+        [1250, 1125, 850, 400, 300, 5000],
+        [1500, 1125, 850, 400, 300, 5000],
+        [1750, 1125, 850, 400, 300, 5000],
+        [2000, 1125, 850, 400, 300, 5000],
+        [2250, 100, 100, 400, 300, 20000],
+    ]
+    path_ser = [
+        [0, 100, 100, 400, 300, 5000],
+        [250, 100, 100, 400, 300, 5000],
+        [500, 100, 100, 400, 300, 5000],
+        [750, 100, 100, 400, 300, 5000],
+        [1000, 100, 100, 400, 300, 5000],
+        [5000, 1125, 850, 400, 300, 500],
+        [5250, 1125, 850, 400, 300, 500],
+        [5500, 1125, 850, 400, 300, 500],
+        [5750, 1125, 850, 400, 300, 500],
+        [6000, 1125, 850, 400, 300, 500],
+    ]
+    eff_grid = [0.0] * (SCREENING_GW * SCREENING_GH)
+    eff_grid[4 * SCREENING_GW + 4] = 1.0  # cell(4,4) -- same cell the --roi fixture covers
+    f_eff = _screening_fragment(
+        "eff", path_eff, duration_ms=2250, sample_count=len(path_eff), grid=eff_grid
+    )
+    f_ser = _screening_fragment("ser", path_ser, duration_ms=6000, sample_count=len(path_ser))
+    f_third = {
+        "schema": "atlas-focus-contribution/2",
+        "slideKey": SCREENING_SLIDE_KEY,
+        "sessionId": "zzz-nodim",
+        "gridWidth": SCREENING_GW, "gridHeight": SCREENING_GH,
+        "grid": [0.0] * (SCREENING_GW * SCREENING_GH),
+        "durationMs": 1000.0,
+        "sampleCount": 4,
+        "date": "2026-09-12",
+        # deliberately NO imageWidth/imageHeight, NO path -- grid-only schema/2 fragment.
+    }
+    return [f_eff, f_ser, f_third]
+
+
+def check_screening_efficiency_reference_only_regression(tmp):
+    """Finding 1 regression test: a ``--reference eff`` run with NO ``--roi`` (three sessions on
+    the slide, the third grid-only/dims-less and last-iterated -- see
+    :func:`build_screening_reference_only_fixture`) must produce the EXACT SAME "eff" screening
+    columns as the ``--roi``-driven :func:`check_screening_efficiency_fixture` above, at ``1e-6``
+    tolerance -- both runs compare "eff" against the identical single-cell reference mask
+    (cell(4,4)) using "eff"'s own true 2000x1500 image dimensions."""
+    fragments = build_screening_reference_only_fixture()
+    in_dir = os.path.join(tmp, "in_screening_refonly")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+
+    out_dir = os.path.join(tmp, "out_screening_refonly")
+    analyze([in_dir], out_dir, reference="eff")
+
+    ref_files = [f for f in os.listdir(out_dir) if f.startswith("reference_")]
+    assert len(ref_files) == 1, ref_files
+    ref = pd.read_csv(os.path.join(out_dir, ref_files[0]))
+    row_eff = ref[ref.session == "eff"].iloc[0]
+
+    # Same hand-derived "eff" values as check_screening_efficiency_fixture's --roi run.
+    assert abs(row_eff["timeToFirstRefFixMs"] - 1000.0) < 1e-6, row_eff["timeToFirstRefFixMs"]
+    assert abs(row_eff["timeToFirstRefFixLpfMs"] - 1000.0) < 1e-6, row_eff["timeToFirstRefFixLpfMs"]
+    assert abs(row_eff["refFixTotalMs"] - 1000.0) < 1e-6, row_eff["refFixTotalMs"]
+    assert abs(row_eff["refFixTotalLpfMs"] - 1000.0) < 1e-6, row_eff["refFixTotalLpfMs"]
+    assert int(row_eff["refFixCount"]) == 1, row_eff["refFixCount"]
+    assert int(row_eff["refFixVisitCount"]) == 1, row_eff["refFixVisitCount"]
+    assert abs(row_eff["firstRefFixDownsample"] - 5.0) < 1e-6, row_eff["firstRefFixDownsample"]
+    assert abs(row_eff["firstRefFixMagnification"] - 4.0) < 1e-6, row_eff["firstRefFixMagnification"]
 
 
 def run():
@@ -4480,6 +4606,9 @@ def run():
         # nav_accuracy.csv ---
         check_screening_efficiency_direct_unit_asserts()
         check_screening_efficiency_fixture(tmp)
+        # Finding 1 (.superpowers/sdd/task-screening-report.md): --reference-only (no --roi)
+        # must not leak img_w/img_h from the earlier hotspots loop.
+        check_screening_efficiency_reference_only_regression(tmp)
 
         print("OK: all selftest assertions passed")
     finally:
