@@ -103,7 +103,18 @@ reader count above :data:`HOTSPOT_THRESH_FRAC`) is built directly in ``analyze.p
 :func:`normalise_max`, reusing the same threshold :func:`count_hotspots` already uses -- no new
 metrics.py function needed for it. All 5 are purely additive; no existing metric's formula or
 value changes.
+
+Screening efficiency (docs/superpowers/2026-09-12-screening-efficiency-review.md, additive):
+:func:`screening_efficiency` -- viewport-proxy analogues of Abe et al. (*Cancer Cytopathology*
+2026;e70132, doi:10.1002/cncy.70132) "LPF main object" gaze-AOI biomarkers, computed against
+whichever reference mask ``reference_<slug>.csv`` already builds (``--roi``/``--reference``):
+time-to-first-fixation, total fixation duration, fixation count, and visit count on the reference
+region, each also split at the toolkit's own canonical LOW-power magnification band
+(:data:`LPF_MAX_MAG`). Reuses :func:`fixations_idt` (unmodified) and :func:`true_magnification`
+(unmodified) -- purely additive, appended to ``reference_<slug>.csv`` and (6 of its 8 fields)
+:data:`blinded_focus.analyze.NAV_ACCURACY_COLS`.
 """
+import bisect
 import math
 from collections import Counter
 
@@ -2165,3 +2176,190 @@ def icc(grids):
     if denom == 0:
         return float("nan")
     return float((ms_rows - ms_error) / denom)
+
+
+# ---------------------------------------------------------------------------
+# Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132,
+# doi:10.1002/cncy.70132) -- viewport-proxy analogues of the paper's gaze-AOI "LPF main object"
+# biomarkers, computed against a reference mask (whichever of --roi/--reference built it -- see
+# blinded_focus.analyze's reference/ROI comparison section, the SAME mask
+# reference_<slug>.csv's nss/aucJudd/precisionAtTopK columns already compare against). Design
+# rationale + construct-mapping table: docs/superpowers/2026-09-12-screening-efficiency-review.md.
+# ---------------------------------------------------------------------------
+
+#: "Low-power field" cutoff (true objective magnification, x): a fixation's zoom strictly BELOW
+#: this is "low power". Classic low-power objectives are 4x/10x; Abe 2026 itself defines LPF as a
+#: separate composite image with no numeric cutoff, so this anchors to the toolkit's own canonical
+#: :data:`MAG_BAND_CUTS` 10.0 boundary (the "4-10x"/"10-20x" band split) rather than inventing a
+#: new literature-specific threshold. ``mag == 10.0`` itself is NOT low-power -- consistent with
+#: :func:`canonical_mag_band_labels`'s ``np.searchsorted(cuts, tm, side="right")`` convention,
+#: where a value exactly ON a cut point falls into the band ABOVE it. An R port must use the
+#: identical literal.
+LPF_MAX_MAG = 10.0
+
+#: The 8 keys every :func:`screening_efficiency` result dict carries, in no particular order (the
+#: pinned ``reference_<slug>.csv`` column order lives in ``analyze.py``, not here). Factored out
+#: so every "blank" early-return below builds the identical all-``None`` shape.
+_SCREENING_EFFICIENCY_KEYS = (
+    "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+    "refFixCount", "refFixVisitCount", "firstRefFixDownsample", "firstRefFixMagnification",
+)
+
+
+def _screening_efficiency_blank():
+    return {k: None for k in _SCREENING_EFFICIENCY_KEYS}
+
+
+def screening_efficiency(path, base_mag, ref_mask, tw, th, img_w, img_h):
+    """Abe-2026-style screening-efficiency metrics of one session's scanpath against a reference
+    mask -- viewport-proxy analogues of "time to first fixation", "total fixation duration",
+    "fixation count", and "visit count" on the paper's LPF main-object AOI (see the design doc's
+    construct-mapping table).
+
+    Returns a dict with keys ``timeToFirstRefFixMs``, ``timeToFirstRefFixLpfMs``,
+    ``refFixTotalMs``, ``refFixTotalLpfMs``, ``refFixCount``, ``refFixVisitCount``,
+    ``firstRefFixDownsample``, ``firstRefFixMagnification``. Never raises.
+
+    **Never-crash guards (all-``None`` dict, checked before any fixation-level work):**
+    ``fixations_idt(path)`` is ``None`` (path has fewer than 2 points -- see that function);
+    ``ref_mask`` is ``None``/has no ``True`` cell (nothing to attribute a fixation to);
+    ``tw``/``th``/``img_w``/``img_h`` is not a positive number (a degenerate grid/image would make
+    every cell-mapping division by zero or produce a meaningless single-cell mask); or ``ref_mask``'s
+    flat length doesn't equal ``tw*th`` (a mismatched mask would otherwise index out of range on the
+    very first fixation).
+
+    **On-reference attribution:** a fixation is on-reference iff its ``(centerImageX,
+    centerImageY)`` maps to a ``True`` cell of ``ref_mask`` (flat, row-major, length
+    ``tw*th``) via the EXACT clamp+floor convention :func:`visited_sequence` uses elsewhere in
+    this module (``col = clamp(floor(cx/img_w*tw), 0, tw-1)``, same for row with
+    ``img_h``/``th``; ``cell = row*tw + col``) -- not a new mapping.
+
+    **Zoom at a fixation:** the scanpath point at the fixation's ``startMs`` -- the FIRST index
+    ``i`` with ``path[i][0] >= startMs``, found via ``bisect.bisect_left`` on the path's own
+    timestamp list (equivalent to a linear "first index where the sorted-ascending condition
+    flips" scan; an R port uses ``sum(times < startMs) + 1`` for the same 1-based first-match
+    index -- see ``blinded_focus.R``'s docstring). This point always exists exactly (``startMs``
+    is itself one of the path's own timestamps, by construction of :func:`fixations_idt`).
+    ``downsample = point[5]/1000.0`` when the point has a usable (``>0``) ``dsMilli`` (index 5,
+    schema/4+), else ``None`` -- independent of ``base_mag``. ``magnification =
+    true_magnification(point, base_mag)`` (unmodified helper -- ``None`` when ``base_mag`` is
+    null/non-numeric/non-positive, or the point has no ``dsMilli`` at all, i.e. a schema/3
+    5-element point).
+
+    **Outputs** (fixation order = :func:`fixations_idt`'s returned order):
+
+    - ``timeToFirstRefFixMs`` -- ``startMs`` of the first on-reference fixation; ``None`` if none.
+    - ``timeToFirstRefFixLpfMs`` -- ``startMs`` of the first on-reference fixation whose
+      magnification is ``< LPF_MAX_MAG``; ``None`` if none qualify OR the LPF-blank rule below
+      applies.
+    - ``refFixTotalMs`` -- sum of ``durationMs`` over on-reference fixations (``0.0`` when there
+      are none -- a well-defined "nothing was on-reference" total, not blank).
+    - ``refFixTotalLpfMs`` -- same, restricted to fixations with magnification ``< LPF_MAX_MAG``
+      (see the LPF-blank rule below).
+    - ``refFixCount`` -- count of on-reference fixations (``int``, ``0`` when none).
+    - ``refFixVisitCount`` -- number of maximal RUNS of consecutive on-reference fixations in the
+      sequence -- an off-reference fixation between two on-reference ones splits the run (e.g.
+      ``[on, on, off, on]`` -> ``2``).
+    - ``firstRefFixDownsample`` / ``firstRefFixMagnification`` -- zoom (see above) of the FIRST
+      on-reference fixation, any magnification band (not restricted to LPF).
+
+    **LPF-blank rule (blank-not-crash):** ``timeToFirstRefFixLpfMs`` and ``refFixTotalLpfMs`` are
+    both ``None`` the moment :func:`true_magnification` returns ``None`` for the start point of
+    ANY on-reference fixation (covers a null/non-numeric ``base_mag`` and a schema/3 5-element
+    point) -- one magnification-blind on-reference fixation makes the whole session's LPF split
+    undefined, not just that one fixation's contribution. When magnification is computable for
+    every on-reference fixation (including the vacuous case of zero on-reference fixations) and
+    none of them is ``< LPF_MAX_MAG``, ``refFixTotalLpfMs`` is a well-defined ``0.0`` and
+    ``timeToFirstRefFixLpfMs`` is ``None`` (no qualifying fixation, not "undefined")."""
+    fx = fixations_idt(path)
+    if fx is None:
+        return _screening_efficiency_blank()
+    mask = np.asarray(ref_mask).astype(bool).flatten() if ref_mask is not None else None
+    if mask is None or not mask.any():
+        return _screening_efficiency_blank()
+    try:
+        tw_i, th_i = int(tw), int(th)
+        img_w_f = float(img_w) if img_w is not None else 0.0
+        img_h_f = float(img_h) if img_h is not None else 0.0
+    except (TypeError, ValueError):
+        return _screening_efficiency_blank()
+    if tw_i <= 0 or th_i <= 0 or img_w_f <= 0 or img_h_f <= 0:
+        return _screening_efficiency_blank()
+    # Finding 3 (.superpowers/sdd/task-screening-report.md): a `ref_mask` whose flat length
+    # doesn't match `tw_i*th_i` would make the `mask[row * tw_i + col]` lookup below raise
+    # IndexError (out of range) -- validate BEFORE any indexing, same blank-not-crash convention
+    # every other malformed-input guard above already uses.
+    if mask.size != tw_i * th_i:
+        return _screening_efficiency_blank()
+
+    if not fx:
+        out = _screening_efficiency_blank()
+        out["refFixTotalMs"] = 0.0
+        out["refFixTotalLpfMs"] = 0.0
+        out["refFixCount"] = 0
+        out["refFixVisitCount"] = 0
+        return out
+
+    on_ref = []
+    for f in fx:
+        col = int(math.floor(f["centerImageX"] / img_w_f * tw_i))
+        row = int(math.floor(f["centerImageY"] / img_h_f * th_i))
+        col = min(max(col, 0), tw_i - 1)
+        row = min(max(row, 0), th_i - 1)
+        on_ref.append(bool(mask[row * tw_i + col]))
+
+    ref_fix_count = sum(on_ref)
+    visit_count = 0
+    prev_on = False
+    for flag in on_ref:
+        if flag and not prev_on:
+            visit_count += 1
+        prev_on = flag
+
+    times = [float(p[0]) for p in path]
+
+    def _zoom_at_start(start_ms):
+        idx = bisect.bisect_left(times, start_ms)
+        if idx >= len(path):
+            idx = len(path) - 1
+        pt = path[idx]
+        ds = float(pt[5]) / 1000.0 if len(pt) >= 6 and float(pt[5]) > 0 else None
+        return ds, true_magnification(pt, base_mag)
+
+    ref_fix_total_ms = 0.0
+    time_to_first = None
+    first_ds = None
+    first_mag = None
+    found_first = False
+    lpf_computable = True
+    lpf_total = 0.0
+    time_to_first_lpf = None
+
+    for f, flag in zip(fx, on_ref):
+        if not flag:
+            continue
+        ref_fix_total_ms += f["durationMs"]
+        ds, mag = _zoom_at_start(f["startMs"])
+        if not found_first:
+            time_to_first, first_ds, first_mag, found_first = f["startMs"], ds, mag, True
+        if mag is None:
+            lpf_computable = False
+        elif mag < LPF_MAX_MAG:
+            lpf_total += f["durationMs"]
+            if time_to_first_lpf is None:
+                time_to_first_lpf = f["startMs"]
+
+    if not lpf_computable:
+        lpf_total = None
+        time_to_first_lpf = None
+
+    return {
+        "timeToFirstRefFixMs": time_to_first,
+        "timeToFirstRefFixLpfMs": time_to_first_lpf,
+        "refFixTotalMs": ref_fix_total_ms,
+        "refFixTotalLpfMs": lpf_total,
+        "refFixCount": ref_fix_count,
+        "refFixVisitCount": visit_count,
+        "firstRefFixDownsample": first_ds,
+        "firstRefFixMagnification": first_mag,
+    }

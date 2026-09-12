@@ -3294,6 +3294,445 @@ def check_calibration_direct_unit_asserts():
     assert math.isnan(gap0) and math.isnan(brier0) and math.isnan(r0), (gap0, brier0, r0)
 
 
+# ---------------------------------------------------------------------------
+# Screening efficiency (Abe et al., *Cancer Cytopathology* 2026;e70132, doi:10.1002/cncy.70132):
+# viewport-proxy analogues of the paper's "LPF main object" gaze-AOI biomarkers, computed against
+# a --roi/--reference mask (blinded_focus.metrics.screening_efficiency). Design rationale + the
+# construct-mapping table: docs/superpowers/2026-09-12-screening-efficiency-review.md.
+# ---------------------------------------------------------------------------
+
+SCREENING_SLIDE_KEY = "sha256:selftest-slide-screening-efficiency-0001"
+#: img 2000x1500, grid gw=gh=8 (cell = 250 x 187.5 image px) -- own dims per the C6-fixture
+#: convention, chosen so BOTH sessions share one native grid resolution (no NN resampling to
+#: reason about: _target_grid_dims picks (tw,th)=(8,8) trivially).
+SCREENING_IMG_W, SCREENING_IMG_H = 2000, 1500
+SCREENING_GW = SCREENING_GH = 8
+#: baseMagnification for both sessions (schema/4+ field) -- a round number so
+#: true_magnification = 20.0 / (dsMilli/1000.0) works out to clean values below.
+SCREENING_BASE_MAG = 20.0
+
+
+def _screening_fragment(session_id, path, duration_ms, sample_count, grid=None):
+    """schema/5 fragment builder for the screening-efficiency fixtures below -- 8-element path
+    points ``[t, cx, cy, w, h, dsMilli, mouseX, mouseY]``; mouse is the off-slide sentinel
+    ``(-1, -1)`` throughout (screening_efficiency never reads mouseX/mouseY -- only the shared
+    schema is exercised, per the task brief's "own two /5 sessions" instruction). ``grid`` defaults
+    to an all-zero 8x8 dwell array -- screening_efficiency never reads it either; only ``path`` +
+    ``baseMagnification`` matter for the metric under test. Callers that need a non-degenerate
+    ``--reference SESSIONID`` mask (Finding 1's regression fixture) pass an explicit ``grid``."""
+    return {
+        "schema": "atlas-focus-contribution/5",
+        "slideKey": SCREENING_SLIDE_KEY,
+        "sessionId": session_id,
+        "imageWidth": SCREENING_IMG_W, "imageHeight": SCREENING_IMG_H,
+        "gridWidth": SCREENING_GW, "gridHeight": SCREENING_GH,
+        "grid": list(grid) if grid is not None else [0.0] * (SCREENING_GW * SCREENING_GH),
+        "durationMs": duration_ms,
+        "sampleCount": sample_count,
+        "date": "2026-09-12",
+        "path": [list(p) + [-1, -1] for p in path],
+        "baseMagnification": SCREENING_BASE_MAG,
+    }
+
+
+#: ROI: a rectangle covering EXACTLY cell(row=4, col=4)'s cell-center-containment test
+#: (rasterize_roi tests ``((col+0.5)/gw*img_w, (row+0.5)/gh*img_h)`` per cell). Cell(4,4)'s center
+#: is ``((4.5/8)*2000, (4.5/8)*1500) = (1125, 843.75)``; neighbouring cell centers are >=125px
+#: away in x (875, 1375) and >=93.75px away in y (656.25, 1031.25), so the rectangle
+#: x=[1000,1250], y=[750,937.5] safely contains ONLY cell(4,4)'s center -> rasterizes to exactly
+#: flat index ``4*8+4 == 36``.
+def build_screening_roi_fc():
+    return {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[1000, 750], [1250, 750], [1250, 937.5], [1000, 937.5], [1000, 750]]],
+            },
+            "properties": {},
+        }],
+    }
+
+
+#: Hand-derivation (verified independently against blinded_focus.metrics.fixations_idt's
+#: documented I-DT algorithm before this fixture was run through the pipeline -- see
+#: scratchpad/check_screening.py's standalone confirmation):
+#:
+#: "eff" (efficient reader): p0=(t=0, 100,100, ds=20000) off-ROI (cell(0,0)) -- a lone lead-in
+#:   point, immediately rejected as its own fixation window (dispersion |100-1125|+|100-850|=1775
+#:   >> threshold=0.25*400=100) -- then start advances by exactly 1. p1..p5 hold at
+#:   (1125, 850, w=400,h=300, dsMilli=5000) for t=1000,1250,1500,1750,2000 (250ms apart, dispersion
+#:   0 throughout -- centers cell(4,4), inside the ROI): the window [1,2] first reaches the 250ms
+#:   MIN_FIXATION_MS threshold (span=250 exactly), qualifies (0<=100), then expands through
+#:   1500/1750/2000 (still dispersion 0) -> ONE fixation: startMs=1000.0, durationMs=1000.0,
+#:   center=(1125,850), nPoints=5. p6=(t=2250, 100,100, ds=20000) off-ROI, "leaves" -- only 1 point
+#:   remains after the fixation closes, never reaches the 250ms span -> contributes nothing.
+#:   fixations_idt(eff) == [that one fixation] -- ON-reference, count=1, visitCount=1.
+#:   Zoom at startMs=1000.0: bisect_left finds path[1]=(...,dsMilli=5000) exactly ->
+#:   downsample=5000/1000=5.0; true_magnification = 20.0/(5000/1000) = 4.0 < LPF_MAX_MAG=10.0 ->
+#:   LPF. Expected reference_<slug>.csv row for "eff":
+#:     timeToFirstRefFixMs=1000.0, timeToFirstRefFixLpfMs=1000.0, refFixTotalMs=1000.0,
+#:     refFixTotalLpfMs=1000.0, refFixCount=1, refFixVisitCount=1,
+#:     firstRefFixDownsample=5.0, firstRefFixMagnification=4.0.
+#:
+#: "ser" (serial reader): p0..p4 hold at (100,100, ds=5000) for t=0,250,500,750,1000 (off-ROI,
+#:   cell(0,0)) -> ONE fixation startMs=0.0, durationMs=1000.0 (OFF-reference; its ds/mag are
+#:   never read by screening_efficiency, since only ON-reference fixations get zoom-evaluated).
+#:   p5..p9 hold at (1125,850, ds=500) for t=5000,5250,5500,5750,6000 ("late" -- a big jump from
+#:   the first hold's t=1000, but well under IDLE_GAP_MS=60000 so no idle-boundary split; the huge
+#:   position jump alone rejects the [4,5] minimal window on dispersion, same start+=1 retry logic
+#:   as "eff"'s p0->p1 jump) -> ONE fixation startMs=5000.0, durationMs=1000.0, center=(1125,850)
+#:   -- ON-reference (cell(4,4)). fixations_idt(ser) == [off-ref fix, on-ref fix] -- count=1
+#:   (only the 2nd is on-ref), visitCount=1 (single run).
+#:   Zoom at startMs=5000.0: path[5]=(...,dsMilli=500) -> downsample=500/1000=0.5;
+#:   true_magnification = 20.0/(500/1000) = 40.0 -- NOT < LPF_MAX_MAG=10.0 -> NOT LPF, but
+#:   magnification IS computable (lpf_computable stays True) -> refFixTotalLpfMs is a well-defined
+#:   0.0 (no qualifying LPF fixation), NOT blank; timeToFirstRefFixLpfMs stays None (no qualifying
+#:   fixation at all). Expected reference_<slug>.csv row for "ser":
+#:     timeToFirstRefFixMs=5000.0, timeToFirstRefFixLpfMs=<blank/None>, refFixTotalMs=1000.0,
+#:     refFixTotalLpfMs=0.0, refFixCount=1, refFixVisitCount=1,
+#:     firstRefFixDownsample=0.5, firstRefFixMagnification=40.0.
+def build_screening_fixture():
+    path_eff = [
+        [0, 100, 100, 400, 300, 20000],
+        [1000, 1125, 850, 400, 300, 5000],
+        [1250, 1125, 850, 400, 300, 5000],
+        [1500, 1125, 850, 400, 300, 5000],
+        [1750, 1125, 850, 400, 300, 5000],
+        [2000, 1125, 850, 400, 300, 5000],
+        [2250, 100, 100, 400, 300, 20000],
+    ]
+    path_ser = [
+        [0, 100, 100, 400, 300, 5000],
+        [250, 100, 100, 400, 300, 5000],
+        [500, 100, 100, 400, 300, 5000],
+        [750, 100, 100, 400, 300, 5000],
+        [1000, 100, 100, 400, 300, 5000],
+        [5000, 1125, 850, 400, 300, 500],
+        [5250, 1125, 850, 400, 300, 500],
+        [5500, 1125, 850, 400, 300, 500],
+        [5750, 1125, 850, 400, 300, 500],
+        [6000, 1125, 850, 400, 300, 500],
+    ]
+    f_eff = _screening_fragment("eff", path_eff, duration_ms=2250, sample_count=len(path_eff))
+    f_ser = _screening_fragment("ser", path_ser, duration_ms=6000, sample_count=len(path_ser))
+    return [f_eff, f_ser]
+
+
+def check_screening_efficiency_direct_unit_asserts():
+    """Direct, pipeline-independent unit checks for :func:`blinded_focus.metrics.screening_efficiency`
+    -- TDD-style asserts on hand-built ``(path, base_mag, ref_mask, tw, th, img_w, img_h)`` inputs,
+    bypassing the full ``analyze()`` pipeline entirely (mirrors the pipeline-level
+    :func:`check_screening_efficiency_fixture` below, which exercises the SAME function through
+    the reference/ROI comparison section instead)."""
+    tw = th = SCREENING_GW
+    img_w, img_h = float(SCREENING_IMG_W), float(SCREENING_IMG_H)
+    mask = np.zeros(tw * th, dtype=bool)
+    mask[4 * tw + 4] = True  # ROI == cell(4,4), same as build_screening_roi_fc
+
+    def hold(t0, cx, cy, ds, n=5, step=250.0):
+        return [[t0 + i * step, cx, cy, 400.0, 300.0, ds] for i in range(n)]
+
+    all_none_keys = (
+        "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+        "refFixCount", "refFixVisitCount", "firstRefFixDownsample", "firstRefFixMagnification",
+    )
+
+    # ---- fixations_idt(path) is None (path has < 2 points) -> all-None dict, whether path is a
+    # single-point list or None outright (a grid-only /1-/2 fragment's `.get("path")`). ----
+    for degenerate_path in ([[0, 1125, 850, 400, 300, 5000]], None, []):
+        res = bf_metrics.screening_efficiency(
+            degenerate_path, SCREENING_BASE_MAG, mask, tw, th, img_w, img_h
+        )
+        assert all(res[k] is None for k in all_none_keys), (degenerate_path, res)
+
+    # ---- empty ref_mask (no True cell at all) -> all-None, even with a perfectly good path. ----
+    good_path = hold(0.0, 1125.0, 850.0, 5000.0)
+    res_empty_mask = bf_metrics.screening_efficiency(
+        good_path, SCREENING_BASE_MAG, np.zeros(tw * th, dtype=bool), tw, th, img_w, img_h
+    )
+    assert all(res_empty_mask[k] is None for k in all_none_keys), res_empty_mask
+
+    # ---- on/off/on visit-count run logic: 4 fixations forced by idle gaps (dt=100000 >
+    # IDLE_GAP_MS=60000) between 4 static holds -- on-ref flags [True, True, False, True] (the
+    # task brief's own worked example) -> refFixVisitCount == 2 (two runs: {fix1,fix2}, {fix4}),
+    # refFixCount == 3. Every on-ref hold uses the SAME ds=5000 -> mag=4.0<10 -> LPF, so
+    # refFixTotalMs == refFixTotalLpfMs == 3000.0 (3 x 1000ms) and timeToFirstRefFixMs ==
+    # timeToFirstRefFixLpfMs == 0.0 (the very first fixation is itself on-ref and LPF). ----
+    path_visit = (
+        hold(0.0, 1125.0, 850.0, 5000.0)
+        + hold(101000.0, 1125.0, 850.0, 5000.0)
+        + hold(202000.0, 100.0, 100.0, 5000.0)
+        + hold(303000.0, 1125.0, 850.0, 5000.0)
+    )
+    res_visit = bf_metrics.screening_efficiency(
+        path_visit, SCREENING_BASE_MAG, mask, tw, th, img_w, img_h
+    )
+    assert res_visit["refFixCount"] == 3, res_visit
+    assert res_visit["refFixVisitCount"] == 2, res_visit
+    assert res_visit["refFixTotalMs"] == 3000.0, res_visit
+    assert res_visit["refFixTotalLpfMs"] == 3000.0, res_visit
+    assert res_visit["timeToFirstRefFixMs"] == 0.0, res_visit
+    assert res_visit["timeToFirstRefFixLpfMs"] == 0.0, res_visit
+    assert res_visit["firstRefFixDownsample"] == 5.0, res_visit
+    assert res_visit["firstRefFixMagnification"] == 4.0, res_visit
+
+    # ---- null base_mag: LPF fields (and firstRefFixMagnification) blank, but refFixTotalMs /
+    # refFixCount / refFixVisitCount / timeToFirstRefFixMs / firstRefFixDownsample are all STILL
+    # computed -- downsample never depends on base_mag, only magnification does. ----
+    res_null_mag = bf_metrics.screening_efficiency(good_path, None, mask, tw, th, img_w, img_h)
+    assert res_null_mag["refFixTotalMs"] == 1000.0, res_null_mag
+    assert res_null_mag["refFixCount"] == 1, res_null_mag
+    assert res_null_mag["refFixVisitCount"] == 1, res_null_mag
+    assert res_null_mag["timeToFirstRefFixMs"] == 0.0, res_null_mag
+    assert res_null_mag["firstRefFixDownsample"] == 5.0, res_null_mag
+    assert res_null_mag["firstRefFixMagnification"] is None, res_null_mag
+    assert res_null_mag["timeToFirstRefFixLpfMs"] is None, res_null_mag
+    assert res_null_mag["refFixTotalLpfMs"] is None, res_null_mag
+
+    # ---- schema/3 path (5-element points, no dsMilli at all): downsample AND magnification both
+    # blank (true_magnification itself needs len(point)>=6), so both LPF fields blank too -- but
+    # on-reference attribution (count/visitCount/totalMs/timeToFirst) needs only cx/cy, so those
+    # stay fully populated. A valid, non-null base_mag confirms the blank is due to point shape,
+    # not base_mag. ----
+    path_5elem = [[i * 250.0, 1125.0, 850.0, 400.0, 300.0] for i in range(5)]
+    res_5elem = bf_metrics.screening_efficiency(
+        path_5elem, SCREENING_BASE_MAG, mask, tw, th, img_w, img_h
+    )
+    assert res_5elem["refFixTotalMs"] == 1000.0, res_5elem
+    assert res_5elem["refFixCount"] == 1, res_5elem
+    assert res_5elem["refFixVisitCount"] == 1, res_5elem
+    assert res_5elem["timeToFirstRefFixMs"] == 0.0, res_5elem
+    assert res_5elem["firstRefFixDownsample"] is None, res_5elem
+    assert res_5elem["firstRefFixMagnification"] is None, res_5elem
+    assert res_5elem["timeToFirstRefFixLpfMs"] is None, res_5elem
+    assert res_5elem["refFixTotalLpfMs"] is None, res_5elem
+
+    # ---- Finding 2 (.superpowers/sdd/task-screening-report.md): None dims (tw/th/img_w/
+    # img_h) never raise -- Python's `int(tw)`/`float(img_w)` inside the `try/except` already
+    # degrades a None to a caught TypeError -> all-None, so this locks in behaviour that was
+    # already correct (the R port needed an explicit length-guard fix for the equivalent case;
+    # see check_screening_efficiency_direct_unit_asserts in selftest.R). ----
+    for bad_dims in (
+        (None, th, img_w, img_h), (tw, None, img_w, img_h),
+        (tw, th, None, img_h), (tw, th, img_w, None),
+    ):
+        res_none_dim = bf_metrics.screening_efficiency(good_path, SCREENING_BASE_MAG, mask, *bad_dims)
+        assert all(res_none_dim[k] is None for k in all_none_keys), (bad_dims, res_none_dim)
+
+    # ---- Finding 3 (.superpowers/sdd/task-screening-report.md): a ref_mask whose flat length
+    # doesn't equal tw*th must degrade to all-None, not raise IndexError from the
+    # `mask[row*tw_i+col]` lookup once fixation processing starts. ----
+    wrong_len_mask = np.ones(tw * th - 1, dtype=bool)  # deliberately mismatched vs. tw*th
+    res_wrong_len = bf_metrics.screening_efficiency(
+        good_path, SCREENING_BASE_MAG, wrong_len_mask, tw, th, img_w, img_h
+    )
+    assert all(res_wrong_len[k] is None for k in all_none_keys), res_wrong_len
+
+
+def check_screening_efficiency_fixture(tmp):
+    """Pipeline-level check: runs :func:`build_screening_fixture` (2 schema/5 sessions, a
+    ``--roi``-driven single-cell reference mask) through the full ``analyze()`` pipeline and
+    asserts ``reference_<slug>.csv``'s EXACT new column order plus every hand-derived value
+    documented in that function's own docstring, at ``1e-6`` tolerance. Also extends the fixture
+    with a tiny ``--graded`` CSV (Selftests item 5): confirms at least one new screening column
+    produces a populated ``nav_accuracy.csv`` row (``timeToFirstRefFixMs``, n=2 -- both sessions
+    have at least one on-reference fixation) and that a column blank for one session
+    (``timeToFirstRefFixLpfMs``, blank for "ser") correctly drops that session from its row
+    (n=1)."""
+    fragments = build_screening_fixture()
+    in_dir = os.path.join(tmp, "in_screening")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+    roi_path = os.path.join(tmp, "screening_roi.geojson")
+    with open(roi_path, "w", encoding="utf-8") as fh:
+        json.dump(build_screening_roi_fc(), fh)
+
+    graded_csv_path = os.path.join(tmp, "screening_graded.csv")
+    _write_simple_csv(
+        graded_csv_path, ["slideKey", "sessionId", "correct"],
+        [[SCREENING_SLIDE_KEY, "eff", "1"], [SCREENING_SLIDE_KEY, "ser", "0"]],
+    )
+
+    out_dir = os.path.join(tmp, "out_screening")
+    analyze([in_dir], out_dir, roi=roi_path, graded_csv=graded_csv_path)
+
+    ref_files = [f for f in os.listdir(out_dir) if f.startswith("reference_")]
+    assert len(ref_files) == 1, ref_files
+    ref = pd.read_csv(os.path.join(out_dir, ref_files[0]))
+
+    # --- EXACT new column order (appended after the existing precisionAtTopK/recall pair) ---
+    expected_cols = [
+        "session", "nss", "aucJudd", "cc", "iou", "refCoveragePct",
+        "timeOnRefMs", "timeOffRefMs", "precisionAtTopK", "recall",
+        "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+        "refFixCount", "refFixVisitCount", "firstRefFixDownsample", "firstRefFixMagnification",
+    ]
+    assert list(ref.columns) == expected_cols, ref.columns.tolist()
+    assert set(ref["session"]) == {"eff", "ser"}, ref["session"].tolist()
+
+    row_eff = ref[ref.session == "eff"].iloc[0]
+    row_ser = ref[ref.session == "ser"].iloc[0]
+
+    # --- "eff": on-reference, LPF (mag=4.0 < 10.0) ---
+    assert abs(row_eff["timeToFirstRefFixMs"] - 1000.0) < 1e-6, row_eff["timeToFirstRefFixMs"]
+    assert abs(row_eff["timeToFirstRefFixLpfMs"] - 1000.0) < 1e-6, row_eff["timeToFirstRefFixLpfMs"]
+    assert abs(row_eff["refFixTotalMs"] - 1000.0) < 1e-6, row_eff["refFixTotalMs"]
+    assert abs(row_eff["refFixTotalLpfMs"] - 1000.0) < 1e-6, row_eff["refFixTotalLpfMs"]
+    assert int(row_eff["refFixCount"]) == 1, row_eff["refFixCount"]
+    assert int(row_eff["refFixVisitCount"]) == 1, row_eff["refFixVisitCount"]
+    assert abs(row_eff["firstRefFixDownsample"] - 5.0) < 1e-6, row_eff["firstRefFixDownsample"]
+    assert abs(row_eff["firstRefFixMagnification"] - 4.0) < 1e-6, row_eff["firstRefFixMagnification"]
+
+    # --- "ser": on-reference "late", NOT LPF (mag=40.0) -- refFixTotalLpfMs is a well-defined 0.0
+    # (magnification WAS computable, just not low-power), timeToFirstRefFixLpfMs is blank (no
+    # qualifying fixation at all) -- the two distinct branches of the LPF-blank rule. ---
+    assert abs(row_ser["timeToFirstRefFixMs"] - 5000.0) < 1e-6, row_ser["timeToFirstRefFixMs"]
+    assert pd.isna(row_ser["timeToFirstRefFixLpfMs"]), (
+        f"ser has no qualifying LPF fixation -> timeToFirstRefFixLpfMs should be blank, got "
+        f"{row_ser['timeToFirstRefFixLpfMs']}"
+    )
+    assert abs(row_ser["refFixTotalMs"] - 1000.0) < 1e-6, row_ser["refFixTotalMs"]
+    assert abs(row_ser["refFixTotalLpfMs"] - 0.0) < 1e-6, (
+        f"ser's on-ref fixation has a COMPUTABLE (non-LPF) magnification -> refFixTotalLpfMs "
+        f"should be a well-defined 0.0, not blank, got {row_ser['refFixTotalLpfMs']}"
+    )
+    assert int(row_ser["refFixCount"]) == 1, row_ser["refFixCount"]
+    assert int(row_ser["refFixVisitCount"]) == 1, row_ser["refFixVisitCount"]
+    assert abs(row_ser["firstRefFixDownsample"] - 0.5) < 1e-6, row_ser["firstRefFixDownsample"]
+    assert abs(row_ser["firstRefFixMagnification"] - 40.0) < 1e-6, row_ser["firstRefFixMagnification"]
+
+    # --- nav_accuracy.csv (Selftests item 5): the 6 non-zoom screening columns are stamped
+    # in-memory onto metrics_rows and joined via NAV_ACCURACY_COLS, same as any other navigation
+    # metric ---
+    nav = pd.read_csv(os.path.join(out_dir, "nav_accuracy.csv"))
+    by_metric = {r["metric"]: r for _, r in nav.iterrows()}
+    for col in (
+        "timeToFirstRefFixMs", "timeToFirstRefFixLpfMs", "refFixTotalMs", "refFixTotalLpfMs",
+        "refFixCount", "refFixVisitCount",
+    ):
+        assert col in by_metric, f"{col} missing from nav_accuracy.csv"
+
+    # timeToFirstRefFixMs: BOTH sessions have an on-reference fixation -> n=2.
+    ttfr = by_metric["timeToFirstRefFixMs"]
+    assert int(ttfr["n"]) == 2, ttfr
+    assert abs(ttfr["meanCorrect"] - 1000.0) < 1e-6, ttfr  # "eff", correct=1
+    assert abs(ttfr["meanIncorrect"] - 5000.0) < 1e-6, ttfr  # "ser", correct=0
+
+    # timeToFirstRefFixLpfMs: "ser"'s value is blank -> excluded from the join entirely -> n=1
+    # (only "eff" contributes) -- confirms a blank screening column degrades the SAME way any
+    # other blank NAV_ACCURACY_COLS metric already does (_sanitize_nan/`v is None` skip), not a
+    # new code path.
+    ttfrl = by_metric["timeToFirstRefFixLpfMs"]
+    assert int(ttfrl["n"]) == 1, ttfrl
+    assert abs(ttfrl["meanCorrect"] - 1000.0) < 1e-6, ttfrl
+
+
+#: Finding 1 (.superpowers/sdd/task-screening-report.md): the eff/ser paths are IDENTICAL to
+#: build_screening_fixture -- only "eff"'s `grid` and the presence of a third, dims-less session
+#: change. "eff" gets a single non-zero cell at flat index 4*8+4==36 (cell(4,4), the EXACT cell
+#: build_screening_roi_fc's rectangle covers) so that a plain `--reference eff` run (NO --roi)
+#: thresholds to the SAME single-cell mask the --roi fixture uses
+#: (`ref_grid > IOU_THRESH * ref_grid.max()` keeps only the one nonzero cell) -- letting a
+#: --reference-only run's "eff" screening columns be compared directly against
+#: check_screening_efficiency_fixture's hand-derived --roi values above ("ser" is untouched,
+#: still all-zero grid, irrelevant to the reference mask since only `resampled[reference]` builds
+#: it).
+def build_screening_reference_only_fixture():
+    """Regression fixture for the leaked-img_w/img_h bug (Finding 1): a ``--reference eff`` run
+    with NO ``--roi`` must derive ``img_w``/``img_h`` the SAME way the ``--roi`` branch does
+    (``sessions[0]``'s own ``imageWidth``/``imageHeight``, i.e. "eff"'s own 2000x1500 here since
+    "eff" sorts first alphabetically -- see below), not from whatever the EARLIER hotspots loop
+    (``for sid in session_ids: img_w = f.get("imageWidth", 1)``) happened to leave lying around in
+    the enclosing scope after its last iteration.
+
+    A THIRD fragment, sessionId ``"zzz-nodim"`` (named to sort LAST: fragments are loaded from a
+    directory via ``sorted(glob.glob(os.path.join(dir, "**", "*.json")))``, and each fragment is
+    written to ``<sessionId>.json``, so ``"eff.json" < "ser.json" < "zzz-nodim.json"`` alphabetically
+    -- making ``"zzz-nodim"`` the LAST entry of both the loaded fragment list and the
+    insertion-ordered ``by_session``/``session_ids``), is schema/2 (grid-only, no ``"path"`` key at
+    all) and carries NEITHER ``imageWidth`` NOR ``imageHeight``. On the PRE-FIX code, the hotspots
+    loop's plain ``f.get("imageWidth", 1)`` / ``f.get("imageHeight", 1)`` for this LAST session
+    leaves ``img_w = img_h = 1`` sitting in the enclosing scope once that loop finishes, and the
+    ``--reference``-only branch below (no ``--roi``) never reassigns it (only the ``--roi`` branch
+    does) -- so "eff"'s on-reference cell-mapping would be computed against a degenerate 1x1
+    "image" instead of the true 2000x1500, corrupting the clamp+floor cell lookup and producing
+    screening values that do NOT match the ``--roi`` run's "eff" row. With the fix (deriving
+    ``img_w``/``img_h`` from ``sessions[0]`` -- "eff" itself -- right in this block, same as the
+    ``--roi`` branch), the two runs agree exactly."""
+    path_eff = [
+        [0, 100, 100, 400, 300, 20000],
+        [1000, 1125, 850, 400, 300, 5000],
+        [1250, 1125, 850, 400, 300, 5000],
+        [1500, 1125, 850, 400, 300, 5000],
+        [1750, 1125, 850, 400, 300, 5000],
+        [2000, 1125, 850, 400, 300, 5000],
+        [2250, 100, 100, 400, 300, 20000],
+    ]
+    path_ser = [
+        [0, 100, 100, 400, 300, 5000],
+        [250, 100, 100, 400, 300, 5000],
+        [500, 100, 100, 400, 300, 5000],
+        [750, 100, 100, 400, 300, 5000],
+        [1000, 100, 100, 400, 300, 5000],
+        [5000, 1125, 850, 400, 300, 500],
+        [5250, 1125, 850, 400, 300, 500],
+        [5500, 1125, 850, 400, 300, 500],
+        [5750, 1125, 850, 400, 300, 500],
+        [6000, 1125, 850, 400, 300, 500],
+    ]
+    eff_grid = [0.0] * (SCREENING_GW * SCREENING_GH)
+    eff_grid[4 * SCREENING_GW + 4] = 1.0  # cell(4,4) -- same cell the --roi fixture covers
+    f_eff = _screening_fragment(
+        "eff", path_eff, duration_ms=2250, sample_count=len(path_eff), grid=eff_grid
+    )
+    f_ser = _screening_fragment("ser", path_ser, duration_ms=6000, sample_count=len(path_ser))
+    f_third = {
+        "schema": "atlas-focus-contribution/2",
+        "slideKey": SCREENING_SLIDE_KEY,
+        "sessionId": "zzz-nodim",
+        "gridWidth": SCREENING_GW, "gridHeight": SCREENING_GH,
+        "grid": [0.0] * (SCREENING_GW * SCREENING_GH),
+        "durationMs": 1000.0,
+        "sampleCount": 4,
+        "date": "2026-09-12",
+        # deliberately NO imageWidth/imageHeight, NO path -- grid-only schema/2 fragment.
+    }
+    return [f_eff, f_ser, f_third]
+
+
+def check_screening_efficiency_reference_only_regression(tmp):
+    """Finding 1 regression test: a ``--reference eff`` run with NO ``--roi`` (three sessions on
+    the slide, the third grid-only/dims-less and last-iterated -- see
+    :func:`build_screening_reference_only_fixture`) must produce the EXACT SAME "eff" screening
+    columns as the ``--roi``-driven :func:`check_screening_efficiency_fixture` above, at ``1e-6``
+    tolerance -- both runs compare "eff" against the identical single-cell reference mask
+    (cell(4,4)) using "eff"'s own true 2000x1500 image dimensions."""
+    fragments = build_screening_reference_only_fixture()
+    in_dir = os.path.join(tmp, "in_screening_refonly")
+    os.makedirs(in_dir, exist_ok=True)
+    write_fragments_to_dir(fragments, in_dir)
+
+    out_dir = os.path.join(tmp, "out_screening_refonly")
+    analyze([in_dir], out_dir, reference="eff")
+
+    ref_files = [f for f in os.listdir(out_dir) if f.startswith("reference_")]
+    assert len(ref_files) == 1, ref_files
+    ref = pd.read_csv(os.path.join(out_dir, ref_files[0]))
+    row_eff = ref[ref.session == "eff"].iloc[0]
+
+    # Same hand-derived "eff" values as check_screening_efficiency_fixture's --roi run.
+    assert abs(row_eff["timeToFirstRefFixMs"] - 1000.0) < 1e-6, row_eff["timeToFirstRefFixMs"]
+    assert abs(row_eff["timeToFirstRefFixLpfMs"] - 1000.0) < 1e-6, row_eff["timeToFirstRefFixLpfMs"]
+    assert abs(row_eff["refFixTotalMs"] - 1000.0) < 1e-6, row_eff["refFixTotalMs"]
+    assert abs(row_eff["refFixTotalLpfMs"] - 1000.0) < 1e-6, row_eff["refFixTotalLpfMs"]
+    assert int(row_eff["refFixCount"]) == 1, row_eff["refFixCount"]
+    assert int(row_eff["refFixVisitCount"]) == 1, row_eff["refFixVisitCount"]
+    assert abs(row_eff["firstRefFixDownsample"] - 5.0) < 1e-6, row_eff["firstRefFixDownsample"]
+    assert abs(row_eff["firstRefFixMagnification"] - 4.0) < 1e-6, row_eff["firstRefFixMagnification"]
+
+
 def run():
     tmp = tempfile.mkdtemp(prefix="bfa-selftest-")
     try:
@@ -4161,6 +4600,15 @@ def run():
         check_pt4_magband_agreement_frac_fixture(tmp)
         check_pt4_magband_agreement_partial_fixture(tmp)
         check_pt4_tercile_scheme_no_file(tmp)
+
+        # --- Screening efficiency (Abe et al. 2026, doi:10.1002/cncy.70132): viewport-proxy LPF
+        # main-object biomarkers vs a --roi/--reference mask, in reference_<slug>.csv and
+        # nav_accuracy.csv ---
+        check_screening_efficiency_direct_unit_asserts()
+        check_screening_efficiency_fixture(tmp)
+        # Finding 1 (.superpowers/sdd/task-screening-report.md): --reference-only (no --roi)
+        # must not leak img_w/img_h from the earlier hotspots loop.
+        check_screening_efficiency_reference_only_regression(tmp)
 
         print("OK: all selftest assertions passed")
     finally:
