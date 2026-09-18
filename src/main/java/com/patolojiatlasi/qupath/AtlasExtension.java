@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import com.patolojiatlasi.qupath.autoview.AutoviewControl;
 import com.patolojiatlasi.qupath.focus.FocusHeatmap;
 import com.patolojiatlasi.qupath.pathologycot.PathologyCotActions;
+import com.patolojiatlasi.qupath.regions.RegionsCommands;
 import com.patolojiatlasi.qupath.research.BlindedResearch;
 
 import qupath.lib.common.Version;
@@ -83,16 +84,24 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem browseItem = new MenuItem("Slaytlara gözat…");
             browseItem.setOnAction(e -> AtlasBrowser.show(qupath));
 
+            // Local Deep Zoom folders -- the same pyramid format the atlas serves, but on disk.
+            // An explicit command because QuPath's drag-and-drop / File > Open may filter by known
+            // image extensions before any ImageServerBuilder is asked, so a .dzi can never rely on
+            // support level alone to reach DziImageServerBuilder.
+            MenuItem localDziItem = new MenuItem("Yerel DZI aç…");
+            localDziItem.setOnAction(e -> LocalDziOpener.show(qupath));
+
             // Catalogue coverage & QC dashboard — a read-only category x stain matrix, opt-in
             // link check, and drill-down into the project builder.
             MenuItem coverageItem = new MenuItem("Katalog kapsamı ve QC…");
             coverageItem.setOnAction(e -> CoverageDashboard.show(qupath));
 
-            // Pixel size (µm/px). DZI pyramids carry no MPP, so an atlas slide opens uncalibrated
-            // unless the catalogue or a ?mpp= query supplies one — and an uncalibrated image still
-            // reports getAveragedPixelSize() == 1.0, which µm-based tools (WSInfer's downsample
-            // computation among them) consume without checking. This turns the scanner mpp plus the
-            // export downsample ratio into a real calibration; nothing is applied automatically.
+            // Pixel size (µm/px). DziImageServer now calibrates itself from the vips-properties.xml
+            // sidecar that vips dzsave writes beside the tiles (openslide.mpp-x / aperio.MPP / xres),
+            // so most slides open already calibrated. This dialog remains for the cases that do not:
+            // a pyramid built without that sidecar, or one whose recorded value is wrong. It matters
+            // because an uncalibrated image still reports getAveragedPixelSize() == 1.0, which
+            // µm-based tools (WSInfer's downsample computation among them) consume without checking.
             MenuItem pixelSizeItem = new MenuItem("Piksel boyutu ayarla…");
             pixelSizeItem.setOnAction(e -> PixelSizeDialog.show(qupath));
 
@@ -182,13 +191,25 @@ public class AtlasExtension implements QuPathExtension {
             Menu quizMenu = new Menu("Sınav / Quiz");
             quizMenu.getItems().addAll(quizTakeItem, quizAuthorItem, tourPlayItem, quizBrowseItem);
 
+            // Named teaching regions. One small file beside the slide's .dzi drives three things:
+            // the zoom-to-region buttons on the OpenSeadragon site, the atlas MCP server's region
+            // tools, and re-editing here. Coordinates are plain full-resolution pixels, which is
+            // the same space all three already use, so nothing is transformed on the way out.
+            MenuItem regionsExportItem = new MenuItem("Bölgeleri dışa aktar…");
+            regionsExportItem.setOnAction(e -> RegionsCommands.export(qupath));
+            MenuItem regionsImportItem = new MenuItem("Bölgeleri içe aktar…");
+            regionsImportItem.setOnAction(e -> RegionsCommands.importRegions(qupath));
+            Menu regionsMenu = new Menu("Bölgeler");
+            regionsMenu.getItems().addAll(regionsExportItem, regionsImportItem);
+
             atlas.getItems().addAll(
                     browseItem,
+                    localDziItem,
                     coverageItem,
                     pixelSizeItem,
                     simpleView,
                     new SeparatorMenuItem(),
-                    compareMenu, referenceMenu, relatedItem, citationMenu, quizMenu);
+                    compareMenu, referenceMenu, relatedItem, regionsMenu, citationMenu, quizMenu);
 
             // Pathology-CoT group — turn a recorded blinded/focus fragment into a reviewable
             // guided-tour draft, review it in the existing tour author, then export a reviewed

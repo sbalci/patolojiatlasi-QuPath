@@ -37,13 +37,25 @@ public final class AtlasProjectService {
      */
     public static ProjectImageEntry<BufferedImage> addCaseToProject(
             Project<BufferedImage> project, AtlasCase c) throws IOException {
-        DziImageServer server = new DziImageServer(c.getDziURI());
+        // Open with a best-guess image type (H&E / H-DAB / other) from the stain, so the
+        // saved entry is analysis-ready instead of unset.
+        return addServerToProject(project, new DziImageServer(c.getDziURI()),
+                c.getTitle(), c.getImageType());
+    }
+
+    /**
+     * Add an already-built DZI server to a project under a given name, saving its ImageData and
+     * rolling the entry back if that fails. Shared by the catalogue path
+     * ({@link #addCaseToProject}) and by local {@code .dzi} files, which have no {@link AtlasCase}.
+     * Does NOT call syncChanges -- the caller syncs once for its batch.
+     */
+    public static ProjectImageEntry<BufferedImage> addServerToProject(
+            Project<BufferedImage> project, DziImageServer server, String name,
+            ImageData.ImageType type) throws IOException {
         ProjectImageEntry<BufferedImage> entry = project.addImage(server.getBuilder());
         try {
-            entry.setImageName(c.getTitle());
-            // Open with a best-guess image type (H&E / H-DAB / other) from the stain, so the
-            // saved entry is analysis-ready instead of unset.
-            try (ImageData<BufferedImage> imageData = new ImageData<>(server, c.getImageType())) {
+            entry.setImageName(name);
+            try (ImageData<BufferedImage> imageData = new ImageData<>(server, type)) {
                 entry.saveImageData(imageData);
             }
             return entry;
@@ -53,7 +65,7 @@ public final class AtlasProjectService {
             } catch (Exception rollbackEx) {
                 logger.warn("Could not roll back partial project entry: {}", rollbackEx.getMessage());
             }
-            throw new IOException("Failed to add \"" + c.getTitle() + "\": " + inner.getMessage(), inner);
+            throw new IOException("Failed to add \"" + name + "\": " + inner.getMessage(), inner);
         }
     }
 

@@ -14,7 +14,8 @@ import qupath.lib.images.servers.ImageServerBuilder.ServerBuilder;
 import qupath.lib.images.servers.ImageServerBuilder.UriImageSupport;
 
 /**
- * Registers Deep Zoom (.dzi) URLs as an image type QuPath can open.
+ * Registers Deep Zoom (.dzi) URLs as an image type QuPath can open, whether they are
+ * served over HTTP(S) or stored locally (a {@code file:} URI).
  * <p>
  * Discovered via {@code META-INF/services/qupath.lib.images.servers.ImageServerBuilder},
  * so any {@code .dzi} URL (dragged onto QuPath, added to a project, or opened
@@ -36,8 +37,8 @@ public class DziImageServerBuilder implements ImageServerBuilder<BufferedImage> 
 
     @Override
     public String getDescription() {
-        return "Reads Deep Zoom (.dzi) tiled whole-slide images served over HTTP, "
-                + "such as those on patolojiatlasi.com.";
+        return "Reads Deep Zoom (.dzi) tiled whole-slide images, either served over HTTP "
+                + "(such as those on patolojiatlasi.com) or stored in a local folder.";
     }
 
     @Override
@@ -69,8 +70,10 @@ public class DziImageServerBuilder implements ImageServerBuilder<BufferedImage> 
         String scheme = uri.getScheme();
         if (path == null || scheme == null)
             return 0;
-        boolean http = scheme.equalsIgnoreCase("http") || scheme.equalsIgnoreCase("https");
+        boolean supported = scheme.equalsIgnoreCase("http")
+                || scheme.equalsIgnoreCase("https")
+                || scheme.equalsIgnoreCase("file");
         // High confidence for .dzi URLs so this builder is preferred.
-        return (http && path.toLowerCase().endsWith(".dzi")) ? 4f : 0f;
+        return (supported && path.toLowerCase().endsWith(".dzi")) ? 4f : 0f;
     }
 }
