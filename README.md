@@ -490,9 +490,10 @@ project opens; accepting is remembered so later sessions start recording immedia
 `<project>/atlas-focus/` (captured once when recording starts, so a later project switch can't
 misattribute a still-finishing session); with no project open it falls back to
 `~/QuPath-atlas-focus-maps/contributions/`. While recording, the current slide's map is
-checkpointed to a `session-<id>.partial.json` file roughly every **30 seconds**, so a crash or
+checkpointed to a `session-<id>__<slide-start>.partial.json` file roughly every **30 seconds**, so a crash or
 force-quit loses at most that much data — not the whole session. Switching slides or stopping
-promotes the checkpoint into a final per-slide JSON fragment and removes the `.partial.json`.
+promotes the checkpoint into a final per-slide JSON fragment and removes that `.partial.json` only
+after the final write succeeds. A failed final write leaves the checkpoint for recovery.
 Closing or switching away from the project stops recording, writes the last slide's fragment, and
 bundles every fragment from the session into a single
 `atlas-focus_<timestamp>_<session>.zip` in the project folder (or the fallback dir) — that one zip

@@ -257,6 +257,26 @@ class DziImageServerTest {
         assertTrue(thrown.getMessage().contains("Format"), thrown.getMessage());
     }
 
+    @Test
+    void rejectsDoctypeInDescriptor(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("HE.dzi"), """
+                <?xml version="1.0"?>
+                <!DOCTYPE Image [<!ENTITY data SYSTEM "file:///should-not-be-read">]>
+                <Image TileSize="254" Overlap="1" Format="jpeg"><Size Width="100" Height="80"/></Image>
+                """);
+        assertThrows(IOException.class, () -> new DziImageServer(dir.resolve("HE.dzi").toUri()));
+    }
+
+    @Test
+    void rejectsDoctypeInSidecar() {
+        byte[] xml = """
+                <?xml version="1.0"?>
+                <!DOCTYPE image [<!ENTITY data SYSTEM "file:///should-not-be-read">]>
+                <image><properties><property><name>xres</name><value>&data;</value></property></properties></image>
+                """.getBytes(StandardCharsets.UTF_8);
+        assertThrows(Exception.class, () -> DziImageServer.mppFromVipsProperties(xml));
+    }
+
     // --- calibration precedence ------------------------------------------------------
 
     /**
@@ -290,6 +310,16 @@ class DziImageServerTest {
             assertNotNull(img);
             assertEquals(100, img.getWidth());
             assertEquals(80, img.getHeight());
+        }
+    }
+
+    @Test
+    void corruptTileFailsInsteadOfRenderingWhite(@TempDir Path dir) throws Exception {
+        Path dzi = writePyramid(dir, null);
+        Files.writeString(dir.resolve("HE_files/7/0_0.jpeg"), "not a JPEG");
+        try (var server = new DziImageServer(dzi.toUri())) {
+            assertThrows(IOException.class, () -> server.readRegion(
+                    qupath.lib.regions.RegionRequest.createInstance(server, 1.0)));
         }
     }
 }

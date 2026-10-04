@@ -68,11 +68,14 @@ public final class LocalDziOpener {
                             // API differences across versions; the project is still updated on disk.
                         }
                         try {
-                            qupath.openImageEntry(entry);
-                        } catch (Throwable ex) {
-                            logger.warn("Could not open project entry: {}", ex.getMessage());
+                            if (qupath.openImageEntry(entry))
+                                info(qupath, calibrationMessage(name, calibrated, mpp, true));
+                            else
+                                info(qupath, name + " projeye eklendi ancak görüntü açılmadı.");
+                        } catch (Exception ex) {
+                            logger.error("Could not open project entry: {}", ex.getMessage(), ex);
+                            error(qupath, ex);
                         }
-                        info(qupath, calibrationMessage(name, calibrated, mpp, true));
                     });
                 } else {
                     ImageData<BufferedImage> imageData =

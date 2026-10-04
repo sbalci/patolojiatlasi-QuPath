@@ -147,14 +147,15 @@ public final class FocusHeatmap {
      *  through {@code snap.dir()} rather than re-reading the (by-then-stale) instance field — otherwise
      *  the departing slide's fragment would land in the wrong project's {@code atlas-focus} folder and
      *  the checkpoint delete could orphan the real checkpoint or clobber the new project's live one. */
-    private record BlindedSnapshot(String uri, FocusMap map, java.util.List<int[]> path,
+    private record BlindedSnapshot(String sessionId, String uri, FocusMap map, java.util.List<int[]> path,
             boolean pathTruncated, Double baseMagnification, JsonElement annotations, long slideStartMs,
             String date, File dir) { }
+    private record PendingPackage(File dir, String sessionId) { }
 
     private final QuPathGUI qupath;
     private final String user = System.getProperty("user.name", "unknown");
-    /** Anonymous per-session id — lets contributions be de-duplicated/weighted without identifying anyone. */
-    private final String sessionId = java.util.UUID.randomUUID().toString();
+    /** Anonymous recording id; refreshed whenever blinded recording starts. */
+    private volatile String sessionId = java.util.UUID.randomUUID().toString();
 
     // The heat map can be shown two ways, independently: as a translucent layer on the slide, and/or
     // in a separate small window. Sampling also runs — silently, no visuals — while blinded
@@ -211,6 +212,7 @@ public final class FocusHeatmap {
     /** Guards the deferred leave-prompt: while true, tick() early-returns so no sampling/switch races
      *  the pending prompt+save of the slide just left. */
     private boolean pendingDecisionSave;
+    private PendingPackage pendingPackage;
     /** Slides (by uri) whose leave-prompt the reader declined — don't nag again on revisit-and-leave. */
     private final java.util.Set<String> decisionPromptedSlides = new java.util.HashSet<>();
     /** When true (default), leaving a slide with no decision auto-prompts. Set from the sidecar. */
@@ -567,15 +569,21 @@ public final class FocusHeatmap {
             } else if (leavingUri != null) {
                 decisionPromptedSlides.add(leavingUri);   // declined — don't nag on revisit
             }
-            writeBlindedFragmentSync(snap, decision);
+            boolean saved = writeBlindedFragmentSync(snap, decision);
             // Same rationale as writeBlindedFragmentSync above: target snap.dir(), not the (possibly
             // by-now-reassigned) live blindedDir, so this can't orphan the departing project's real
             // checkpoint or clobber a new project's live one.
-            deleteCheckpoint(snap.dir());
+            if (saved)
+                deleteCheckpoint(snap);
         } catch (Exception e) {
             logger.debug("Deferred decision prompt/save failed: {}", e.getMessage());
         } finally {
             pendingDecisionSave = false;
+            PendingPackage pack = pendingPackage;
+            if (pack != null && pack.sessionId().equals(snap.sessionId())) {
+                pendingPackage = null;
+                packageBlindedSession(pack.dir(), pack.sessionId());
+            }
         }
     }
 
@@ -584,6 +592,7 @@ public final class FocusHeatmap {
     public void startBlinded() {
         if (blindedRecording)
             return;
+        sessionId = java.util.UUID.randomUUID().toString();
         // Hide/clear any visible overlay or window — blinded recording must render nothing.
         if (overlayVisible)
             overlayItem.setSelected(false);   // -> setOverlayVisible(false) -> removeOverlay()
@@ -655,27 +664,17 @@ public final class FocusHeatmap {
         // handlers now, so no listener/handler is ever left registered outside a recording session.
         qupath.viewerProperty().removeListener(viewerMouseListener);
         attachMouseTracking(null);
-        if (currentMap != null && !currentMap.isEmpty())
-            writeBlindedFragmentSync(currentSnapshot(), currentDecision);
-        // The final fragment above (if any) now carries whatever the checkpoint was tracking --
-        // remove the checkpoint so it doesn't linger as stale/duplicate data in blindedDir.
-        deleteCheckpoint();
-        // Best-effort: bundle every fragment written this session into one zip in the project
-        // folder (or the fallback dir) -- the single file to hand to the study coordinator. A zip
-        // failure must never prevent recording from stopping cleanly.
-        try {
-            // Only zip when something was actually recorded — an immediate start/stop (or a
-            // session with no dwell) must not litter the project folder with empty zips.
-            if (BlindedStore.hasFragments(blindedDir)) {
-                String stamp = LocalDateTime.now().format(
-                        DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
-                String shortId = sessionId.length() >= 8 ? sessionId.substring(0, 8) : sessionId;
-                File zipParent = "atlas-focus".equals(blindedDir.getName()) ? blindedDir.getParentFile() : blindedDir;
-                BlindedStore.zipFragments(blindedDir, new File(zipParent, BlindedStore.zipName(stamp, shortId)));
-            }
-        } catch (Exception e) {
-            logger.debug("Blinded zip failed: {}", e.getMessage());
+        if (currentMap != null && !currentMap.isEmpty()) {
+            BlindedSnapshot snap = currentSnapshot();
+            if (writeBlindedFragmentSync(snap, currentDecision))
+                deleteCheckpoint(snap);
         }
+        // The deferred leave-prompt may still be writing an earlier slide. Package after it
+        // finishes, so the ZIP includes every fragment from this recording.
+        if (pendingDecisionSave)
+            pendingPackage = new PendingPackage(blindedDir, sessionId);
+        else
+            packageBlindedSession(blindedDir, sessionId);
         // Clean slate: the blinded map is now persisted (or discarded if empty); drop it so no
         // stray keepMaps/save() path downstream (e.g. refreshTracking()'s stop-tracking save) can
         // ever touch it, and so a future visible session starts from a fresh, non-blinded map.
@@ -697,6 +696,24 @@ public final class FocusHeatmap {
         if (blindedItem != null && blindedItem.isSelected())
             blindedItem.setSelected(false);
         refreshTracking();
+    }
+
+    private void packageBlindedSession(File dir, String recordingId) {
+        // Best-effort: a ZIP failure must not prevent recording from stopping cleanly.
+        try {
+            // Only zip when something was actually recorded — an immediate start/stop (or a
+            // session with no dwell) must not litter the project folder with empty zips.
+            if (BlindedStore.hasFragments(dir, recordingId)) {
+                String stamp = LocalDateTime.now().format(
+                        DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
+                String shortId = recordingId.length() >= 8 ? recordingId.substring(0, 8) : recordingId;
+                File zipParent = "atlas-focus".equals(dir.getName()) ? dir.getParentFile() : dir;
+                BlindedStore.zipFragments(dir,
+                        new File(zipParent, BlindedStore.zipName(stamp, shortId)), recordingId);
+            }
+        } catch (Exception e) {
+            logger.error("Blinded zip failed: {}", e.getMessage(), e);
+        }
     }
 
     private void tick() {
@@ -791,13 +808,13 @@ public final class FocusHeatmap {
             if (!Double.isNaN(x) && x > 0)
                 baseMag = x;
         } catch (Exception ignored) { }
-        return new BlindedSnapshot(currentUri, currentMap, new java.util.ArrayList<>(blindedPath),
+        return new BlindedSnapshot(sessionId, currentUri, currentMap, new java.util.ArrayList<>(blindedPath),
                 blindedPathCapped, baseMag, buildAnnotationsFeatureCollection(), blindedSlideStartMs,
                 java.time.LocalDate.now().toString(), blindedDir);
     }
 
     /**
-     * Crash-safety checkpoint: overwrite {@code <blindedDir>/session-<sessionId>.partial.json} with
+     * Crash-safety checkpoint: overwrite this slide visit's {@code .partial.json} with
      * the current slide's accumulated dwell-ms, so a crash loses at most ~{@link
      * #CHECKPOINT_EVERY_TICKS} ticks (~30s) of data instead of the whole slide. JSON-only, via the
      * same anonymised {@link #buildBlindedJson} used for the final fragment — never a PNG. Best-effort:
@@ -807,31 +824,24 @@ public final class FocusHeatmap {
         if (blindedDir == null || currentMap == null || currentMap.isEmpty())
             return;
         try {
-            final String json = buildBlindedJson(currentSnapshot(), currentDecision);
-            writeTextAsync(new File(blindedDir, "session-" + sessionId + ".partial.json"), json);
+            BlindedSnapshot snap = currentSnapshot();
+            final String json = buildBlindedJson(snap, currentDecision);
+            BlindedStore.writeAtomically(checkpointFile(snap), json);
         } catch (Exception e) {
             logger.debug("Blinded checkpoint failed: {}", e.getMessage());
         }
     }
 
-    /** Best-effort delete of the current session's checkpoint file in the live {@link #blindedDir}
-     *  (its data has just been promoted into a final fragment). No-op / silent if it doesn't exist or
-     *  can't be removed. Delegates to {@link #deleteCheckpoint(File)} — used by the synchronous call
-     *  sites, where the live {@code blindedDir} is still the directory the just-written fragment
-     *  belongs to. */
-    private void deleteCheckpoint() {
-        deleteCheckpoint(blindedDir);
+    private static File checkpointFile(BlindedSnapshot snap) {
+        return new File(snap.dir(), "session-" + snap.sessionId() + "__"
+                + snap.slideStartMs() + ".partial.json");
     }
 
-    /** Best-effort delete of the current session's checkpoint file in an explicit directory. Used by
-     *  {@link #deferredDecisionPromptAndSave} with the departing slide's {@code snap.dir()}, so a
-     *  project switch that has since reassigned {@link #blindedDir} to a new project can't make this
-     *  delete either miss the real (departing-project) checkpoint or clobber the new project's live
-     *  one. No-op / silent if {@code dir} is null, the file doesn't exist, or it can't be removed. */
-    private void deleteCheckpoint(File dir) {
+    /** Delete only the checkpoint promoted into a successfully written final fragment. */
+    private void deleteCheckpoint(BlindedSnapshot snap) {
         try {
-            if (dir != null)
-                new File(dir, "session-" + sessionId + ".partial.json").delete();
+            if (snap.dir() != null)
+                checkpointFile(snap).delete();
         } catch (Exception e) {
             logger.debug("Could not remove blinded checkpoint: {}", e.getMessage());
         }
@@ -858,16 +868,15 @@ public final class FocusHeatmap {
         try {
             if (!blindedRecording || currentMap == null || currentMap.isEmpty() || blindedDir == null)
                 return;
-            String json = buildBlindedJson(currentSnapshot(), currentDecision);
-            String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(currentUri))) + "__shutdown-"
+            BlindedSnapshot snap = currentSnapshot();
+            String json = buildBlindedJson(snap, currentDecision);
+            String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(snap.uri()))) + "__"
+                    + snap.sessionId() + "__shutdown-"
                     + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
-            if (!blindedDir.exists())
-                blindedDir.mkdirs();
-            java.nio.file.Files.writeString(new File(blindedDir, base + ".json").toPath(), json,
-                    java.nio.charset.StandardCharsets.UTF_8);
+            BlindedStore.writeAtomically(new File(snap.dir(), base + ".json"), json);
             // The checkpoint this final flush supersedes would otherwise linger as stale/duplicate
             // data in blindedDir; removal here is best-effort like everything else in this method.
-            new File(blindedDir, "session-" + sessionId + ".partial.json").delete();
+            checkpointFile(snap).delete();
         } catch (Exception e) {
             logger.debug("Blinded shutdown flush failed: {}", e.getMessage());
         }
@@ -945,10 +954,12 @@ public final class FocusHeatmap {
                 // Synchronous: the checkpoint is deleted right after, so the final fragment must be on
                 // disk first — an async write could still be in flight if a crash follows, losing this
                 // slide with no checkpoint fallback. A small JSON write is negligible vs. slide loading.
-                writeBlindedFragmentSync(currentSnapshot(), currentDecision);
+                BlindedSnapshot snap = currentSnapshot();
+                boolean saved = writeBlindedFragmentSync(snap, currentDecision);
                 // The fragment just written now carries whatever the checkpoint was tracking for the
                 // slide that's being left -- remove it so it doesn't linger as stale/duplicate data.
-                deleteCheckpoint();
+                if (saved)
+                    deleteCheckpoint(snap);
             }
         }
         removeOverlay();
@@ -1218,19 +1229,21 @@ public final class FocusHeatmap {
      * blindedDir} at write time would then misattribute the fragment to the new project instead of the
      * departing one.
      */
-    private void writeBlindedFragmentSync(BlindedSnapshot snap, Decision decision) {
+    private boolean writeBlindedFragmentSync(BlindedSnapshot snap, Decision decision) {
         try {
             final String json = buildBlindedJson(snap, decision);
             final String base = "focus-blinded__" + safe(anonymizeSlideKey(slideKey(snap.uri()))) + "__"
-                    + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US));
+                    + snap.sessionId() + "__"
+                    + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", java.util.Locale.US))
+                    + "__" + java.util.UUID.randomUUID();
             File dir = snap.dir();
-            if (!dir.exists())
-                dir.mkdirs();
             File file = new File(dir, base + ".json");
-            java.nio.file.Files.writeString(file.toPath(), json, java.nio.charset.StandardCharsets.UTF_8);
+            BlindedStore.writeAtomically(file, json);
             logger.info("Saved focus contribution to {}", file);
+            return true;
         } catch (Exception e) {
             logger.error("Failed to save blinded focus map: {}", e.getMessage(), e);
+            return false;
         }
     }
 
@@ -1278,7 +1291,7 @@ public final class FocusHeatmap {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("schema", CONTRIBUTION_SCHEMA_BLINDED);   // stays atlas-focus-contribution/5
         m.put("slideKey", anonymizeSlideKey(slideKey(snap.uri())));
-        m.put("sessionId", sessionId);
+        m.put("sessionId", snap.sessionId());
         m.put("imageWidth", snap.map().getImageWidth());
         m.put("imageHeight", snap.map().getImageHeight());
         m.put("gridWidth", snap.map().getGridWidth());

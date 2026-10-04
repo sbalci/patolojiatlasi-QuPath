@@ -3727,6 +3727,18 @@ run <- function() {
   in_dir <- file.path(tmp, "in")
   dir.create(in_dir)
   write_fragments_to_dir(fragments, in_dir)
+  # Older ZIPs may repeat the same named fragment. Keep one identical copy, but retain a
+  # changed payload even when its archive entry name is the same.
+  old_zip_a <- file.path(tmp, "old-a.zip")
+  old_zip_b <- file.path(tmp, "old-b.zip")
+  changed_zip <- file.path(tmp, "changed.zip")
+  write_fragments_to_zip(list(fragments[[1]]), old_zip_a)
+  write_fragments_to_zip(list(fragments[[1]]), old_zip_b)
+  changed <- fragments[[1]]
+  changed$sampleCount <- changed$sampleCount + 1
+  write_fragments_to_zip(list(changed), changed_zip)
+  stopifnot("duplicate archived fragment should count once" =
+            length(load_fragments(list(old_zip_a, old_zip_b, changed_zip))) == 2)
   out_dir <- file.path(tmp, "out")
 
   metrics <- analyze(list(in_dir), out_dir, reference = "s1", make_figures = TRUE, res = 256)

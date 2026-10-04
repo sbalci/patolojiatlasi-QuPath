@@ -14,23 +14,25 @@ showing the map *during* recording, not analyzing it afterwards).
 
 ## The data
 
-Each recording writes one JSON **fragment per slide** (in `<project>/atlas-focus/`, bundled into a
-timestamped `atlas-focus_*.zip` on session end). The extension currently writes schema **`/1`**
-(visible "Contribute" mode — fixed-weight sample counts) or **`/4`** (blinded recording — dwell
-milliseconds + scanpath + zoom); schemas `/2` and `/3` were superseded and are no longer produced,
-but the tools below still **accept** them for backward compatibility with older recordings. Fields
-(schema `atlas-focus-contribution/{1,2,3,4}`):
+Each recording writes one JSON **fragment per completed slide visit** (in `<project>/atlas-focus/`, bundled into a
+timestamped `atlas-focus_*.zip` on session end). Each ZIP contains only that recording's fragments.
+The extension currently writes schema **`/1`** (visible "Contribute" mode — fixed-weight sample
+counts) or **`/5`** (blinded recording — dwell milliseconds, scanpath, zoom and cursor positions).
+Schemas `/2`, `/3` and `/4` were superseded, but the tools below still **accept** them for backward
+compatibility. When several ZIPs from older extension versions repeat the same named fragment,
+the Python and R loaders count its identical payload once. Fields
+(schema `atlas-focus-contribution/{1,2,3,4,5}`):
 
 | field | meaning |
 |-------|---------|
 | `slideKey` | stable slide id (public DZI URL, or `sha256:` for local slides) — groups sessions |
 | `sessionId` | random per-recording UUID = **"user"** (one sitting; map to a participant out-of-band) |
-| `grid` | row-major `gridWidth×gridHeight` dwell map — **milliseconds** (`/2`,`/3`,`/4`) or sample counts (`/1`) |
+| `grid` | row-major `gridWidth×gridHeight` dwell map — **milliseconds** (`/2`–`/5`) or sample counts (`/1`) |
 | `durationMs`, `sampleCount` | total active dwell / samples |
 | `imageWidth/Height`, `gridWidth/Height` | dimensions to map image px ↔ grid cells |
-| `path` (`/3`, `/4`) | ordered scanpath — viewport center + extent over time. `/3` points are 5-element `[tMs, cx, cy, w, h]`; `/4` points are 6-element `[tMs, cx, cy, w, h, dsMilli]` (`dsMilli` = downsample×1000). |
-| `baseMagnification` (`/4` only) | the slide's objective power (number), or absent/`null` if unknown — combines with `dsMilli` into a true magnification |
-| `pathTruncated` (`/4` only) | bool: the recorder's point cap was hit and further points were dropped |
+| `path` (`/3`–`/5`) | ordered scanpath — viewport center + extent over time. `/3` points are `[tMs, cx, cy, w, h]`; `/4` adds `dsMilli` (downsample×1000); `/5` adds cursor `mouseX, mouseY` (`-1` when off the viewer). |
+| `baseMagnification` (`/4`–`/5`) | the slide's objective power (number), or absent/`null` if unknown — combines with `dsMilli` into a true magnification |
+| `pathTruncated` (`/4`–`/5`) | bool: the recorder's point cap was hit and further points were dropped |
 | `date` | date only (no time) — anonymized |
 
 **Anonymized by construction:** no username, no absolute paths, random session id, date-only. A

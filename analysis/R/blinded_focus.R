@@ -177,7 +177,21 @@ load_fragments <- function(paths) {
       stop(sprintf("input path not found: %s", p), call. = FALSE)
     }
   }
-  fragments
+  # Older extension releases repeated earlier fragments in each later session ZIP. Deduplicate
+  # identical named payloads when several such archives are supplied together.
+  unique <- list()
+  seen <- new.env(parent = emptyenv(), hash = TRUE)
+  for (f in fragments) {
+    name <- basename(sub(".*!", "", f[["_source"]]))
+    session <- if (is.null(f$sessionId)) "" else as.character(f$sessionId)[1]
+    key <- paste0(session, "::", name)
+    payload <- f[setdiff(names(f), "_source")]
+    previous <- if (exists(key, envir = seen, inherits = FALSE)) get(key, envir = seen) else list()
+    if (any(vapply(previous, function(old) identical(payload, old), logical(1)))) next
+    assign(key, c(previous, list(payload)), envir = seen)
+    unique[[length(unique) + 1]] <- f
+  }
+  unique
 }
 
 #' Group fragment lists by `slideKey` -> named list `slideKey -> list(fragment, ...)` (first-seen

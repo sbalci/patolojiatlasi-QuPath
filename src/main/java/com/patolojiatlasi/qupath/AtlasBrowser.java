@@ -42,6 +42,7 @@ import com.patolojiatlasi.qupath.dzi.DziImageServer;
 
 import qupath.lib.gui.QuPathGUI;
 import qupath.lib.images.ImageData;
+import qupath.lib.images.servers.ImageServer;
 import qupath.lib.projects.Project;
 import qupath.lib.projects.ProjectImageEntry;
 
@@ -511,11 +512,17 @@ public class AtlasBrowser {
                             // API differences across versions: project is still updated on disk.
                         }
                         try {
-                            qupath.openImageEntry(entry);
-                        } catch (Throwable ex) {
-                            logger.warn("Could not open project entry: {}", ex.getMessage());
+                            if (qupath.openImageEntry(entry)) {
+                                done(c, "Added to project & opened: ", qupath.getImageData().getServer());
+                            } else {
+                                opening = false;
+                                progress.setVisible(false);
+                                status.setText("Added to project; image not opened: " + c.getTitle());
+                            }
+                        } catch (Exception ex) {
+                            logger.error("Could not open project entry: {}", ex.getMessage(), ex);
+                            fail(c, ex);
                         }
-                        done(c, "Added to project & opened: ");
                     });
                 } else {
                     DziImageServer server = new DziImageServer(c.getDziURI());
@@ -523,7 +530,7 @@ public class AtlasBrowser {
                     Platform.runLater(() -> {
                         try {
                             qupath.getViewer().setImageData(imageData);
-                            done(c, "Opened (no project): ");
+                            done(c, "Opened (no project): ", server);
                         } catch (Exception ex) {
                             logger.error("Failed to display atlas case {}: {}", c.getReponame(), ex.getMessage(), ex);
                             fail(c, ex);
@@ -539,11 +546,12 @@ public class AtlasBrowser {
         t.start();
     }
 
-    private void done(AtlasCase c, String prefix) {
+    private void done(AtlasCase c, String prefix, ImageServer<BufferedImage> server) {
         opening = false;
         progress.setVisible(false);
-        String cal = c.getMpp() > 0
-                ? "  (" + c.getMpp() + " µm/px)"
+        var calibration = server.getPixelCalibration();
+        String cal = calibration.hasPixelSizeMicrons()
+                ? "  (" + String.format(Locale.US, "%.4f", calibration.getAveragedPixelSizeMicrons()) + " µm/px)"
                 : "  (no µm/px calibration — Patoloji Atlası → Piksel boyutu ayarla…)";
         status.setText(prefix + c.getTitle() + cal);
     }

@@ -2,18 +2,17 @@ package com.patolojiatlasi.qupath.focus;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.OutputStream;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 /** Storage-dir resolution + fragment zipping for blinded research data. */
 final class BlindedStore {
-
-    private static final Logger logger = LoggerFactory.getLogger(BlindedStore.class);
 
     private BlindedStore() {}
 
@@ -26,40 +25,63 @@ final class BlindedStore {
         return "atlas-focus_" + tsStamp + "_" + sessionShort + ".zip";
     }
 
-    private static boolean isFragment(String name) {
-        return name.startsWith("focus-blinded__") || name.endsWith(".partial.json");
+    /** Replace a JSON file only after the full payload has been written. */
+    static void writeAtomically(File file, String text) throws IOException {
+        Path target = file.toPath();
+        Path parent = target.toAbsolutePath().getParent();
+        Files.createDirectories(parent);
+        Path temp = Files.createTempFile(parent, "atlas-focus-", ".json.tmp");
+        try {
+            Files.writeString(temp, text, StandardCharsets.UTF_8);
+            moveIntoPlace(temp, target);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
     }
 
-    /** True if {@code dir} holds at least one blinded fragment (avoid writing an empty zip). */
-    static boolean hasFragments(File dir) {
-        File[] files = dir == null ? null : dir.listFiles((d, n) -> isFragment(n));
+    private static boolean isSessionFragment(String name, String sessionId) {
+        return (name.startsWith("focus-blinded__") && name.contains("__" + sessionId + "__")
+                && name.endsWith(".json"))
+                || (name.startsWith("session-" + sessionId + "__") && name.endsWith(".partial.json"));
+    }
+
+    /** True if {@code dir} holds a fragment from this recording. */
+    static boolean hasFragments(File dir, String sessionId) {
+        File[] files = dir == null ? null : dir.listFiles((d, n) -> isSessionFragment(n, sessionId));
         return files != null && files.length > 0;
     }
 
-    /** Zip every blinded fragment (+ any .partial checkpoint) in {@code dir} into {@code zipTarget}. */
-    static File zipFragments(File dir, File zipTarget) {
+    /** Write this recording's fragments to a complete ZIP, or throw without publishing a partial ZIP. */
+    static File zipFragments(File dir, File zipTarget, String sessionId) throws IOException {
+        File[] files = dir == null ? null : dir.listFiles((d, n) -> isSessionFragment(n, sessionId));
+        if (files == null || files.length == 0)
+            throw new IOException("No blinded fragments for recording " + sessionId + " in " + dir);
+        Arrays.sort(files);
+        Path target = zipTarget.toPath();
+        Path parent = target.toAbsolutePath().getParent();
+        if (parent != null)
+            Files.createDirectories(parent);
+        Path temp = Files.createTempFile(parent, "atlas-focus-", ".zip.tmp");
         try {
-            File parent = zipTarget.getAbsoluteFile().getParentFile();
-            if (parent != null)
-                parent.mkdirs();
-            File[] files = dir == null ? null : dir.listFiles((d, n) -> isFragment(n));
-            try (OutputStream os = Files.newOutputStream(zipTarget.toPath());
-                    ZipOutputStream zos = new ZipOutputStream(os)) {
-                if (files != null) {
-                    for (File f : files) {
-                        try {
-                            zos.putNextEntry(new ZipEntry(f.getName()));
-                            zos.write(Files.readAllBytes(f.toPath()));
-                            zos.closeEntry();
-                        } catch (IOException e) {
-                            logger.warn("Skipping {} in blinded zip: {}", f.getName(), e.getMessage());
-                        }
-                    }
+            try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(temp))) {
+                for (File f : files) {
+                    zos.putNextEntry(new ZipEntry(f.getName()));
+                    Files.copy(f.toPath(), zos);
+                    zos.closeEntry();
                 }
             }
-        } catch (Exception e) {
-            logger.warn("Could not write blinded zip {}: {}", zipTarget, e.getMessage());
+            moveIntoPlace(temp, target);
+        } finally {
+            Files.deleteIfExists(temp);
         }
         return zipTarget;
+    }
+
+    private static void moveIntoPlace(Path temp, Path target) throws IOException {
+        try {
+            Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+        }
     }
 }

@@ -3745,6 +3745,16 @@ def run():
         in_dir = os.path.join(tmp, "in")
         os.makedirs(in_dir, exist_ok=True)
         write_fragments_to_dir(fragments, in_dir)
+        # Earlier releases repeated prior fragments in later ZIPs. Identical copies count once,
+        # while a changed payload under the same entry name remains a distinct recording.
+        old_zip_a, old_zip_b, changed_zip = (
+            os.path.join(tmp, name) for name in ("old-a.zip", "old-b.zip", "changed.zip")
+        )
+        write_fragments_to_zip([fragments[0]], old_zip_a)
+        write_fragments_to_zip([fragments[0]], old_zip_b)
+        changed = dict(fragments[0], sampleCount=fragments[0]["sampleCount"] + 1)
+        write_fragments_to_zip([changed], changed_zip)
+        assert len(bf_io.load_fragments([old_zip_a, old_zip_b, changed_zip])) == 2
         out_dir = os.path.join(tmp, "out")
 
         analyze([in_dir], out_dir, reference="s1", make_figures=True, res=256)

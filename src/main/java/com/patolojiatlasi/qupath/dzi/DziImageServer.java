@@ -11,6 +11,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Collection;
@@ -20,6 +21,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.imageio.ImageIO;
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.slf4j.Logger;
@@ -57,10 +59,15 @@ public class DziImageServer extends AbstractTileableImageServer {
 
     private static final Logger logger = LoggerFactory.getLogger(DziImageServer.class);
 
-    private static final HttpClient HTTP = HttpClient.newBuilder()
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .connectTimeout(Duration.ofSeconds(20))
-            .build();
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
+
+    // Local pyramids must not initialize networking (some offline QuPath environments forbid it).
+    private static final class HttpHolder {
+        private static final HttpClient CLIENT = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(20))
+                .build();
+    }
 
     /** Name of the sidecar {@code vips dzsave} writes inside the {@code _files} directory. */
     static final String VIPS_PROPERTIES = "vips-properties.xml";
@@ -212,9 +219,7 @@ public class DziImageServer extends AbstractTileableImageServer {
      * @return the pixel size in microns, or {@code null} if the document carries none
      */
     static Double mppFromVipsProperties(byte[] xml) throws Exception {
-        var factory = DocumentBuilderFactory.newInstance();
-        factory.setNamespaceAware(false);
-        Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xml));
+        Document doc = parseXml(xml);
 
         Map<String, String> props = new HashMap<>();
         NodeList list = doc.getElementsByTagName("property");
@@ -277,10 +282,7 @@ public class DziImageServer extends AbstractTileableImageServer {
 
     private DziDescriptor fetchDescriptor(String dziUrl) throws IOException {
         try {
-            var factory = DocumentBuilderFactory.newInstance();
-            factory.setNamespaceAware(false);
-            Document doc = factory.newDocumentBuilder()
-                    .parse(new ByteArrayInputStream(source.descriptor()));
+            Document doc = parseXml(source.descriptor());
 
             Element image = (Element) doc.getElementsByTagName("Image").item(0);
             Element size = (Element) doc.getElementsByTagName("Size").item(0);
@@ -310,6 +312,17 @@ public class DziImageServer extends AbstractTileableImageServer {
         } catch (Exception e) {
             throw new IOException("Failed to read .dzi descriptor: " + dziUrl, e);
         }
+    }
+
+    private static Document parseXml(byte[] xml) throws Exception {
+        var factory = DocumentBuilderFactory.newInstance();
+        factory.setNamespaceAware(false);
+        factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+        factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+        factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+        factory.setExpandEntityReferences(false);
+        return factory.newDocumentBuilder().parse(new ByteArrayInputStream(xml));
     }
 
     @Override
@@ -347,25 +360,22 @@ public class DziImageServer extends AbstractTileableImageServer {
         return out;
     }
 
-    private BufferedImage fetchTile(int dziLevel, int col, int row) {
+    private BufferedImage fetchTile(int dziLevel, int col, int row) throws IOException {
         String relative = dziLevel + "/" + col + "_" + row + "." + format;
         BufferedImage cached = tinyCache.get(relative);
         if (cached != null)
             return cached;
-        try {
-            byte[] bytes = source.read(relative);
-            if (bytes == null) {
-                // Missing tiles are normal for sparse pyramids; render blank.
-                return null;
-            }
-            BufferedImage img = ImageIO.read(new ByteArrayInputStream(bytes));
-            if (img != null && tinyCache.size() < 8)
-                tinyCache.put(relative, img);
-            return img;
-        } catch (Exception e) {
-            logger.debug("Failed to read tile {}: {}", relative, e.getMessage());
+        byte[] bytes = source.read(relative);
+        if (bytes == null) {
+            // A genuine 404/missing local file may be a sparse pyramid tile.
             return null;
         }
+        BufferedImage img = ImageIO.read(new ByteArrayInputStream(bytes));
+        if (img == null)
+            throw new IOException("Unsupported or corrupt DZI tile: " + relative);
+        if (tinyCache.size() < 8)
+            tinyCache.put(relative, img);
+        return img;
     }
 
     @Override
@@ -419,7 +429,7 @@ public class DziImageServer extends AbstractTileableImageServer {
          * @return the bytes, or {@code null} when the entry is absent -- normal both for
          *         sparse pyramids and for a missing {@code vips-properties.xml}
          */
-        byte[] read(String relativeToTiles);
+        byte[] read(String relativeToTiles) throws IOException;
     }
 
     /** Streams a DZI from an HTTP(S) server. */
@@ -440,11 +450,15 @@ public class DziImageServer extends AbstractTileableImageServer {
             try {
                 HttpRequest req = HttpRequest.newBuilder(URI.create(dziUrl))
                         .header("User-Agent", "QuPath-Atlas-Extension")
+                        .timeout(REQUEST_TIMEOUT)
                         .GET().build();
-                HttpResponse<byte[]> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofByteArray());
+                HttpResponse<byte[]> resp = HttpHolder.CLIENT.send(req, HttpResponse.BodyHandlers.ofByteArray());
                 if (resp.statusCode() != 200)
                     throw new IOException("HTTP " + resp.statusCode() + " fetching " + dziUrl);
                 return resp.body();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted fetching " + dziUrl, e);
             } catch (IOException e) {
                 throw e;
             } catch (Exception e) {
@@ -453,20 +467,29 @@ public class DziImageServer extends AbstractTileableImageServer {
         }
 
         @Override
-        public byte[] read(String relativeToTiles) {
+        public byte[] read(String relativeToTiles) throws IOException {
             return get(tilesBase + "/" + relativeToTiles);
         }
 
-        private static byte[] get(String url) {
+        private static byte[] get(String url) throws IOException {
             try {
                 HttpRequest req = HttpRequest.newBuilder(URI.create(url))
                         .header("User-Agent", "QuPath-Atlas-Extension")
+                        .timeout(REQUEST_TIMEOUT)
                         .GET().build();
-                HttpResponse<byte[]> resp = HTTP.send(req, HttpResponse.BodyHandlers.ofByteArray());
-                return resp.statusCode() == 200 ? resp.body() : null;
+                HttpResponse<byte[]> resp = HttpHolder.CLIENT.send(req, HttpResponse.BodyHandlers.ofByteArray());
+                if (resp.statusCode() == 404)
+                    return null;
+                if (resp.statusCode() != 200)
+                    throw new IOException("HTTP " + resp.statusCode() + " fetching " + url);
+                return resp.body();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted fetching " + url, e);
+            } catch (IOException e) {
+                throw e;
             } catch (Exception e) {
-                logger.debug("Failed to fetch {}: {}", url, e.getMessage());
-                return null;
+                throw new IOException("Could not fetch " + url, e);
             }
         }
     }
@@ -503,16 +526,15 @@ public class DziImageServer extends AbstractTileableImageServer {
         }
 
         @Override
-        public byte[] read(String relativeToTiles) {
+        public byte[] read(String relativeToTiles) throws IOException {
+            Path p = tilesDir;
+            for (String segment : relativeToTiles.split("/")) {
+                if (!segment.isEmpty())
+                    p = p.resolve(segment);
+            }
             try {
-                Path p = tilesDir;
-                for (String segment : relativeToTiles.split("/")) {
-                    if (!segment.isEmpty())
-                        p = p.resolve(segment);
-                }
-                return Files.isRegularFile(p) ? Files.readAllBytes(p) : null;
-            } catch (Exception e) {
-                logger.debug("Failed to read {} under {}: {}", relativeToTiles, tilesDir, e.getMessage());
+                return Files.readAllBytes(p);
+            } catch (NoSuchFileException e) {
                 return null;
             }
         }

@@ -188,7 +188,20 @@ def load_fragments(paths):
                 fragments.append(frag)
         else:
             raise FileNotFoundError(f"input path not found: {p}")
-    return fragments
+    # Older extension releases put all earlier fragments in every later session ZIP. Keep the
+    # first copy of an identical named payload when several such archives are analyzed together.
+    unique = []
+    seen = {}
+    for frag in fragments:
+        name = os.path.basename(frag["_source"].rsplit("!", 1)[-1])
+        key = (frag.get("sessionId"), name)
+        payload = {k: v for k, v in frag.items() if k != "_source"}
+        previous = seen.setdefault(key, [])
+        if any(payload == old for old in previous):
+            continue
+        previous.append(payload)
+        unique.append(frag)
+    return unique
 
 
 def group_by_slide(fragments):
