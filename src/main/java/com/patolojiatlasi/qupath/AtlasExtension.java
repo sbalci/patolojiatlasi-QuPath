@@ -199,8 +199,16 @@ public class AtlasExtension implements QuPathExtension {
             regionsExportItem.setOnAction(e -> RegionsCommands.export(qupath));
             MenuItem regionsImportItem = new MenuItem("Bölgeleri içe aktar…");
             regionsImportItem.setOnAction(e -> RegionsCommands.importRegions(qupath));
+            MenuItem regionsGeoJsonExportItem = new MenuItem("GeoJSON dışa aktar…");
+            regionsGeoJsonExportItem.setOnAction(e -> RegionsCommands.exportGeoJson(qupath));
+            MenuItem regionsGeoJsonImportItem = new MenuItem("GeoJSON içe aktar…");
+            regionsGeoJsonImportItem.setOnAction(e -> RegionsCommands.importGeoJson(qupath));
+            MenuItem regionsFileConvertItem = new MenuItem("Bölge dosyasını GeoJSON'a çevir…");
+            regionsFileConvertItem.setOnAction(e -> RegionsCommands.convertRegionsFileToGeoJson(qupath));
             Menu regionsMenu = new Menu("Bölgeler");
-            regionsMenu.getItems().addAll(regionsExportItem, regionsImportItem);
+            regionsMenu.getItems().addAll(regionsExportItem, regionsImportItem,
+                    new SeparatorMenuItem(), regionsGeoJsonExportItem, regionsGeoJsonImportItem,
+                    regionsFileConvertItem);
 
             atlas.getItems().addAll(
                     browseItem,

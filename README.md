@@ -72,6 +72,18 @@ atlas, and every study artifact (quiz/tour packs, collections, recordings) is a 
   pixels — the space QuPath, the DZI descriptor and OpenSeadragon all already share, so nothing is
   transformed anywhere along the way. Name an annotation `Lenfoid agregat | Lymphoid aggregate` to
   give it both languages.
+- **GeoJSON region exchange.** **Bölgeler → *GeoJSON dışa aktar… / içe aktar…*** writes and reads a
+  separate GeoJSON `FeatureCollection` for QuPath, R tools such as wsiTools, and geometry checks.
+  The exchange file carries full-resolution pixel coordinates, feature UUIDs, names, classes,
+  descriptions, and slide dimensions when exported here. Polygon holes and fractional coordinates
+  remain in the geometry; QuPath 0.6 ROI conversion can shift fractional coordinates by a few
+  thousandths of a pixel, so use a 0.01 px tolerance for a QuPath round-trip check. Import checks
+  dimensions and asks for confirmation when another tool
+  omitted them; matching UUIDs can replace existing annotations after confirmation. The website
+  and MCP server still use `<slide>.regions.json`, so export that format again after editing a
+  GeoJSON copy if the published teaching regions should change. **Bölgeler → *Bölge dosyasını
+  GeoJSON'a çevir…*** converts an existing published `.regions.json` without opening its slide;
+  it copies stored geometry directly, avoiding QuPath ROI coordinate rounding.
 
 ---
 

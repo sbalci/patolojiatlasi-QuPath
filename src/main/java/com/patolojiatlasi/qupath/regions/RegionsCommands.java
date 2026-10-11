@@ -104,9 +104,97 @@ public final class RegionsCommands {
         info(qupath, sb.toString());
     }
 
+    /** Export a separate FeatureCollection for QuPath/R annotation exchange. */
+    public static void exportGeoJson(QuPathGUI qupath) {
+        ImageData<BufferedImage> imageData = qupath.getImageData();
+        if (imageData == null) {
+            info(qupath, "Önce bir slayt açın.");
+            return;
+        }
+        List<PathObject> annotations = imageData.getHierarchy().getAnnotationObjects().stream()
+                .filter(a -> a.getROI() != null).toList();
+        if (annotations.isEmpty()) {
+            info(qupath, "Bu slaytta dışa aktarılacak anotasyon yok.");
+            return;
+        }
+        ImageServer<BufferedImage> server = imageData.getServer();
+        URI uri = firstUri(server);
+        FileChooser fc = new FileChooser();
+        fc.setTitle("Bölgeleri GeoJSON olarak dışa aktar");
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("GeoJSON (*.geojson)", "*.geojson"));
+        fc.setInitialFileName((slideName(uri) == null ? "regions" : slideName(uri)) + ".regions.geojson");
+        Path beside = localFolder(uri);
+        if (beside != null) fc.setInitialDirectory(beside.toFile());
+        File target = fc.showSaveDialog(qupath.getStage());
+        if (target == null) return;
+
+        var cal = server.getPixelCalibration();
+        Double mpp = cal.hasPixelSizeMicrons() ? cal.getAveragedPixelSizeMicrons() : null;
+        String json = RegionsGeoJson.toGeoJson(annotations, slideId(uri),
+                server.getWidth(), server.getHeight(), mpp);
+        try {
+            Files.writeString(target.toPath(), json, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            logger.error("Could not write GeoJSON: {}", e.getMessage(), e);
+            error(qupath, "GeoJSON yazılamadı:\n\n" + e.getMessage());
+            return;
+        }
+        info(qupath, annotations.size() + " bölge GeoJSON olarak dışa aktarıldı:\n"
+                + target.getAbsolutePath() + "\n\nKoordinatlar tam çözünürlükte pikseldir.");
+    }
+
+    /** Convert a published regions file without opening its slide or quantizing its geometry. */
+    public static void convertRegionsFileToGeoJson(QuPathGUI qupath) {
+        FileChooser inputChooser = new FileChooser();
+        inputChooser.setTitle("Atlas bölge dosyasını seç");
+        inputChooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("Atlas bölgeleri (*.regions.json)", "*.regions.json"));
+        File source = inputChooser.showOpenDialog(qupath.getStage());
+        if (source == null) return;
+
+        String converted;
+        try {
+            converted = RegionsGeoJson.fromAtlasRegionsJson(
+                    Files.readString(source.toPath(), StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            logger.error("Could not convert regions file: {}", e.getMessage(), e);
+            error(qupath, "Bölge dosyası GeoJSON'a çevrilemedi:\n\n" + e.getMessage());
+            return;
+        }
+
+        FileChooser outputChooser = new FileChooser();
+        outputChooser.setTitle("GeoJSON olarak kaydet");
+        outputChooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("GeoJSON (*.geojson)", "*.geojson"));
+        outputChooser.setInitialDirectory(source.getParentFile());
+        String name = source.getName();
+        outputChooser.setInitialFileName(name.endsWith(RegionsExport.SUFFIX)
+                ? name.substring(0, name.length() - RegionsExport.SUFFIX.length()) + ".regions.geojson"
+                : name + ".geojson");
+        File target = outputChooser.showSaveDialog(qupath.getStage());
+        if (target == null) return;
+        try {
+            Files.writeString(target.toPath(), converted, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            logger.error("Could not write converted GeoJSON: {}", e.getMessage(), e);
+            error(qupath, "GeoJSON yazılamadı:\n\n" + e.getMessage());
+            return;
+        }
+        info(qupath, "GeoJSON oluşturuldu:\n" + target.getAbsolutePath()
+                + "\n\nBölge geometrileri dosyadan doğrudan kopyalandı; slayt açılmadı.");
+    }
+
     // --- import ----------------------------------------------------------------------
 
     public static void importRegions(QuPathGUI qupath) {
+        importFile(qupath, false);
+    }
+
+    public static void importGeoJson(QuPathGUI qupath) {
+        importFile(qupath, true);
+    }
+
+    private static void importFile(QuPathGUI qupath, boolean geoJson) {
         ImageData<BufferedImage> imageData = qupath.getImageData();
         if (imageData == null) {
             info(qupath, "Önce bir slayt açın.");
@@ -114,8 +202,10 @@ public final class RegionsCommands {
         }
 
         FileChooser fc = new FileChooser();
-        fc.setTitle("Bölgeleri içe aktar");
-        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("Atlas bölgeleri (*.json)", "*.json"));
+        fc.setTitle(geoJson ? "Bölgeleri GeoJSON'dan içe aktar" : "Bölgeleri içe aktar");
+        fc.getExtensionFilters().add(geoJson
+                ? new FileChooser.ExtensionFilter("GeoJSON (*.geojson, *.json)", "*.geojson", "*.json")
+                : new FileChooser.ExtensionFilter("Atlas bölgeleri (*.json)", "*.json"));
         Path beside = localFolder(firstUri(imageData.getServer()));
         if (beside != null)
             fc.setInitialDirectory(beside.toFile());
@@ -125,8 +215,9 @@ public final class RegionsCommands {
 
         RegionsExport.Parsed parsed;
         try {
-            parsed = RegionsExport.fromJson(Files.readString(source.toPath(), StandardCharsets.UTF_8),
-                    null);
+            String contents = Files.readString(source.toPath(), StandardCharsets.UTF_8);
+            parsed = geoJson ? RegionsGeoJson.fromGeoJson(contents, null)
+                    : RegionsExport.fromJson(contents, null);
         } catch (Exception e) {
             logger.error("Could not read regions file: {}", e.getMessage(), e);
             error(qupath, "Bölge dosyası okunamadı:\n\n" + e.getMessage());
@@ -134,6 +225,15 @@ public final class RegionsCommands {
         }
 
         ImageServer<BufferedImage> server = imageData.getServer();
+        if (geoJson && (parsed.width() <= 0 || parsed.height() <= 0)) {
+            Alert alert = new Alert(Alert.AlertType.CONFIRMATION,
+                    "GeoJSON dosyasında slayt boyutu yok. Koordinatların açık slaytın tam çözünürlük "
+                    + "piksel uzayında olduğundan emin olun. Yine de içe aktarılsın mı?",
+                    ButtonType.YES, ButtonType.NO);
+            alert.setHeaderText("Koordinatları doğrulayın");
+            if (qupath.getStage() != null) alert.initOwner(qupath.getStage());
+            if (alert.showAndWait().orElse(ButtonType.NO) != ButtonType.YES) return;
+        }
         // Regions are plain pixel coordinates, so placing them on a differently-sized export would
         // put every one of them on the wrong tissue -- silently. Make the user confirm.
         if (parsed.width() > 0 && parsed.height() > 0
