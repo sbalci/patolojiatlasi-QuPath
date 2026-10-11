@@ -114,7 +114,7 @@ public final class PathologyCotActions {
                 draftFile = new File(draftFile.getAbsolutePath() + ".json");
 
             String slideUrl = QuizSlide.currentSlideUrl(qupath.getViewer());
-            String slideTitle = slideTitle(vd, slideUrl);
+            String slideTitle = slideTitleOf(vd, slideUrl);
             AtlasQuiz draft = PathologyCotDraft.buildDraft(
                     behaviors, slideUrl, slideTitle, fragment.baseMagnification(), fragment.decision());
 
@@ -136,6 +136,61 @@ public final class PathologyCotActions {
                     + "her durak için gerekçeyi (neden baktım / ne gördüm) girip kaydedin.");
         } catch (Exception ex) {
             logger.warn("Pathology-CoT draft creation failed: {}", message(ex), ex);
+            showError(qupath, "CoT taslağı oluşturulamadı:\n\n" + message(ex));
+        }
+    }
+
+    /**
+     * Builds the CoT draft straight from an in-memory authored take — the "stop → draft" path.
+     *
+     * <p>Deliberately skips the two dialogs {@link #draftFromRecording} must show: there is no
+     * fragment file to pick (the take is in hand) and no slide-key confirmation to answer (the take
+     * recorded which slide it was made on). Those two prompts were the bulk of the friction in
+     * producing a CoT case, so removing them is the point of the authoring recorder.
+     *
+     * <p>The draft and its {@code behaviors} sidecar are written next to the take, inside the take's
+     * own folder under {@link CotRecordingIO#defaultRoot()} — never into {@code <project>/atlas-focus},
+     * where {@link #draftFromRecording} defaults its choosers and where blinded study data lives.
+     *
+     * @param takeDir the take's folder, or {@code null} to fall back to {@link CotRecordingIO#defaultRoot()}
+     */
+    public static void draftFromTake(QuPathGUI qupath, CotRecording rec, File takeDir) {
+        try {
+            if (rec == null || rec.isEmpty()) {
+                showInfo(qupath, "Kayıt boş; taslak oluşturulamaz.");
+                return;
+            }
+            CotFragment fragment = rec.toFragment();
+            List<Behavior> behaviors = PathologyCotDiscretizer.discretize(
+                    fragment.path(), fragment.baseMagnification(), fragment.imageWidth(), fragment.imageHeight());
+            if (behaviors.isEmpty()) {
+                showInfo(qupath, "Bu kayıttan çıkarılabilir inceleme/yakın-bakış bulunamadı. "
+                        + "Bir durağın sayılması için en az " + (PathologyCotDiscretizer.STATIC_INSPECT_MS / 1000)
+                        + " sn aynı bölgede kalınması gerekir.");
+                return;
+            }
+
+            File dir = takeDir != null ? takeDir : CotRecordingIO.defaultRoot();
+            CotRecordingIO.ensureDir(dir);
+            File draftFile = new File(dir, "cot-taslak.json");
+            File behaviorsFile = siblingBehaviorsFile(draftFile);
+
+            AtlasQuiz draft = PathologyCotDraft.buildDraft(behaviors, rec.slideUrl(), rec.slideTitle(),
+                    rec.baseMagnification(), fragment.decision());
+
+            // Sidecar first, draft last — same ordering rationale as draftFromRecording: nothing
+            // complete-looking lands if the first write throws.
+            PathologyCotIO.writeBehaviors(behaviorsFile, fragment, behaviors);
+            AtlasQuizIO.write(draft, draftFile);
+
+            QuizAuthorWindow.show(qupath);
+            showInfo(qupath, "Taslak kaydedildi: " + draftFile.getAbsolutePath()
+                    + "\nDavranış sözlüğü (behaviors): " + behaviorsFile.getAbsolutePath()
+                    + "\n\n" + behaviors.size() + " durak bulundu."
+                    + "\n\nAçılan \"Sınav/quiz hazırla\" penceresinde \"Aç…\" ile bu taslağı yükleyin ve "
+                    + "her durak için gerekçeyi (neden baktım / ne gördüm) girip kaydedin.");
+        } catch (Exception ex) {
+            logger.warn("Pathology-CoT draft from take failed: {}", message(ex), ex);
             showError(qupath, "CoT taslağı oluşturulamadı:\n\n" + message(ex));
         }
     }
@@ -242,8 +297,9 @@ public final class PathologyCotActions {
         return dir.isDirectory() ? dir : null;
     }
 
-    /** The open server's display name, falling back to the slide URL's basename. */
-    private static String slideTitle(ImageData<BufferedImage> vd, String slideUrl) {
+    /** The open server's display name, falling back to the slide URL's basename.
+     *  Package-visible so {@link CotRecorder} captures the title the same way at record time. */
+    static String slideTitleOf(ImageData<BufferedImage> vd, String slideUrl) {
         try {
             if (vd != null && vd.getServer() != null) {
                 String name = vd.getServer().getMetadata().getName();

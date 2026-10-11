@@ -10,12 +10,17 @@ import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyCodeCombination;
+import javafx.scene.input.KeyCombination;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.patolojiatlasi.qupath.autoview.AutoviewControl;
 import com.patolojiatlasi.qupath.focus.FocusHeatmap;
+import com.patolojiatlasi.qupath.pathologycot.CotRecorder;
+import com.patolojiatlasi.qupath.pathologycot.CotRecording;
 import com.patolojiatlasi.qupath.pathologycot.PathologyCotActions;
 import com.patolojiatlasi.qupath.regions.RegionsCommands;
 import com.patolojiatlasi.qupath.research.BlindedResearch;
@@ -40,6 +45,13 @@ public class AtlasExtension implements QuPathExtension {
 
     /** Built on first use — see the comment where the menu item is created. */
     private AutoviewControl autoview;
+
+    /**
+     * The Pathology-CoT authoring recorder. Retained so {@link #onProjectChanged} can flush an
+     * in-progress take before blinded recording is (re)started for the incoming project, and so the
+     * blinded start-veto can ask it whether a take is running.
+     */
+    private CotRecorder cotRecorder;
 
     /** Retained so {@link #onProjectChanged} can own the consent {@link Alert} (stage owner lookup). */
     private QuPathGUI qupath;
@@ -118,6 +130,11 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem rotationItem = new MenuItem("Görüntüyü döndür…");
             rotationItem.setOnAction(e -> rotation.show());
             this.focusHeatmap = new FocusHeatmap(qupath);
+            this.cotRecorder = new CotRecorder(qupath, focusHeatmap);
+            // The mode firewall, installed on blinded recording's single entry point so all four of
+            // its start sites are covered at once (this class has three; FocusHeatmap's menu toggle
+            // is the fourth). Returns null to allow the start, or a refusal message to block it.
+            focusHeatmap.setStartVeto(cotRecorder::blindedStartVeto);
 
             // Serpentine auto-sweep of the whole slide (or the selected annotation's bounding box),
             // tile-aware so it never glides across un-rendered grey. Built lazily on first use: it
@@ -222,6 +239,31 @@ public class AtlasExtension implements QuPathExtension {
             // Pathology-CoT group — turn a recorded blinded/focus fragment into a reviewable
             // guided-tour draft, review it in the existing tour author, then export a reviewed
             // tour + its slide as a self-contained case folder (crops + conversation.json).
+            // The start/stop control. A CheckMenuItem (not a floating window) on purpose: a separate
+            // always-on-top control window would hold window focus, and the sampling gate both
+            // recorders share requires QuPath's MAIN stage to be focused — so the control would
+            // silently pause the take it is controlling. The in-viewer HUD reports state instead.
+            CheckMenuItem cotRecordItem = new CheckMenuItem("CoT demo kaydı — başlat / durdur");
+            cotRecordItem.setAccelerator(new KeyCodeCombination(KeyCode.G,
+                    KeyCombination.SHORTCUT_DOWN, KeyCombination.SHIFT_DOWN));
+            // One-way binding only: the item drives the recorder, and the recorder's own property
+            // drives the tick back. A two-way bind would re-enter on every programmatic stop.
+            cotRecordItem.setOnAction(e -> {
+                if (cotRecordItem.isSelected())
+                    cotRecorder.start();
+                else
+                    cotRecorder.stop(CotRecording.EndReason.USER, true);
+                // Re-sync from the recorder, because a CheckMenuItem flips `selected` BEFORE
+                // onAction fires: if start() bails out (mode firewall refusal, the user cancelling
+                // the protocol notice, the post-modal re-check, a folder that can't be created) the
+                // property never changes, so the listener below never fires and the item would be
+                // left showing a check mark with no take running. setSelected does not re-fire
+                // onAction, so this cannot recurse.
+                cotRecordItem.setSelected(cotRecorder.isRecording());
+            });
+            cotRecorder.recordingProperty().addListener(
+                    (obs, was, now) -> cotRecordItem.setSelected(now));
+
             MenuItem cotDraftItem = new MenuItem("Gezinme kaydından CoT taslağı oluştur…");
             cotDraftItem.setOnAction(e -> PathologyCotActions.draftFromRecording(qupath));
             MenuItem cotReviewItem = new MenuItem("CoT taslağını gözden geçir…");
@@ -229,7 +271,8 @@ public class AtlasExtension implements QuPathExtension {
             MenuItem cotExportItem = new MenuItem("Pathology-CoT veri kümesi olarak dışa aktar…");
             cotExportItem.setOnAction(e -> PathologyCotActions.exportDataset(qupath));
             Menu cotMenu = new Menu("Pathology-CoT");
-            cotMenu.getItems().addAll(cotDraftItem, cotReviewItem, cotExportItem);
+            cotMenu.getItems().addAll(cotRecordItem, new SeparatorMenuItem(),
+                    cotDraftItem, cotReviewItem, cotExportItem);
 
             Menu research = new Menu("Araştırma");
             research.getItems().addAll(
@@ -311,6 +354,20 @@ public class AtlasExtension implements QuPathExtension {
     }
 
     private void flagCurrentProjectAsResearch(QuPathGUI qupath) {
+        // Refused up front while an authored take is running. startBlinded()'s veto would catch it
+        // anyway, but this method writes the research flag and marks consent BEFORE calling it and
+        // then reports "recording started" — so without this guard the project would be flagged and
+        // the user told recording had begun when it had not.
+        if (cotRecorder != null && cotRecorder.isRecording()) {
+            Alert alert = new Alert(Alert.AlertType.WARNING,
+                    "CoT demo kaydı çalışıyor. Projeyi araştırma projesi yapmadan önce onu durdurun.");
+            alert.setTitle("Kayıt çalışıyor");
+            alert.setHeaderText("Kayıt çalışıyor");
+            if (qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
+            return;
+        }
         Project<?> p = qupath.getProject();
         if (p == null) {
             Alert alert = new Alert(Alert.AlertType.INFORMATION, "Önce bir proje açın veya oluşturun.");
@@ -371,6 +428,13 @@ public class AtlasExtension implements QuPathExtension {
      * this project skips straight to {@link FocusHeatmap#startBlinded()}.
      */
     private void onProjectChanged(Project<BufferedImage> oldProj, Project<BufferedImage> newProj) {
+        // An authored take belongs to one slide in one project, so it is flushed FIRST — before any
+        // startBlinded() below could be refused by the mode firewall. Silent by necessity: this
+        // listener runs synchronously and already nests a consent showAndWait, so a second modal
+        // here would re-enter the event loop mid-transition.
+        if (cotRecorder != null && cotRecorder.isRecording())
+            cotRecorder.onProjectChanged();
+
         if (oldProj != null && focusHeatmap.isBlinded())
             focusHeatmap.stopBlinded();
 

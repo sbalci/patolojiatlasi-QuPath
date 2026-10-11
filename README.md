@@ -524,6 +524,49 @@ blinded-research project, packaging it (with the extension) for researchers, the
 observer-effect tradeoff, and getting the data back — and **[analysis/](analysis/README.md)** for
 the Python/R analysis toolkits.
 
+### Pathology-CoT demo recording
+
+Blinded recording answers "how does an unaware reader actually navigate?". The **authoring
+recorder** answers the opposite question — "how would you *show* someone your reasoning on this
+slide?" — and turns the answer into Pathology-CoT training data.
+
+**Extensions → Araştırma → Pathology-CoT → CoT demo kaydı — başlat / durdur**
+(<kbd>Shortcut</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd>). A short notice explains what is recorded, then
+a red **KAYIT** indicator appears in the top-left of the viewer with the elapsed time and point
+count. Navigate the slide the way you would talk a trainee through it. Press the shortcut again and
+the draft is built immediately — each inspect/peek you made becomes a stop with its viewport and
+highlight box, ready for you to type the "why I looked here / what I saw" rationale in the tour
+author.
+
+This is the deliberate counterpart to blinded recording, and the two differ in every respect that
+matters:
+
+| | Blinded research recording | CoT demo recording |
+|---|---|---|
+| Scope | whole project, every time it opens | one take, one slide |
+| On screen | nothing, by design | **KAYIT** indicator |
+| Who it describes | an **unaware** reader (naturalistic) | an **aware** author (demonstration) |
+| Slide identity | anonymised hash only | the real slide URI (see below) |
+| Where it lands | `<project>/atlas-focus/` | `~/QuPath-atlas-cot/<slide>__<timestamp>/` |
+
+**The two can never run at once.** Starting either one while the other is recording is refused with
+a message rather than silently taking over — an awareness cue during a blinded session would
+compromise that study, and blinded recording starting mid-take would mix a demonstration into the
+study cohort.
+
+**Where the data goes, and why not in the project.** A take is written to
+`~/QuPath-atlas-cot/<slide-slug>__<yyyyMMdd-HHmmss>/recording.json`, checkpointed every ~30 seconds
+and flushed on quit, with schema `atlas-cot-authored/1`. That schema is a deliberately *new* family,
+so the blinded analysis toolkits — which accept only `atlas-focus-contribution/…` — reject an
+authored take automatically and demonstration data can never be scored as if it were naturalistic.
+Unlike a blinded fragment, a take records the **real slide path** (the draft has to reopen the
+slide), which is why it is kept outside the project folder: [SHARING.md](SHARING.md) asks study
+participants to send their whole `atlas-focus/` folder, and nothing authored should ever travel with
+it.
+
+Design notes, verified facts and what is deliberately not built yet are in
+[docs/superpowers/2026-10-11-cot-authoring-recorder.md](docs/superpowers/2026-10-11-cot-authoring-recorder.md).
+
 ---
 
 ## Coverage & QC dashboard
