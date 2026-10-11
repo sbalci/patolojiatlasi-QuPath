@@ -284,6 +284,19 @@ public final class FocusHeatmap {
     private CheckMenuItem overlayItem;  // kept so blinded mode can disable/untick it
     private CheckMenuItem windowItem;   // kept so closing the window can untick it, and for blinded mode
     private CheckMenuItem blindedItem;  // kept so an externally-driven start/stop (Task 3) stays reflected
+    /**
+     * Optional veto consulted by {@link #startBlinded()}. Set by {@code AtlasExtension} to
+     * {@code RecordingModeGuard::canStartBlinded}, so the Pathology-CoT authoring recorder and
+     * blinded research recording can never sample the viewer at the same time — whichever started
+     * first wins and the second start is refused with a message.
+     *
+     * <p>Placed here, on the single entry point, rather than at each of {@code startBlinded()}'s
+     * four call sites (this class's menu toggle plus three in {@code AtlasExtension}), so no future
+     * call site can bypass it. Nothing else about blinded recording changes: when the veto allows
+     * the start — which is always, unless an authored take is in progress — the method behaves
+     * exactly as before, and the fragment bytes are untouched.
+     */
+    private java.util.function.Supplier<String> startVeto;
     // Manual actions on the current map are also disabled while blinded: "Kaydet…" would otherwise
     // write a PNG of the (ms) map, and "Araştırmaya katkıda bulun…" would mislabel ms values as the
     // schema/1 "raw dwell counts" — both are exactly the artifact blinded recording must not produce.
@@ -411,6 +424,15 @@ public final class FocusHeatmap {
 
     public boolean isBlinded() {
         return blindedRecording;
+    }
+
+    /**
+     * Installs the veto {@link #startBlinded()} consults. The supplier returns {@code null} to allow
+     * the start, or a user-facing Turkish refusal message to block it. FX thread only; called once
+     * from {@code AtlasExtension} during extension install.
+     */
+    public void setStartVeto(java.util.function.Supplier<String> startVeto) {
+        this.startVeto = startVeto;
     }
 
     // --- suppression (programmatic viewer motion) ----------------------------
@@ -592,6 +614,24 @@ public final class FocusHeatmap {
     public void startBlinded() {
         if (blindedRecording)
             return;
+        // Mode firewall (see startVeto): refuse rather than silently preferring one recorder. A
+        // refusal must also un-tick the menu item, because this method is reached from that item's
+        // selectedProperty listener and the tick would otherwise claim a session that never began.
+        if (startVeto != null) {
+            String refusal = startVeto.get();
+            if (refusal != null) {
+                if (blindedItem != null)
+                    blindedItem.setSelected(false);
+                javafx.scene.control.Alert alert =
+                        new javafx.scene.control.Alert(javafx.scene.control.Alert.AlertType.WARNING, refusal);
+                alert.setTitle("Kayıt başlatılamadı");
+                alert.setHeaderText("Kayıt başlatılamadı");
+                if (qupath.getStage() != null)
+                    alert.initOwner(qupath.getStage());
+                alert.show();
+                return;
+            }
+        }
         sessionId = java.util.UUID.randomUUID().toString();
         // Hide/clear any visible overlay or window — blinded recording must render nothing.
         if (overlayVisible)

@@ -16,6 +16,23 @@ public final class PathologyCotDiscretizer {
     static final long STATIC_INSPECT_MS = 1000;
     static final long PAN_INSPECT_MS    = 2000;   // reserved: PanInspect separation (see plan notes)
     static final long IDLE_GAP_MS       = 60_000;
+    /**
+     * Most dwell a single path point may contribute, regardless of how long the gap to the next
+     * point is. Equal to {@code CotRecordingGate.MAX_CREDIT_MS} and to {@code FocusHeatmap.DT_CAP_MS}
+     * (2 × the 250 ms sample interval), so all three agree on what one sample is worth.
+     *
+     * <p>Without this cap the gap between two consecutive points was credited in full for any gap
+     * under {@link #IDLE_GAP_MS}, and a recorder gap is not viewing time: {@code FocusHeatmap} only
+     * appends a point while QuPath's main window has focus, so looking away leaves a hole that the
+     * next point used to absorb as dwell. Measured on the real pipeline: 7 points at 250 ms, a 30-second
+     * gap, then 7 more points over the same region produced one {@code INSPECT} with
+     * {@code dwellMs = 33000} for 3000 ms of actual viewing.
+     *
+     * <p>On a gap-free path this cap is a no-op — consecutive points are ~250 ms apart and
+     * {@code min(250, 500) = 250} — so it changes a derived {@code Behavior} only where the old
+     * value was inflated by a gap.
+     */
+    static final long MAX_CREDIT_MS     = 500;
     static final double MERGE_IOU       = 0.8;
     static final int   VIEW_PX          = 1024;
     static final double PEEK_DS_MAX     = 1.5;
@@ -59,7 +76,7 @@ public final class PathologyCotDiscretizer {
                 run = new Run(); run.mode = mode;
             }
             long dtNext = (i + 1 < path.size()) ? (long) path.get(i + 1)[0] - pt[0] : 0;
-            run.add(pt, dtNext > IDLE_GAP_MS ? 0 : dtNext);
+            run.add(pt, creditedDt(dtNext));
         }
         flush(run, baseMag, imgW, imgH, actions);
 
@@ -78,6 +95,17 @@ public final class PathologyCotDiscretizer {
         for (Behavior x : actions) normalized.add(normalize(x, baseMag, imgW, imgH));
         normalized.sort((p, q) -> Long.compare(p.startMs(), q.startMs()));
         return normalized;
+    }
+
+    /**
+     * Dwell this point may contribute, given the gap to the next point: nothing across an idle gap
+     * (the run is split there anyway), otherwise the gap clamped to {@link #MAX_CREDIT_MS}. A gap in
+     * the recorded path is not observed time — see {@link #MAX_CREDIT_MS}.
+     */
+    static long creditedDt(long dtNext) {
+        if (dtNext <= 0 || dtNext > IDLE_GAP_MS)
+            return 0;
+        return Math.min(dtNext, MAX_CREDIT_MS);
     }
 
     /** STATIC (any non-native-resolution viewing → candidate inspect) vs PEEK (native-res look).
