@@ -21,9 +21,12 @@ import java.util.Map;
  * thread (same discipline as {@code focus.FocusMap}). The FX shell that drives it is
  * {@link CotRecorder}.
  *
- * <p><b>Threading.</b> Instances are confined to the JavaFX thread by {@link CotRecorder}: the
- * sampling {@code Timeline} is the only writer. {@link #pathSnapshot()} returns a defensive copy so
- * a serialization pass can safely run while sampling continues.
+ * <p><b>Threading.</b> The sampling {@code Timeline} on the JavaFX thread is the only writer, but
+ * {@link CotRecorder}'s JVM shutdown hook serializes a take from its own thread while that timer may
+ * still be running — so every mutator and every accessor here is {@code synchronized}. Without it,
+ * {@link #pathSnapshot()} could hit a {@code ConcurrentModificationException} mid-append and the
+ * hook would lose everything since the last checkpoint. The snapshots are also defensive copies, so
+ * a serialization pass never shares an array with the live take.
  */
 public final class CotRecording {
 
@@ -33,7 +36,12 @@ public final class CotRecording {
         UNFOCUSED,
         /** A programmatic viewer sweep held {@code FocusHeatmap.suppressTracking(...)}. */
         SUPPRESSED,
-        /** No image was open in the bound viewer. */
+        /**
+         * No image was open in the bound viewer. Part of {@link CotRecordingGate}'s contract rather
+         * than a state {@link CotRecorder} can currently reach: that shell ends the take outright
+         * when the bound viewer's image changes or disappears, so this reason only arises if the
+         * gate is ever driven by a shell that keeps recording across an empty viewer.
+         */
         NO_IMAGE,
         /** The sampling timer itself stalled (a tick arrived far later than the sample interval). */
         GAP
@@ -135,12 +143,12 @@ public final class CotRecording {
     public String protocolSha256() { return protocolSha256; }
 
     /** Total credited (gate-open, dt-capped) milliseconds — never wall-clock elapsed time. */
-    public long creditedMs() { return creditedMs; }
-    public EndReason endReason() { return endReason; }
-    public void setEndReason(EndReason endReason) { this.endReason = endReason; }
-    public int pointCount() { return path.size(); }
-    public boolean isPathCapped() { return pathCapped; }
-    public boolean isEmpty() { return path.isEmpty(); }
+    public synchronized long creditedMs() { return creditedMs; }
+    public synchronized EndReason endReason() { return endReason; }
+    public synchronized void setEndReason(EndReason endReason) { this.endReason = endReason; }
+    public synchronized int pointCount() { return path.size(); }
+    public synchronized boolean isPathCapped() { return pathCapped; }
+    public synchronized boolean isEmpty() { return path.isEmpty(); }
 
     /**
      * Appends one scanpath point, in the <b>exact</b> 8-element layout
@@ -151,7 +159,7 @@ public final class CotRecording {
      *
      * @return {@code false} once {@link #MAX_PATH_POINTS} is reached (the point is dropped)
      */
-    public boolean addPoint(long tRelMs, int centerX, int centerY, int width, int height,
+    public synchronized boolean addPoint(long tRelMs, int centerX, int centerY, int width, int height,
                             int dsMilli, int mouseX, int mouseY, long creditedMs) {
         if (path.size() >= MAX_PATH_POINTS) {
             pathCapped = true;
@@ -167,14 +175,14 @@ public final class CotRecording {
      * omitted) so an analyst can distinguish "the author looked away" from "the author stared" —
      * the distinction the blinded recorder cannot make, because its path simply has a hole.
      */
-    public void addPause(long startMs, long endMs, PauseReason reason) {
+    public synchronized void addPause(long startMs, long endMs, PauseReason reason) {
         if (endMs <= startMs || reason == null)
             return;
         pauses.add(new long[]{startMs, endMs, reason.ordinal()});
     }
 
     /** Defensive copy of the scanpath, safe to serialize while sampling continues. */
-    public List<int[]> pathSnapshot() {
+    public synchronized List<int[]> pathSnapshot() {
         List<int[]> copy = new ArrayList<>(path.size());
         for (int[] p : path)
             copy.add(p.clone());
@@ -182,7 +190,7 @@ public final class CotRecording {
     }
 
     /** Defensive copy of the pause intervals. */
-    public List<long[]> pauseSnapshot() {
+    public synchronized List<long[]> pauseSnapshot() {
         List<long[]> copy = new ArrayList<>(pauses.size());
         for (long[] p : pauses)
             copy.add(p.clone());
@@ -190,7 +198,7 @@ public final class CotRecording {
     }
 
     /** Summed duration of all recorded pause intervals, in milliseconds. */
-    public long pausedMs() {
+    public synchronized long pausedMs() {
         long total = 0L;
         for (long[] p : pauses)
             total += p[1] - p[0];
@@ -203,7 +211,7 @@ public final class CotRecording {
      * reading data: {@code captureIntent=demonstration} is the honest framing of what an aware
      * author produces (see the design doc's "Observer effect" section).
      */
-    public Map<String, Object> provenance() {
+    public synchronized Map<String, Object> provenance() {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("recordingMode", "authored");
         m.put("captureIntent", "demonstration");
@@ -228,7 +236,7 @@ public final class CotRecording {
      * decision record; {@link PathologyCotDraft} reads only {@code diagnosis} from that map, so a
      * provenance-only map yields the neutral draft description.
      */
-    public CotFragment toFragment() {
+    public synchronized CotFragment toFragment() {
         Map<String, Object> decision = new LinkedHashMap<>();
         decision.put("cotProvenance", provenance());
         return new CotFragment(slideKey, sessionId, imageWidth, imageHeight, baseMagnification,

@@ -253,6 +253,13 @@ public class AtlasExtension implements QuPathExtension {
                     cotRecorder.start();
                 else
                     cotRecorder.stop(CotRecording.EndReason.USER, true);
+                // Re-sync from the recorder, because a CheckMenuItem flips `selected` BEFORE
+                // onAction fires: if start() bails out (mode firewall refusal, the user cancelling
+                // the protocol notice, the post-modal re-check, a folder that can't be created) the
+                // property never changes, so the listener below never fires and the item would be
+                // left showing a check mark with no take running. setSelected does not re-fire
+                // onAction, so this cannot recurse.
+                cotRecordItem.setSelected(cotRecorder.isRecording());
             });
             cotRecorder.recordingProperty().addListener(
                     (obs, was, now) -> cotRecordItem.setSelected(now));

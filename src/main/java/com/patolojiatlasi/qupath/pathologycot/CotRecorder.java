@@ -124,9 +124,8 @@ public final class CotRecorder {
     private long lastTickMs;
     private int ticks;
 
-    /** Open pause interval, or {@code -1} when the gate is currently open. */
-    private long pauseStartMs = -1;
-    private CotRecording.PauseReason pauseReason;
+    /** Pause bookkeeping, extracted so the state machine is testable. FX thread only. */
+    private final CotPauseLedger pauses = new CotPauseLedger();
 
     // volatile: the JVM shutdown hook thread reads these.
     private volatile CotRecording current;
@@ -227,8 +226,6 @@ public final class CotRecorder {
         startWallMs = System.currentTimeMillis();
         lastTickMs = startWallMs;
         ticks = 0;
-        pauseStartMs = -1;
-        pauseReason = null;
 
         attachMouseTracking(viewer);
         hud.attach(viewer);
@@ -257,10 +254,22 @@ public final class CotRecorder {
         QuPathViewer v = boundViewer;
         // A slide change (or a closed viewer) ends the take rather than silently continuing into
         // whatever is open now: one take must describe one image. Deferred out of the Timeline pulse
-        // because stop() can show a modal, and showAndWait() inside a pulse throws.
+        // because stop() can show a modal, and showAndWait() inside a pulse throws. The timer is
+        // stopped right here, before scheduling, so no further tick can queue a second stop; and the
+        // deferred lambda re-checks that THIS take is still the current one, so a late stop can
+        // never terminate a take the user has already restarted.
         if (v == null || v.getImageData() != boundImageData) {
-            Platform.runLater(() -> stop(v == null ? CotRecording.EndReason.VIEWER_CLOSED
-                    : CotRecording.EndReason.SLIDE_CHANGED, true));
+            if (timer != null) {
+                timer.stop();
+                timer = null;
+            }
+            CotRecording stopping = rec;
+            CotRecording.EndReason why = v == null
+                    ? CotRecording.EndReason.VIEWER_CLOSED : CotRecording.EndReason.SLIDE_CHANGED;
+            Platform.runLater(() -> {
+                if (current == stopping)
+                    stop(why, true);
+            });
             return;
         }
 
@@ -268,20 +277,16 @@ public final class CotRecorder {
         CotRecordingGate.Decision d = CotRecordingGate.decide(now, lastTickMs,
                 mainStageFocused(), focusHeatmap.isTrackingSuppressed(), v.getImageData() != null);
 
+        // Pause bookkeeping. Both edges are pinned to tick boundaries by CotPauseLedger so that
+        // pause intervals and the gate's credited windows tile the take without overlapping — see
+        // that class's javadoc for why "now" is the wrong edge on both sides.
         boolean gateOpen = d.pauseReason() == null || d.pauseReason() == CotRecording.PauseReason.GAP;
         if (!gateOpen) {
-            openPause(now, d.pauseReason());
-        } else if (pauseStartMs >= 0) {
-            // A pause was running and the gate has just reopened. We cannot know when within
-            // [lastTickMs, now] it reopened, so the pause is closed at `now`: the conservative
-            // choice, since every millisecond in that window was in fact unobserved. This interval
-            // already covers the stall, so a GAP verdict must NOT add a second, overlapping pause.
-            closePause(now);
-        } else if (d.pauseReason() == CotRecording.PauseReason.GAP) {
-            // The gate stayed open but the timer stalled: credit is capped at MAX_CREDIT_MS and the
-            // uncredited remainder is recorded as its own pause.
-            rec.addPause(relative(CotRecordingGate.gapPauseStartMs(lastTickMs)), relative(now),
-                    CotRecording.PauseReason.GAP);
+            record(rec, pauses.closedTick(lastTickMs, d.pauseReason()));
+        } else {
+            record(rec, pauses.openTick(lastTickMs));
+            if (d.pauseReason() == CotRecording.PauseReason.GAP)
+                record(rec, pauses.gap(CotRecordingGate.gapPauseStartMs(lastTickMs), now));
         }
         lastTickMs = now;
 
@@ -308,29 +313,19 @@ public final class CotRecorder {
             }
         }
 
-        hud.update(rec.creditedMs(), rec.pointCount(), pauseStartMs >= 0);
+        hud.update(rec.creditedMs(), rec.pointCount(), pauses.isPaused());
 
         ticks++;
         if (ticks % CHECKPOINT_EVERY_TICKS == 0)
             writeQuietly(rec);
     }
 
-    private void openPause(long nowMs, CotRecording.PauseReason reason) {
-        if (pauseStartMs < 0) {
-            pauseStartMs = nowMs;
-            pauseReason = reason;
-        }
-    }
-
-    /** Closes an open pause at {@code endMs}. No-op when none is open; idempotent. */
-    private void closePause(long endMs) {
-        if (pauseStartMs < 0)
+    /** Forwards a ledger-emitted interval (or nothing) to the take, converting to its time base. */
+    private void record(CotRecording rec, long[] interval) {
+        if (rec == null || interval == null)
             return;
-        CotRecording rec = current;
-        if (rec != null && pauseReason != null)
-            rec.addPause(relative(pauseStartMs), relative(endMs), pauseReason);
-        pauseStartMs = -1;
-        pauseReason = null;
+        rec.addPause(relative(interval[0]), relative(interval[1]),
+                CotRecording.PauseReason.values()[(int) interval[2]]);
     }
 
     /** Milliseconds since the take began — the path's own time base, never wall clock. */
@@ -358,9 +353,8 @@ public final class CotRecorder {
             timer = null;
         }
         long now = System.currentTimeMillis();
-        closePause(now);
-
         CotRecording rec = current;
+        record(rec, pauses.stop(now));
         hud.detach();
         attachMouseTracking(null);
         recording.set(false);
@@ -373,7 +367,14 @@ public final class CotRecorder {
 
         File file = currentFile;
         File takeDir = file == null ? null : file.getParentFile();
-        boolean written = writeQuietly(rec);
+        // An empty take is not written at all, and its folder is removed again: a zero-point
+        // recording.json is not data, and leaving one behind would litter the take root with
+        // folders for every mis-click. The check therefore precedes the write.
+        boolean written = false;
+        if (!rec.isEmpty())
+            written = writeQuietly(rec);
+        else
+            discardEmptyTakeDir(takeDir);
         current = null;
         currentFile = null;
 
@@ -412,8 +413,8 @@ public final class CotRecorder {
             timer = null;
         }
         long now = System.currentTimeMillis();
-        closePause(now);
         CotRecording rec = current;
+        record(rec, pauses.stop(now));
         hud.detach();
         attachMouseTracking(null);
         recording.set(false);
@@ -441,6 +442,19 @@ public final class CotRecorder {
 
     // --- persistence ---------------------------------------------------------
 
+    /** Deletes a take folder that never received a recording. Only ever called when empty. */
+    private void discardEmptyTakeDir(File dir) {
+        if (dir == null)
+            return;
+        try {
+            String[] names = dir.list();
+            if (names != null && names.length == 0 && !dir.delete())
+                logger.debug("Could not remove empty take folder {}", dir);
+        } catch (Exception e) {
+            logger.debug("Could not remove empty take folder {}: {}", dir, e.getMessage());
+        }
+    }
+
     private boolean writeQuietly(CotRecording rec) {
         File file = currentFile;
         if (rec == null || file == null)
@@ -464,7 +478,11 @@ public final class CotRecorder {
         if (rec == null || file == null || rec.isEmpty())
             return;
         try {
-            rec.setEndReason(CotRecording.EndReason.SHUTDOWN);
+            // Only claim SHUTDOWN if nothing else already ended the take: stop() sets its own reason
+            // before clearing `current`, so an unconditional set here could overwrite USER with
+            // SHUTDOWN in that window and misreport a complete take as a truncated one.
+            if (rec.endReason() == null)
+                rec.setEndReason(CotRecording.EndReason.SHUTDOWN);
             CotRecordingIO.write(file, rec);
             logger.info("Authored CoT take flushed on shutdown: {}", file);
         } catch (Exception e) {
