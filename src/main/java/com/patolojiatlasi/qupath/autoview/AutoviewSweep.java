@@ -85,9 +85,6 @@ final class AutoviewSweep {
     /** Longest side of the tissue-mask grid. */
     private static final int MASK_GRID_MAX = TissueMask.DEFAULT_GRID_MAX;
 
-    /** Loop guard: a frame may never walk more legs than this. */
-    private static final int MAX_LEGS_PER_FRAME = 100_000;
-
     /** Frames between readiness debug traces -- roughly once a second at 60 Hz. */
     private static final int PROBE_LOG_EVERY = 60;
 
@@ -125,17 +122,12 @@ final class AutoviewSweep {
     private int tPos;
 
     private Settings settings;
-    private AutoviewPath.Plan plan;
-    private int[] fieldsBeforeLeg;
+    private AutoviewCursor cursor;
     private double extentX;
     private double extentY;
     private double extentW;
     private double extentH;
 
-    private int legIndex;
-    private double legT;
-    private double curX;
-    private double curY;
     private double lastAppliedX = Double.NaN;
     private double lastAppliedY = Double.NaN;
     private double speedFactor;
@@ -143,6 +135,13 @@ final class AutoviewSweep {
     private long stalledSinceMs;
 
     private int maskToken;
+
+    /**
+     * A mask that arrived while the sweep was paused. Applying a replan immediately would teleport
+     * the view out from under a reader who paused precisely to look at something, so it is held here
+     * and applied on {@link #resume()}.
+     */
+    private TissueMask pendingMask;
 
     private int lastProbeReady = -1;
     private int lastProbeTotal = -1;
@@ -234,20 +233,17 @@ final class AutoviewSweep {
             this.extentY = extent[1];
             this.extentW = extent[2];
             this.extentH = extent[3];
-            adoptPlan(built);
+            this.cursor = new AutoviewCursor(built, fovAlongTravel(s.axis()), s.axis());
+            fieldCount.set(built.fieldCount());
 
-            this.legIndex = 0;
-            this.legT = 0;
             this.speedFactor = 0;
             this.lastFrameNanos = 0;
             this.stalledSinceMs = 0;
             this.probeLogTicks = 0;   // so each sweep traces its very first probe
+            this.pendingMask = null;
             this.paused = false;
             this.running = true;
 
-            AutoviewPath.Leg first = built.legs().get(0);
-            curX = first.x0();
-            curY = first.y0();
             lastAppliedX = Double.NaN;
             lastAppliedY = Double.NaN;
 
@@ -260,6 +256,11 @@ final class AutoviewSweep {
             // releases it unconditionally, so every abort route funnels through the same release.
             suppression = focusHeatmap == null ? null : focusHeatmap.suppressTracking("autoview");
 
+            // Verified against the 0.6.0 bytecode: doFasterRepaint is read in exactly two places --
+            // it selects nearest-neighbour instead of bilinear interpolation, and it clears the
+            // `paintCompletely` flag handed to PathOverlay.paintOverlay. It does NOT take part in
+            // choosing the downsample or the tile set, so it cannot shift the painted resolution
+            // level away from the one readyFraction() probes.
             v.setDoFasterRepaint(true);
             // Pan only. The viewer is already at pinnedDownsample (we just read it from there), and
             // re-setting the zoom could have it clamped to a different value, which would leave the
@@ -305,6 +306,16 @@ final class AutoviewSweep {
         lastFrameNanos = 0;   // do not credit the pause as one giant frame
         speedFactor = 0;
         safely(() -> pinnedViewer.setDoFasterRepaint(true));
+        // A mask that landed during the pause is applied now, not while the reader was looking.
+        if (pendingMask != null) {
+            TissueMask held = pendingMask;
+            pendingMask = null;
+            safely(() -> replanTail(held));
+            // The replan can finish the sweep outright (nothing but glass left ahead), which already
+            // tore everything down. Carrying on would leave a stopped sweep reading "Tarıyor".
+            if (!running)
+                return;
+        }
         if (timer != null)
             timer.start();
         status.set("Tarıyor");
@@ -342,8 +353,8 @@ final class AutoviewSweep {
         pinnedViewer = null;
         pinnedImageData = null;
         pinnedServer = null;
-        plan = null;
-        fieldsBeforeLeg = null;
+        cursor = null;
+        pendingMask = null;
         maskToken++;   // invalidates any in-flight mask build
 
         if (suppression != null) {
@@ -421,7 +432,7 @@ final class AutoviewSweep {
                 return;
 
             QuPathViewer v = pinnedViewer;
-            if (v == null || plan == null || v.getImageData() != pinnedImageData
+            if (v == null || cursor == null || v.getImageData() != pinnedImageData
                     || qupath.getViewer() != v || Math.abs(v.getRotation()) > EPS) {
                 stop();
                 return;
@@ -437,10 +448,10 @@ final class AutoviewSweep {
                 return;
             dt = Math.min(dt, AutoviewPacing.MAX_DT);
 
-            double pxPerSec = settings.fovPerSec() * fovAlongTravel();
+            double pxPerSec = settings.fovPerSec() * fovAlongTravel(settings.axis());
             double fullStep = pxPerSec * dt;
 
-            double[] look = lookaheadPoint(Math.max(fullStep, pxPerSec * LOOKAHEAD_SEC));
+            double[] look = cursor.lookahead(Math.max(fullStep, pxPerSec * LOOKAHEAD_SEC));
             double ready = readyFraction(look[0], look[1]);
             speedFactor = AutoviewPacing.speedFactor(ready, speedFactor, dt);
             traceReadiness(ready);
@@ -462,9 +473,16 @@ final class AutoviewSweep {
 
             double step = fullStep * speedFactor;
             if (step > 0) {
-                if (advance(step)) {
+                AutoviewCursor.Event event = cursor.advance(step);
+                if (event == AutoviewCursor.Event.FINISHED) {
+                    applyPosition(v);
                     finish();
                     return;
+                }
+                if (event == AutoviewCursor.Event.JUMPED) {
+                    // A teleport is a known discontinuity: do not slew across it, and let the next
+                    // frame re-probe at the new location rather than gliding on stale readiness.
+                    speedFactor = 0;
                 }
                 applyPosition(v);
             }
@@ -473,77 +491,6 @@ final class AutoviewSweep {
             logger.debug("Autoview frame failed: {}", e.getMessage());
             stop();
         }
-    }
-
-    /** Advance the cursor along the plan. Returns true once the plan is exhausted. */
-    private boolean advance(double step) {
-        List<AutoviewPath.Leg> legs = plan.legs();
-        int guard = 0;
-        while (true) {
-            if (++guard > MAX_LEGS_PER_FRAME) {
-                logger.warn("Autoview leg walk exceeded {} legs in one frame; stopping", MAX_LEGS_PER_FRAME);
-                return true;
-            }
-            if (legIndex >= legs.size())
-                return true;
-
-            AutoviewPath.Leg leg = legs.get(legIndex);
-            double len = leg.length();
-            boolean pointLeg = len <= EPS && leg.fieldCount() > 0;
-            // A lone kept field is a zero-length leg. Give it one field's worth of dwell so it is
-            // actually seen, rather than flashing past in a single 16 ms frame.
-            double effLen = pointLeg ? fovAlongTravel() : len;
-
-            if (effLen > 0) {
-                double remaining = effLen - legT;
-                if (step < remaining) {
-                    legT += step;
-                    double f = legT / effLen;
-                    if (!pointLeg) {
-                        curX = leg.x0() + (leg.x1() - leg.x0()) * f;
-                        curY = leg.y0() + (leg.y1() - leg.y0()) * f;
-                    }
-                    return false;
-                }
-                step -= remaining;
-            }
-
-            legIndex++;
-            legT = 0;
-            if (legIndex >= legs.size()) {
-                curX = leg.x1();
-                curY = leg.y1();
-                return true;
-            }
-
-            AutoviewPath.Leg next = legs.get(legIndex);
-            curX = next.x0();
-            curY = next.y0();
-            if (next.jumpToStart()) {
-                // A teleport is a known discontinuity; do not slew across it, and let the next frame
-                // re-probe at the new location rather than gliding on stale readiness.
-                speedFactor = 0;
-                return false;
-            }
-            if (step <= 0)
-                return false;
-        }
-    }
-
-    /**
-     * The point tile readiness is probed at. Clamped to the current leg: the lookahead is a fraction
-     * of a frame, so walking further would add complexity without changing the answer.
-     */
-    private double[] lookaheadPoint(double distance) {
-        double[] here = { curX, curY };
-        if (plan == null || legIndex >= plan.legs().size())
-            return here;
-        AutoviewPath.Leg leg = plan.legs().get(legIndex);
-        double len = leg.length();
-        if (len <= EPS)
-            return here;
-        double f = Math.min(legT + distance, len) / len;
-        return new double[] { leg.x0() + (leg.x1() - leg.x0()) * f, leg.y0() + (leg.y1() - leg.y0()) * f };
     }
 
     /**
@@ -568,8 +515,11 @@ final class AutoviewSweep {
             Shape shape = new Rectangle2D.Double(cx - fovW / 2, cy - fovH / 2, fovW, fovH);
             List<RegionRequest> requests = ImageRegionStoreHelpers.getTilesToRequest(
                     server, shape, pinnedDownsample, zPos, tPos, probeScratch);
-            if (requests == null || requests.isEmpty())
+            if (requests == null || requests.isEmpty()) {
+                lastProbeReady = 0;
+                lastProbeTotal = 0;   // 0/0 in the trace means "no tiles asked for"
                 return 1.0;
+            }
 
             int ready = 0;
             for (RegionRequest request : requests) {
@@ -588,12 +538,19 @@ final class AutoviewSweep {
     }
 
     /**
-     * Periodic bring-up trace of the readiness probe. This exists because a broken probe is
-     * invisible from the outside: a constant 1/1 means the fail-open catch is swallowing something,
-     * and a constant 0/N means the tile requests are not keying the same way the paint path caches,
-     * so the stall watchdog is quietly driving the sweep at full speed with no tile-awareness at
-     * all. Both look exactly like a smooth glide on screen — only this log tells them apart, so a
-     * healthy sweep should show the ready count varying across the range.
+     * Periodic bring-up trace of the readiness probe, because a broken probe is nearly invisible
+     * from the outside. The signatures to look for:
+     * <ul>
+     *   <li><b>{@code N/M} varying across the range</b> — healthy.</li>
+     *   <li><b>{@code -1/-1}</b> — the probe threw and the fail-open catch is swallowing it; the
+     *       sweep is running with no tile-awareness at all.</li>
+     *   <li><b>{@code 0/0}</b> — no tiles were asked for (off-image, or a degenerate viewport).</li>
+     *   <li><b>constant {@code 0/M}</b> — the requests are not keying the way the paint path caches.
+     *       This does <em>not</em> degrade to full speed: the watchdog lifts the factor to 1.0, slew
+     *       drags it back under the 0.02 threshold within ~20 frames, and the watchdog re-arms — so
+     *       the sweep crawls at roughly 3 % speed, lurching about every {@value #STALL_MS} ms with
+     *       the status stuck on "Karo bekleniyor". Visible, but easy to misread as a slow network.</li>
+     * </ul>
      */
     private void traceReadiness(double ready) {
         if (!logger.isDebugEnabled())
@@ -612,44 +569,30 @@ final class AutoviewSweep {
      * ask the viewer to repaint 60 times a second for nothing.
      */
     private void applyPosition(QuPathViewer v) {
-        if (Math.abs(curX - lastAppliedX) < POSITION_EPS && Math.abs(curY - lastAppliedY) < POSITION_EPS)
+        if (cursor == null)
             return;
-        lastAppliedX = curX;
-        lastAppliedY = curY;
-        v.setCenterPixelLocation(curX, curY);
+        double x = cursor.getX();
+        double y = cursor.getY();
+        if (Math.abs(x - lastAppliedX) < POSITION_EPS && Math.abs(y - lastAppliedY) < POSITION_EPS)
+            return;
+        lastAppliedX = x;
+        lastAppliedY = y;
+        v.setCenterPixelLocation(x, y);
     }
 
     private void finish() {
         stopInternal("Tamamlandı", true);
     }
 
-    private double fovAlongTravel() {
-        return settings.axis() == AutoviewPath.Axis.ROWS ? fovW : fovH;
+    private double fovAlongTravel(AutoviewPath.Axis axis) {
+        return axis == AutoviewPath.Axis.ROWS ? fovW : fovH;
     }
 
     private void updateReadouts() {
-        if (plan == null || plan.fieldCount() <= 0)
+        if (cursor == null)
             return;
-        int done = fieldsBeforeLeg[Math.min(legIndex, fieldsBeforeLeg.length - 1)];
-        if (legIndex < plan.legs().size()) {
-            AutoviewPath.Leg leg = plan.legs().get(legIndex);
-            double len = leg.length();
-            boolean pointLeg = len <= EPS && leg.fieldCount() > 0;
-            double effLen = pointLeg ? fovAlongTravel() : len;
-            if (effLen > 0)
-                done += (int) Math.floor(Math.min(legT / effLen, 1.0) * leg.fieldCount());
-        }
-        done = Math.min(done, plan.fieldCount());
-        fieldIndex.set(done);
-        progress.set(done / (double) plan.fieldCount());
-    }
-
-    private void adoptPlan(AutoviewPath.Plan built) {
-        this.plan = built;
-        this.fieldsBeforeLeg = new int[built.legs().size() + 1];
-        for (int i = 0; i < built.legs().size(); i++)
-            fieldsBeforeLeg[i + 1] = fieldsBeforeLeg[i] + built.legs().get(i).fieldCount();
-        fieldCount.set(built.fieldCount());
+        fieldIndex.set(cursor.fieldsVisited());
+        progress.set(cursor.progress());
     }
 
     // --- extent and tissue mask ---------------------------------------------
@@ -724,6 +667,12 @@ final class AutoviewSweep {
                 return;
             cachedMaskPath = server.getPath();
             cachedMask = mask;
+            if (paused) {
+                // Replanning now would teleport the view out from under a reader who paused in order
+                // to look at something. Hold it; resume() applies it.
+                pendingMask = mask;
+                return;
+            }
             replanTail(mask);
         } catch (Exception e) {
             logger.debug("Autoview replan after mask failed: {}", e.getMessage());
@@ -731,35 +680,29 @@ final class AutoviewSweep {
     }
 
     /**
-     * Rebuild the plan with the tissue filter applied and resume at the equivalent place.
+     * Rebuild the plan with the tissue filter applied and carry on from the equivalent place.
      * <p>
-     * Filtering only removes fields — it never reorders them or changes how many lines there are —
-     * so a leg's line index is a stable key across the rebuild. That is what lets the sweep pick up
-     * where it was rather than restarting.
+     * The re-seating itself is {@link AutoviewCursor#resumeOn}, which is where the "never move
+     * backwards" guarantee and its tests live.
      */
     private void replanTail(TissueMask mask) {
+        if (cursor == null)
+            return;
         AutoviewPath.Plan rebuilt = AutoviewPath.build(extentX, extentY, extentW, extentH,
                 fovW, fovH, OVERLAP, settings.axis(), settings.corner(), filterFor(mask, settings));
         if (rebuilt.isEmpty())
             return;
 
-        int currentLine = legIndex < plan.legs().size() ? plan.legs().get(legIndex).line() : Integer.MAX_VALUE;
-        adoptPlan(rebuilt);
-
-        int target = 0;
-        while (target < rebuilt.legs().size() && rebuilt.legs().get(target).line() < currentLine)
-            target++;
-        if (target >= rebuilt.legs().size()) {
-            // Everything still ahead of us turned out to be empty glass -- the sweep is done.
+        int wasLine = cursor.currentLine();
+        AutoviewCursor.Event event = cursor.resumeOn(rebuilt, settings.corner());
+        fieldCount.set(rebuilt.fieldCount());
+        if (event == AutoviewCursor.Event.FINISHED) {
+            // Everything still ahead of us turned out to be empty glass.
+            applyPosition(pinnedViewer);
             finish();
             return;
         }
 
-        legIndex = target;
-        legT = 0;
-        AutoviewPath.Leg leg = rebuilt.legs().get(target);
-        curX = leg.x0();
-        curY = leg.y0();
         speedFactor = 0;
         updateReadouts();
         // Move the viewer NOW, not on the next frame. The replan can jump the cursor a long way, and
@@ -768,8 +711,8 @@ final class AutoviewSweep {
         // readiness. That is precisely the hold-forever condition LOOKAHEAD_SEC exists to avoid; it
         // would show up as a multi-second freeze every time the mask lands.
         applyPosition(pinnedViewer);
-        logger.debug("Autoview replanned with tissue mask: {} fields (was line {})",
-                rebuilt.fieldCount(), currentLine);
+        logger.debug("Autoview replanned with tissue mask: {} fields, {} (was line {})",
+                rebuilt.fieldCount(), event, wasLine);
     }
 
     // --- helpers -------------------------------------------------------------

@@ -178,26 +178,43 @@ public final class AutoviewPath {
         if (lines.length == 0 || travel.length == 0)
             return List.of();
 
-        // Corner decomposes into two independent booleans. For ROWS a "low" line is the top one and
-        // "forward" travel is left-to-right; for COLUMNS a "low" line is the left one and "forward"
-        // travel is top-to-bottom. All 8 (Axis, Corner) variants fall out of this pair.
+        // Corner decomposes into two independent booleans. For ROWS a "low" line is the top one;
+        // for COLUMNS a "low" line is the left one. The travel direction half of the decomposition
+        // lives in lineTravelsForward, which the resume logic shares.
         boolean firstLineLow = rows
                 ? (corner == Corner.TOP_LEFT || corner == Corner.TOP_RIGHT)
                 : (corner == Corner.TOP_LEFT || corner == Corner.BOTTOM_LEFT);
-        boolean firstForward = rows
-                ? (corner == Corner.TOP_LEFT || corner == Corner.BOTTOM_LEFT)
-                : (corner == Corner.TOP_LEFT || corner == Corner.TOP_RIGHT);
 
         List<double[]> out = new ArrayList<>(lines.length * travel.length);
         for (int li = 0; li < lines.length; li++) {
             double lineCoord = lines[firstLineLow ? li : lines.length - 1 - li];
-            boolean forward = (li % 2 == 0) == firstForward;
+            boolean forward = lineTravelsForward(li, axis, corner);
             for (int k = 0; k < travel.length; k++) {
                 double t = travel[forward ? k : travel.length - 1 - k];
                 out.add(new double[] { rows ? t : lineCoord, rows ? lineCoord : t, li });
             }
         }
         return out;
+    }
+
+    /**
+     * Whether serpentine line {@code line} (in visit order) travels towards increasing coordinates.
+     * <p>
+     * Serpentine parity depends only on the line's index, the axis and the start corner — never on
+     * the extent, the field size or any {@link FieldFilter}. That is what makes it safe for
+     * {@link AutoviewCursor} to re-seat onto a re-filtered plan: the direction of a given line is
+     * identical before and after filtering.
+     */
+    public static boolean lineTravelsForward(int line, Axis axis, Corner corner) {
+        boolean firstForward = axis == Axis.ROWS
+                ? (corner == Corner.TOP_LEFT || corner == Corner.BOTTOM_LEFT)
+                : (corner == Corner.TOP_LEFT || corner == Corner.TOP_RIGHT);
+        return (line % 2 == 0) == firstForward;
+    }
+
+    /** The coordinate that varies along a line: x for {@link Axis#ROWS}, y for {@link Axis#COLUMNS}. */
+    public static double travelCoordinate(double x, double y, Axis axis) {
+        return axis == Axis.ROWS ? x : y;
     }
 
     /**

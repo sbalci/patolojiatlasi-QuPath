@@ -71,7 +71,8 @@ atlas, and every study artifact (quiz/tour packs, collections, recordings) is a 
   (so an assistant can list a slide's regions and open one). Coordinates are plain full-resolution
   pixels — the space QuPath, the DZI descriptor and OpenSeadragon all already share, so nothing is
   transformed anywhere along the way. Name an annotation `Lenfoid agregat | Lymphoid aggregate` to
-  give it both languages.
+  give it both languages. Full workflow, the `atlas-regions/1` format, and the invariants that keep
+  the three consumers in step: **[docs/teaching-regions.md](docs/teaching-regions.md)**.
 - **GeoJSON region exchange.** **Bölgeler → *GeoJSON dışa aktar… / içe aktar…*** writes and reads a
   separate GeoJSON `FeatureCollection` for QuPath, R tools such as wsiTools, and geometry checks.
   The exchange file carries full-resolution pixel coordinates, feature UUIDs, names, classes,
@@ -187,7 +188,8 @@ microscope, so you can watch rather than drag.
 - **Boş alanları atla** skips blank glass. A coarse tissue map is built from the slide thumbnail and
   empty fields are dropped from the route, so a sweep does not spend minutes crossing background.
   **Doku duyarlılığı** decides how faint a region still counts as tissue. Background polarity is
-  detected rather than assumed, so this works on dark-field and fluorescence too.
+  detected rather than assumed, so a dark-background image is handled by the same logic — though
+  only RGB bright-field slides have actually been exercised.
 - **Select an annotation first** to sweep only its bounding box; with nothing selected the whole
   slide is swept. The sweep runs at whatever magnification you are already at.
 
@@ -195,10 +197,15 @@ Because tiles stream over HTTP, the sweep **paces itself against the tile cache*
 much of the view ahead has actually arrived and eases off when it hasn't, so it never glides across
 un-rendered grey. The progress bar and *alan i / N* readout track the route.
 
-The sweep stops on its own when you click or scroll in the viewer, change slides, rotate the image,
-or close the window — anything that suggests you have taken over. It refuses to start on a rotated
-image. While it runs, focus-heatmap and navigation recording are **suppressed**, so an automated
-sweep is never recorded as if you had looked there yourself.
+The sweep stops on its own when you click or scroll in the viewer, change slides, switch viewers,
+rotate the image, or close the window. It refuses to start on a rotated image. Keyboard panning is
+*not* watched, so press **Durdur** before panning with the arrow keys. While it runs, focus-heatmap
+and navigation recording are **suppressed**, so an automated sweep is not recorded as if you had
+looked there yourself.
+
+Controls, the tile-pacing mechanism, the tissue-mask thresholds, the suppression contract every
+viewer-driving tool must honour, and the diagnostics that tell a working pacer from a stalled one:
+**[docs/autoview.md](docs/autoview.md)**.
 
 ---
 

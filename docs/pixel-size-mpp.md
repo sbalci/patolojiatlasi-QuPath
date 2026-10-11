@@ -1,16 +1,23 @@
 # Getting the pixel size (µm/px) for atlas DZI slides
 
-The atlas serves slides as Deep Zoom (DZI) pyramids. `vips dzsave` does **not** store
-microns-per-pixel in the DZI, so a slide opens **uncalibrated** in QuPath (measurements in pixels,
-no scale bar) unless a pixel size is supplied. The extension reads a pixel size from the catalog and
-applies it automatically (see the README *Pixel-size calibration* note); this doc is the recipe for
-working out the number to put there.
+The atlas serves slides as Deep Zoom (DZI) pyramids. The `.dzi` descriptor itself carries no
+microns-per-pixel — but `vips dzsave` writes a **`vips-properties.xml` sidecar inside the
+`<name>_files/` directory**, and that sidecar keeps whatever resolution its input had. The extension
+reads it automatically on open (over HTTP for atlas slides, from disk for local ones), so **most
+slides now open already calibrated**, with the scale bar working and measurements in µm. See the
+README *Pixel-size calibration* note for the full precedence.
+
+**This doc is the recipe for the slides that still need it**: a pyramid built without that sidecar,
+or one whose recorded resolution is wrong. The second case is the pipeline below — ImageScope's TIFF
+resolution tags are often missing or wrong (see the warning further down), so the sidecar can end up
+carrying a value that is no better than no value at all.
 
 ## The pipeline that loses the pixel size
 
 ```
-Aperio .svs  ──►  ImageScope "Export Image"  ──►  vips dzsave  ──►  .dzi
-(has MPP)         (DOWNSAMPLES → smaller)        (drops MPP)       (no MPP)
+Aperio .svs  ──►  ImageScope "Export Image"  ──►  vips dzsave  ──►  .dzi + vips-properties.xml
+(has MPP)         (DOWNSAMPLES → smaller)        (copies the       (sidecar resolution is only
+                                                  input's res)      as good as the export's tags)
 ```
 
 Two things happen that you must undo:
