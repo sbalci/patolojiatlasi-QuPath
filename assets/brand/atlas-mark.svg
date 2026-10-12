@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Patoloji Atlası for QuPath</title>
+  <desc id="desc">A QuPath-inspired blue magnifier examining an open pathology atlas.</desc>
+  <defs>
+    <linearGradient id="lens" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5aa4e4"/>
+      <stop offset="1" stop-color="#2369b2"/>
+    </linearGradient>
+    <clipPath id="field"><circle cx="104" cy="91" r="49"/></clipPath>
+  </defs>
+  <rect width="256" height="256" rx="52" fill="#1a2b3b"/>
+  <path d="M26 117c34-10 71-6 102 15v86c-30-18-68-22-102-10V117Z" fill="#f2d4df" stroke="#fffaf5" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M128 132c31-21 68-25 102-15v91c-34-12-72-8-102 10v-86Z" fill="#fffaf5" stroke="#fffaf5" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M128 134v82" fill="none" stroke="#b77f9e" stroke-width="4"/>
+  <path d="M47 181c22-3 45 1 65 11M148 192c19-10 42-14 63-11" fill="none" stroke="#ca9bb0" stroke-width="5" stroke-linecap="round"/>
+  <path d="M149 137 210 197" fill="none" stroke="#101a24" stroke-width="23" stroke-linecap="round"/>
+  <path d="M155 138 211 194" fill="none" stroke="#e2e9ed" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="104" cy="91" r="64" fill="url(#lens)"/>
+  <circle cx="104" cy="91" r="50" fill="#e8edf0"/>
+  <g clip-path="url(#field)" fill="#92766b" stroke="#db797b" stroke-width="3" stroke-linejoin="round">
+    <path d="M55 56c12-8 28-6 34 5l-4 14-18 8-14-10Z"/>
+    <path d="M105 42c15 2 19 13 15 23l-10 4-11-7Z"/>
+    <path d="M130 69c15-7 27 2 27 14l-10 11-21-4-5-11Z"/>
+    <path d="M70 101c8-14 25-17 35-5l-3 19-18 8-16-8Z"/>
+    <path d="M113 111c12-9 26-2 27 11l-8 14-17-3-8-12Z"/>
+  </g>
+  <circle cx="104" cy="91" r="50" fill="none" stroke="#225f9c" stroke-width="3"/>
+  <circle cx="104" cy="91" r="63" fill="none" stroke="#75b0e4" stroke-width="3" opacity=".5"/>
+</svg>

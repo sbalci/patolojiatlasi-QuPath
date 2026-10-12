@@ -1,5 +1,7 @@
 # QuPath Extensions Promotional Branding Kit
 
+> **Current Patoloji Atlası assets:** See [assets/brand/README.md](assets/brand/README.md) for the website image pack, scalable icon, favicons, and extension icon. The JPGs described below are the earlier promotional set.
+
 Professional visual asset suite created for the **QuPath Workshop Extension** and **QuPath Atlas Extension**. Designed specifically for personal website integration, portfolio cards, and social media promotion across LinkedIn, X (Twitter), and academic presentations.
 
 ---

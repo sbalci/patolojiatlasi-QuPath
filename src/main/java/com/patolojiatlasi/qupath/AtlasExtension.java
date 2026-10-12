@@ -13,6 +13,8 @@ import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -91,6 +93,14 @@ public class AtlasExtension implements QuPathExtension {
             // slide, not just atlas ones. Reorientation ("Görüntüyü döndür…") is promoted further,
             // to its own top-level Extensions item (added at the end of installExtension).
             Menu atlas = new Menu("Patoloji Atlası");
+            var atlasIconUrl = AtlasExtension.class.getResource("/icons/atlas-mark-256.png");
+            if (atlasIconUrl != null) {
+                ImageView atlasIcon = new ImageView(new Image(atlasIconUrl.toExternalForm()));
+                atlasIcon.setFitWidth(16);
+                atlasIcon.setFitHeight(16);
+                atlasIcon.setPreserveRatio(true);
+                atlas.setGraphic(atlasIcon);
+            }
 
             // Primary entry: browse & open atlas slides.
             MenuItem browseItem = new MenuItem("Slaytlara gözat…");

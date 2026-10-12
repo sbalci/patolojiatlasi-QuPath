@@ -12,7 +12,6 @@ in advance.
 The atlas serves its slides as **Deep Zoom (DZI)** pyramids (produced by `vips dzsave` and shown
 on the website with OpenSeadragon). This extension adds a DZI image reader to QuPath plus a
 browsable catalogue driven by the atlas's own image list.
-
 ---
 
 ## About
@@ -25,6 +24,8 @@ to these sites:
 
 - **Türkçe:** [patolojiatlasi.com](https://www.patolojiatlasi.com/)
 - **English:** [histopathologyatlas.com](https://www.histopathologyatlas.com/)
+
+Website images, favicons, and the extension icon are available in the [visual asset pack](assets/brand/README.md).
 
 **Related work:** [QuPath Edu / OpenMicroanatomy](https://github.com/openmicroanatomy)
 (Yli-Hallila et al., *Journal of Anatomy* 2025;246(5):846–856,

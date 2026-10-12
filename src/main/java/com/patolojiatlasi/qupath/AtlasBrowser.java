@@ -103,6 +103,9 @@ public class AtlasBrowser {
     private Stage buildStage() {
         Stage s = new Stage();
         s.setTitle("Patoloji Atlası");
+        var atlasIconUrl = AtlasBrowser.class.getResource("/icons/atlas-mark-256.png");
+        if (atlasIconUrl != null)
+            s.getIcons().add(new Image(atlasIconUrl.toExternalForm()));
 
         searchField.setPromptText("Search cases…");
         searchField.textProperty().addListener((obs, old, txt) -> rebuildTree());
