@@ -1,10 +1,23 @@
 package com.patolojiatlasi.qupath.quiz;
 
+import com.google.gson.JsonObject;
+
 import java.util.ArrayList;
 import java.util.List;
 
 /** A portable quiz: metadata + an ordered list of questions. Serialized as one JSON file. */
 public class AtlasQuiz {
+
+    // Optional additive metadata; older quiz files omit it and older readers ignore it.
+    private JsonObject cotProvenance;
+
+    public JsonObject getCotProvenance() {
+        return cotProvenance == null ? null : cotProvenance.deepCopy();
+    }
+
+    public void setCotProvenance(JsonObject provenance) {
+        cotProvenance = provenance == null ? null : provenance.deepCopy();
+    }
 
     private int formatVersion = AtlasQuizIO.FORMAT_VERSION;
     private String title = "";

@@ -213,6 +213,7 @@ public final class CotRecording {
      */
     public synchronized Map<String, Object> provenance() {
         Map<String, Object> m = new LinkedHashMap<>();
+        m.put("sourceSchema", CotRecordingIO.SCHEMA);
         m.put("recordingMode", "authored");
         m.put("captureIntent", "demonstration");
         m.put("recordingIndicatorVisible", Boolean.TRUE);

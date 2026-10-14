@@ -279,12 +279,29 @@ Minor, also fixed: an empty take no longer writes a `recording.json` or leaves i
 - **An open pause is not flushed if the JVM is killed mid-pause.** Bounded loss: the pause interval,
   never the path.
 
-**Known gap, not fixed — the authored marker does not survive into the exported dataset.**
-`behaviors.json` carries `cotProvenance`, but the quiz draft (`cot-taslak.json`) does not, and
-`PathologyCotExport` writes only crops + `conversation.json`. Propagating it needs a metadata field
-on `AtlasQuiz`, i.e. modifying the quiz package, which this change deliberately did not touch. This
-is now the **highest-priority governance follow-up** and belongs with the export de-identification
-item in §9 — until then, an exported case folder is not self-describing about how it was produced.
+**Recording-origin follow-up (October 14):** quiz drafts now carry optional `cotProvenance`
+metadata, which the existing quiz editor retains when loading, reviewing, and saving the same pack.
+Both the stop-to-draft and file-import paths carry recording-schema evidence. Export writes
+`provenance.json` (`pathology-cot-case-provenance/1`) alongside the unchanged conversation/crops.
+`recordingOrigin` is `authored_demonstration` for `atlas-cot-authored/1`,
+`blinded_observation` for the verified `atlas-focus-contribution/5` writer contract, and `unknown`
+for missing, unsupported, or conflicting origin evidence. Legacy `/3` and `/4` recordings and old
+quizzes are not retroactively classified. This is evidence from recording metadata, not a digital
+signature. The sidecar includes `anonymized=false`; export consent does not establish origin or
+anonymization. Raw recording files/slide URIs are not copied into the provenance sidecar.
+
+Manual QuPath validation still required (automated suites intentionally not run):
+- Record and stop an authored take; create a draft, open it in the author window, edit rationale,
+  reorder stops, save, close, and reopen. Check the provenance block survives unchanged.
+- Import that same authored `recording.json` through the legacy file-picker action; repeat review
+  and export. Both exports must say `authored_demonstration`, with protocol/end/cap metadata retained.
+- Import a real `/5` blinded fragment and export its reviewed draft; expect `blinded_observation`.
+- Open/export an old quiz with no provenance and draft from metadata-free or `/3`/`/4` fragments;
+  expect `unknown`. Conflicting mode/intent metadata must also remain `unknown`.
+- Compare conversation turn/image references and crop ordering with the previous export. Confirm
+  README still warns ANONİMLEŞTİRİLMEMİŞ and provenance contains no raw slide URL/local path.
+- New/ordinary quizzes must still open and save without a provenance field; “Yeni” starts a fresh
+  pack and must not inherit the previous recording's origin.
 
 ## 11. Testing
 

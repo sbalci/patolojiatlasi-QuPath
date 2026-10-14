@@ -275,6 +275,7 @@ public final class CotRecordingIO {
             for (var e : o.getAsJsonObject("provenance").entrySet())
                 provenance.put(e.getKey(), plain(e.getValue()));
 
+        provenance.put("sourceSchema", schema);
         Map<String, Object> decision = new LinkedHashMap<>();
         decision.put("cotProvenance", provenance);
 
