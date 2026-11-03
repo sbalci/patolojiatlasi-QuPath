@@ -13,28 +13,30 @@ Professional visual asset suite created for the **QuPath Workshop Extension** an
 
 ### Visual Assets
 
-#### App Icon (1:1)
-![QuPath Workshop Extension Icon](C:/Users/patolojiai/.gemini/antigravity-ide/brain/8c9c7732-6fbf-467d-8810-d4f8595348f7/workshop_extension_icon_1789713929725.jpg)
+The workshop JPGs are committed in [`sbalci/qupath-workshop/assets/`](https://github.com/sbalci/qupath-workshop/tree/main/assets), not in this Atlas repository. The previews below load those committed files.
 
-- **Local Copy:** [workshop-extension-icon.jpg](file:///d:/qupath-workshop/assets/workshop-extension-icon.jpg)
+#### App Icon (1:1)
+![QuPath Workshop Extension Icon](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-icon.jpg?raw=true)
+
+- **Committed file / download:** [workshop-extension-icon.jpg](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-icon.jpg)
 - **Aspect Ratio:** 1:1 (Square)
 - **Best For:** Website navigation icon, app launcher badge, portfolio avatar, favicon.
 
 ---
 
 #### Wide Banner (16:9)
-![QuPath Workshop Extension Banner](C:/Users/patolojiai/.gemini/antigravity-ide/brain/8c9c7732-6fbf-467d-8810-d4f8595348f7/workshop_extension_banner_1789713943329.jpg)
+![QuPath Workshop Extension Banner](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-banner.jpg?raw=true)
 
-- **Local Copy:** [workshop-extension-banner.jpg](file:///d:/qupath-workshop/assets/workshop-extension-banner.jpg)
+- **Committed file / download:** [workshop-extension-banner.jpg](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-banner.jpg)
 - **Aspect Ratio:** 16:9 (Widescreen)
 - **Best For:** Website hero banner, Twitter/X header, LinkedIn page cover, presentation opening slide.
 
 ---
 
 #### Promotional / Feature Image (16:9)
-![QuPath Workshop Extension Promo Showcase](C:/Users/patolojiai/.gemini/antigravity-ide/brain/8c9c7732-6fbf-467d-8810-d4f8595348f7/workshop_extension_promo_1789713961334.jpg)
+![QuPath Workshop Extension Promo Showcase](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-promo.jpg?raw=true)
 
-- **Local Copy:** [workshop-extension-promo.jpg](file:///d:/qupath-workshop/assets/workshop-extension-promo.jpg)
+- **Committed file / download:** [workshop-extension-promo.jpg](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-promo.jpg)
 - **Aspect Ratio:** 16:9
 - **Best For:** Social media feed posts (LinkedIn / X), blog post feature image, project showcase card.
 
@@ -48,27 +50,27 @@ Professional visual asset suite created for the **QuPath Workshop Extension** an
 ### Visual Assets
 
 #### App Icon (1:1)
-![QuPath Atlas Extension Icon](C:/Users/patolojiai/.gemini/antigravity-ide/brain/8c9c7732-6fbf-467d-8810-d4f8595348f7/atlas_extension_icon_1789713982915.jpg)
+![QuPath Atlas Extension Icon](assets/atlas-extension-icon.jpg)
 
-- **Local Copy:** [atlas-extension-icon.jpg](file:///d:/patolojiatlasi-QuPath/assets/atlas-extension-icon.jpg)
+- **Committed file / download:** [atlas-extension-icon.jpg](assets/atlas-extension-icon.jpg)
 - **Aspect Ratio:** 1:1 (Square)
 - **Best For:** Website menu icon, repository badge, application avatar, browser extension button.
 
 ---
 
 #### Wide Banner (16:9)
-![QuPath Atlas Extension Banner](C:/Users/patolojiai/.gemini/antigravity-ide/brain/8c9c7732-6fbf-467d-8810-d4f8595348f7/atlas_extension_banner_1789714001623.jpg)
+![QuPath Atlas Extension Banner](assets/atlas-extension-banner.jpg)
 
-- **Local Copy:** [atlas-extension-banner.jpg](file:///d:/patolojiatlasi-QuPath/assets/atlas-extension-banner.jpg)
+- **Committed file / download:** [atlas-extension-banner.jpg](assets/atlas-extension-banner.jpg)
 - **Aspect Ratio:** 16:9 (Widescreen)
 - **Best For:** Website hero header, social media cover banner, course syllabus header, conference poster banner.
 
 ---
 
 #### Promotional / Feature Image (16:9)
-![QuPath Atlas Extension Promo Showcase](C:/Users/patolojiai/.gemini/antigravity-ide/brain/8c9c7732-6fbf-467d-8810-d4f8595348f7/atlas_extension_promo_1789714020916.jpg)
+![QuPath Atlas Extension Promo Showcase](assets/atlas-extension-promo.jpg)
 
-- **Local Copy:** [atlas-extension-promo.jpg](file:///d:/patolojiatlasi-QuPath/assets/atlas-extension-promo.jpg)
+- **Committed file / download:** [atlas-extension-promo.jpg](assets/atlas-extension-promo.jpg)
 - **Aspect Ratio:** 16:9
 - **Best For:** LinkedIn update, X announcement thread, digital pathology seminar announcement, educational tutorials.
 
@@ -76,20 +78,28 @@ Professional visual asset suite created for the **QuPath Workshop Extension** an
 
 ## 3. Asset Specifications & File Matrix
 
-| Asset | Project | Ratio | Local File Path | Recommended Usage |
+Atlas links are relative to this repository. Workshop links point to the separate workshop repository. Open a committed-file link and use GitHub’s **Download raw file** control (or open the raw image and save it) to download the original JPG.
+
+| Asset | Project | Ratio | Committed Source | Recommended Usage |
 | :--- | :--- | :---: | :--- | :--- |
-| **Workshop Icon** | QuPath Workshop | 1:1 | [assets/workshop-extension-icon.jpg](file:///d:/qupath-workshop/assets/workshop-extension-icon.jpg) | Web badge, avatar, favicon |
-| **Workshop Banner** | QuPath Workshop | 16:9 | [assets/workshop-extension-banner.jpg](file:///d:/qupath-workshop/assets/workshop-extension-banner.jpg) | Hero banner, header, deck title |
-| **Workshop Promo** | QuPath Workshop | 16:9 | [assets/workshop-extension-promo.jpg](file:///d:/qupath-workshop/assets/workshop-extension-promo.jpg) | Social post, card thumbnail |
-| **Atlas Icon** | Patoloji Atlası | 1:1 | [assets/atlas-extension-icon.jpg](file:///d:/patolojiatlasi-QuPath/assets/atlas-extension-icon.jpg) | Web badge, avatar, button |
-| **Atlas Banner** | Patoloji Atlası | 16:9 | [assets/atlas-extension-banner.jpg](file:///d:/patolojiatlasi-QuPath/assets/atlas-extension-banner.jpg) | Hero banner, header, poster |
-| **Atlas Promo** | Patoloji Atlası | 16:9 | [assets/atlas-extension-promo.jpg](file:///d:/patolojiatlasi-QuPath/assets/atlas-extension-promo.jpg) | Social post, feature article |
+| **Workshop Icon** | QuPath Workshop | 1:1 | [assets/workshop-extension-icon.jpg](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-icon.jpg) | Web badge, avatar, favicon |
+| **Workshop Banner** | QuPath Workshop | 16:9 | [assets/workshop-extension-banner.jpg](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-banner.jpg) | Hero banner, header, deck title |
+| **Workshop Promo** | QuPath Workshop | 16:9 | [assets/workshop-extension-promo.jpg](https://github.com/sbalci/qupath-workshop/blob/main/assets/workshop-extension-promo.jpg) | Social post, card thumbnail |
+| **Atlas Icon** | Patoloji Atlası | 1:1 | [assets/atlas-extension-icon.jpg](assets/atlas-extension-icon.jpg) | Web badge, avatar, button |
+| **Atlas Banner** | Patoloji Atlası | 16:9 | [assets/atlas-extension-banner.jpg](assets/atlas-extension-banner.jpg) | Hero banner, header, poster |
+| **Atlas Promo** | Patoloji Atlası | 16:9 | [assets/atlas-extension-promo.jpg](assets/atlas-extension-promo.jpg) | Social post, feature article |
 
 ---
 
 ## 4. Personal Webpage Integration Snippets
 
 ### Modern HTML Card Component (for Personal Website)
+
+Before using this snippet, copy the four banner/icon JPGs from the source links in the table above into your website's published `assets/` directory, preserving their filenames. The two promo JPGs are optional for other cards or social posts. A link or preview in this document does not copy a file into your website.
+
+The `/assets/...` URLs below are deployment destinations relative to the website origin, not links to files already deployed there. For a site hosted under a subpath, adjust the URLs to include that site's base path. The Workshop Extension project link intentionally points to `qupath-extension-workshop`; its promotional images are stored in `qupath-workshop`.
+
+For the newer Atlas mark, favicons, hero illustrations, and social card, see the [current visual asset pack and integration instructions](assets/brand/README.md). Copy any selected files into your website's static assets as described there. Its histology illustrations are generated artwork, not diagnostic case images; retain that distinction in captions and alt text.
 
 ```html
 <!-- QuPath Workshop Extension Card -->
