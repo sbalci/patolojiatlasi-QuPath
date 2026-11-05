@@ -109,21 +109,21 @@ public final class BenchReference {
                 // A reference session is being opened but the background DZI load hasn't
                 // finished yet, so controlWindow is still null — refuse anyway rather than
                 // letting a second addColumn slip through and leak a column.
-                infoAlert("Referans yükleniyor, lütfen bekleyin.");
+                infoAlert(qupath, "Referans yükleniyor, lütfen bekleyin.");
             }
             return;
         }
 
         QuPathViewer active = qupath.getViewer();
         if (active == null) {
-            infoAlert("Açık bir görüntüleyici yok.");
+            infoAlert(qupath, "Açık bir görüntüleyici yok.");
             return;
         }
 
         if (active.getImageData() == null) {
             // Degenerate case: nothing of yours is open yet, so there is no "beside" to match
             // against. Just show the reference in the one viewer that exists.
-            openInto(active, ref, null, null);
+            openInto(qupath, active, ref, null, null);
             return;
         }
 
@@ -140,7 +140,7 @@ public final class BenchReference {
         if (refViewer == null) {
             // addColumn refused (or the manager didn't grow) — nothing to open into.
             opening = false;
-            infoAlert("İkinci bir görüntüleyici açılamadı.");
+            infoAlert(qupath, "İkinci bir görüntüleyici açılamadı.");
             return;
         }
 
@@ -153,7 +153,7 @@ public final class BenchReference {
                 // best-effort removal of the now-empty second viewer
             }
         };
-        openInto(rv, ref, () -> {
+        openInto(qupath, rv, ref, () -> {
             String status = matchMagnification(active, rv);
             showControlWindow(qupath, active, rv, status);
         }, removeEmptyViewer);
@@ -168,7 +168,7 @@ public final class BenchReference {
      * info alert on the FX thread, and — if given — {@code onFailure} is run so the caller can
      * clean up (e.g. remove an empty second viewer). Either callback may be {@code null}.
      */
-    private static void openInto(QuPathViewer viewer, AtlasCase ref, Runnable onSuccess, Runnable onFailure) {
+    private static void openInto(QuPathGUI qupath, QuPathViewer viewer, AtlasCase ref, Runnable onSuccess, Runnable onFailure) {
         Thread t = new Thread(() -> {
             try {
                 DziImageServer server = new DziImageServer(ref.getDziURI());
@@ -179,11 +179,11 @@ public final class BenchReference {
                         if (onSuccess != null)
                             onSuccess.run();
                     } catch (Exception ex) {
-                        reportOpenFailure(ref, ex, onFailure);
+                        reportOpenFailure(qupath, ref, ex, onFailure);
                     }
                 });
             } catch (Exception ex) {
-                Platform.runLater(() -> reportOpenFailure(ref, ex, onFailure));
+                Platform.runLater(() -> reportOpenFailure(qupath, ref, ex, onFailure));
             }
         }, "atlas-reference-open-" + ref.getReponame());
         t.setDaemon(true);
@@ -191,9 +191,9 @@ public final class BenchReference {
     }
 
     /** Logs + alerts a failed reference open and runs the caller's cleanup. Runs on the FX thread. */
-    private static void reportOpenFailure(AtlasCase ref, Exception ex, Runnable onFailure) {
+    private static void reportOpenFailure(QuPathGUI qupath, AtlasCase ref, Exception ex, Runnable onFailure) {
         logger.error("Bench reference: failed to open {} ({}): {}", ref.getTitle(), ref.getReponame(), ex.getMessage(), ex);
-        infoAlert("Referans slayt açılamadı: " + ref.getTitle() + "\n\n" + ex.getMessage());
+        infoAlert(qupath, "Referans slayt açılamadı: " + ref.getDisplayTitle() + "\n\n" + ex.getMessage());
         if (onFailure != null)
             onFailure.run();
     }
@@ -246,8 +246,11 @@ public final class BenchReference {
         controlWindow.bindAndShow(qupath, yourViewer, refViewer, initialStatus);
     }
 
-    private static void infoAlert(String message) {
-        new Alert(Alert.AlertType.INFORMATION, message).showAndWait();
+    private static void infoAlert(QuPathGUI qupath, String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION, message);
+        if (qupath != null && qupath.getStage() != null)
+            alert.initOwner(qupath.getStage());
+        alert.showAndWait();
     }
 
     /**

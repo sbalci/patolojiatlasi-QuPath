@@ -94,4 +94,26 @@ class AtlasCaseTest {
                 "Colon", "GI", "published", "https://x/HE.dzi?v=2", "", 0.5);
         assertEquals("https://x/HE.dzi?v=2&mpp=0.5", c.getDziURI().toString());
     }
+
+    @Test
+    void displayTitlePrefersTurkishWithEnglishInParentheses() {
+        AtlasCase both = new AtlasCase("celiac", "HE", "HE", "Celiac disease", "Çölyak hastalığı",
+                "Small intestine", "GI", "published", "https://x/celiac/HE.dzi", "");
+        assertEquals("Celiac disease", both.getTitle());
+        assertEquals("Çölyak hastalığı (Celiac disease)", both.getDisplayTitle());
+
+        AtlasCase withStain = new AtlasCase("celiac", "CD3", "CD3", "Celiac disease", "Çölyak hastalığı",
+                "Small intestine", "GI", "published", "https://x/celiac/CD3.dzi", "");
+        assertEquals("Çölyak hastalığı (Celiac disease) — CD3", withStain.getDisplayTitle());
+    }
+
+    @Test
+    void matchesQueryHandlesTurkishFoldingAndBilingualFields() {
+        AtlasCase c = new AtlasCase("celiac", "CD3", "CD3", "Celiac disease", "Çölyak hastalığı",
+                "Small intestine", "Gastrointestinal", "published", "https://x/celiac/CD3.dzi", "");
+        assertTrue(c.matchesQuery("Çölyak"));
+        assertTrue(c.matchesQuery("colyak"));
+        assertTrue(c.matchesQuery("CELIAC"));
+        assertTrue(c.matchesQuery("cd3"));
+    }
 }

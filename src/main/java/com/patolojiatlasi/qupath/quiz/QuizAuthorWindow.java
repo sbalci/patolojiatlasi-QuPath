@@ -64,6 +64,7 @@ public class QuizAuthorWindow {
     private static final Logger logger = LoggerFactory.getLogger(QuizAuthorWindow.class);
 
     private static Stage stage;
+    private static QuizAuthorWindow instance;
 
     private final QuPathGUI qupath;
 
@@ -87,9 +88,16 @@ public class QuizAuthorWindow {
             stage.toFront();
             return;
         }
-        QuizAuthorWindow author = new QuizAuthorWindow(qupath);
-        stage = author.buildStage();
+        instance = new QuizAuthorWindow(qupath);
+        stage = instance.buildStage();
         stage.show();
+    }
+
+    /** Show (or focus) the single author window and immediately load {@code file} into it. */
+    public static void showAndLoad(QuPathGUI qupath, File file) {
+        show(qupath);
+        if (file != null && instance != null)
+            instance.loadFile(file);
     }
 
     private Stage buildStage() {
@@ -129,7 +137,7 @@ public class QuizAuthorWindow {
                     String prompt = q.getPrompt() == null ? "" : q.getPrompt().replace("\n", " ");
                     if (prompt.length() > 60)
                         prompt = prompt.substring(0, 60) + "…";
-                    String type = q.getType() == null ? "?" : q.getType().toString();
+                    String type = q.getType() == null ? "?" : q.getType().displayName();
                     setText((getIndex() + 1) + ". [" + type + "] " + prompt);
                 }
             }
@@ -157,7 +165,10 @@ public class QuizAuthorWindow {
         root.setCenter(center);
 
         s.setScene(new Scene(root, 640, 480));
-        s.setOnHidden(e -> stage = null);
+        s.setOnHidden(e -> {
+            stage = null;
+            instance = null;
+        });
         return s;
     }
 
@@ -178,6 +189,10 @@ public class QuizAuthorWindow {
         File file = fc.showOpenDialog(stage);
         if (file == null)
             return;
+        loadFile(file);
+    }
+
+    private void loadFile(File file) {
         // Mirrors QuizRunnerWindow.promptLoad: the try wraps ONLY the read, so a failed load
         // never leaves the editor half-mutated -- state is assigned below, after a fully
         // successful read+validate.
@@ -390,6 +405,17 @@ public class QuizAuthorWindow {
         }
 
         private void build(QuizQuestion existing) {
+            typeChoice.setConverter(new javafx.util.StringConverter<>() {
+                @Override
+                public String toString(QuizType object) {
+                    return object == null ? "" : object.displayName();
+                }
+
+                @Override
+                public QuizType fromString(String string) {
+                    return null;
+                }
+            });
             typeChoice.setValue(existing != null && existing.getType() != null ? existing.getType() : QuizType.MCQ);
             typeChoice.getSelectionModel().selectedItemProperty().addListener((obs, old, val) -> rebuildTypeSpecific());
 
@@ -459,7 +485,7 @@ public class QuizAuthorWindow {
                 // attach the wrong slide's pan/zoom to this stop). Skipped when nothing is bound yet.
                 String liveUrl = QuizSlide.currentSlideUrl(viewer);
                 if (boundSlideUrl != null && !boundSlideUrl.isBlank() && !boundSlideUrl.equals(liveUrl)) {
-                    errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaydı açın "
+                    errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaytı açın "
                             + "ya da yeniden bağlayın.");
                     return;
                 }
@@ -602,7 +628,7 @@ public class QuizAuthorWindow {
             }
             String liveUrl = QuizSlide.currentSlideUrl(viewer);
             if (boundSlideUrl != null && !boundSlideUrl.isBlank() && !boundSlideUrl.equals(liveUrl)) {
-                errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaydı açın "
+                errorLabel.setText("Açık slayt, soruya bağlı slayttan farklı — önce doğru slaytı açın "
                         + "ya da yeniden bağlayın.");
                 return null;
             }

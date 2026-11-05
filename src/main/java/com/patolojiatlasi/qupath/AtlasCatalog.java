@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -44,8 +45,13 @@ public class AtlasCatalog {
             .connectTimeout(Duration.ofSeconds(20))
             .build();
 
-    /** Load the catalog snapshot bundled inside the extension jar (offline, instant). */
+    private static volatile List<AtlasCase> bundledCache;
+
+    /** Load the catalog snapshot bundled inside the extension jar (offline, instant, cached). */
     public static List<AtlasCase> loadBundled() {
+        List<AtlasCase> cached = bundledCache;
+        if (cached != null)
+            return cached;
         try (InputStream in = AtlasCatalog.class.getResourceAsStream("/catalog.json")) {
             if (in == null) {
                 logger.warn("Bundled catalog.json not found on classpath");
@@ -53,7 +59,9 @@ public class AtlasCatalog {
             }
             JsonObject root = JsonParser.parseReader(
                     new InputStreamReader(in, StandardCharsets.UTF_8)).getAsJsonObject();
-            return parseBundled(root);
+            List<AtlasCase> parsed = List.copyOf(parseBundled(root));
+            bundledCache = parsed;
+            return parsed;
         } catch (Exception e) {
             logger.error("Failed to read bundled catalog: {}", e.getMessage(), e);
             return new ArrayList<>();
@@ -185,7 +193,7 @@ public class AtlasCatalog {
     public static String normalizeCategory(String speciality, String organEN,
                                            String titleEN, String reponame) {
         String primary = classify(((speciality == null ? "" : speciality) + " "
-                + (organEN == null ? "" : organEN)).toLowerCase());
+                + (organEN == null ? "" : organEN)).toLowerCase(Locale.ROOT));
         if (primary != null)
             return primary;
 
@@ -198,7 +206,7 @@ public class AtlasCatalog {
 
         // Fallback: infer from the title / repo name.
         String fromTitle = classify(((titleEN == null ? "" : titleEN) + " "
-                + (reponame == null ? "" : reponame)).toLowerCase());
+                + (reponame == null ? "" : reponame)).toLowerCase(Locale.ROOT));
         return fromTitle != null ? fromTitle : "Uncategorized";
     }
 
@@ -262,7 +270,7 @@ public class AtlasCatalog {
 
     /** Heuristic: does this image basename / stain name look like a special stain or IHC marker? */
     public static boolean looksLikeStain(String image, String stainname) {
-        String s = ((image == null ? "" : image) + " " + (stainname == null ? "" : stainname)).toLowerCase();
+        String s = ((image == null ? "" : image) + " " + (stainname == null ? "" : stainname)).toLowerCase(Locale.ROOT);
         return has(s, "immunohisto", "histochem", "ihc", "cish", "fish", "pas", "pasd",
                 "giemsa", "congo", "crystalviolet", "crystal violet", "trichrome", "reticulin",
                 "mucicarmine", "warthin", "trypsin", "ki67", "ki-67", "amyloid", "mgg", "pap",

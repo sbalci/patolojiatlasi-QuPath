@@ -65,8 +65,7 @@ public class AtlasExtension implements QuPathExtension {
 
     @Override
     public String getDescription() {
-        return "Browse and open whole-slide images from the Patoloji Atlası "
-                + "(patolojiatlasi.com / histopathologyatlas.com) directly inside QuPath.";
+        return "Patoloji Atlası (patolojiatlasi.com / histopathologyatlas.com) dijital slayt koleksiyonuna QuPath içinden göz atın ve indirmeden doğrudan açın.";
     }
 
     @Override
@@ -103,14 +102,14 @@ public class AtlasExtension implements QuPathExtension {
             }
 
             // Primary entry: browse & open atlas slides.
-            MenuItem browseItem = new MenuItem("Slaytlara gözat…");
+            MenuItem browseItem = new MenuItem("Slaytlara göz at…");
             browseItem.setOnAction(e -> AtlasBrowser.show(qupath));
 
             // Local Deep Zoom folders -- the same pyramid format the atlas serves, but on disk.
             // An explicit command because QuPath's drag-and-drop / File > Open may filter by known
             // image extensions before any ImageServerBuilder is asked, so a .dzi can never rely on
             // support level alone to reach DziImageServerBuilder.
-            MenuItem localDziItem = new MenuItem("Yerel DZI aç…");
+            MenuItem localDziItem = new MenuItem("Bilgisayardan DZI slaytı aç…");
             localDziItem.setOnAction(e -> LocalDziOpener.show(qupath));
 
             // Catalogue coverage & QC dashboard — a read-only category x stain matrix, opt-in
@@ -193,7 +192,7 @@ public class AtlasExtension implements QuPathExtension {
                 AtlasCase open = resolveOpenCase(qupath);
                 if (open == null) {
                     Alert alert = new Alert(Alert.AlertType.INFORMATION,
-                            "Açık slayt atlas kataloğunda bulunamadı.");
+                            "Açık slayt Patoloji Atlası kataloğunda bulunamadı. Lütfen önce 'Slaytlara göz at…' penceresinden bir atlas slaytı açın.");
                     if (qupath.getStage() != null)
                         alert.initOwner(qupath.getStage());
                     alert.showAndWait();
@@ -239,12 +238,18 @@ public class AtlasExtension implements QuPathExtension {
 
             atlas.getItems().addAll(
                     browseItem,
-                    localDziItem,
-                    coverageItem,
-                    pixelSizeItem,
                     simpleView,
                     new SeparatorMenuItem(),
-                    compareMenu, referenceMenu, relatedItem, regionsMenu, citationMenu, quizMenu);
+                    compareMenu,
+                    referenceMenu,
+                    relatedItem,
+                    quizMenu,
+                    citationMenu,
+                    new SeparatorMenuItem(),
+                    pixelSizeItem,
+                    localDziItem,
+                    regionsMenu,
+                    coverageItem);
 
             // Pathology-CoT group — turn a recorded blinded/focus fragment into a reviewable
             // guided-tour draft, review it in the existing tour author, then export a reviewed

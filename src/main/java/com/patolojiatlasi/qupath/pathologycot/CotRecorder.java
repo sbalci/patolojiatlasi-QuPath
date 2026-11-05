@@ -66,7 +66,7 @@ public final class CotRecorder {
     /** Checkpoint cadence: 120 ticks × 250 ms ≈ 30 s, as blinded recording uses. */
     private static final int CHECKPOINT_EVERY_TICKS = 120;
 
-    private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+    private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss", Locale.US);
 
     /**
      * Identifier and version of the instruction text shown to the author at start, hashed into

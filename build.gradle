@@ -46,9 +46,9 @@ java {
     targetCompatibility = JavaVersion.VERSION_21
 }
 
-// Source files contain Turkish string literals ("Atlası", "Browse Patoloji Atlası…").
-// Pin UTF-8 so they aren't mangled by the platform default charset on Windows.
-tasks.compileJava {
+// Source and test files contain Turkish string literals ("Atlası", "Slaytlara göz at…").
+// Pin UTF-8 on all JavaCompile tasks so they aren't mangled by the platform default charset on Windows.
+tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
 }
 

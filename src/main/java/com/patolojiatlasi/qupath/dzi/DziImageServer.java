@@ -15,10 +15,12 @@ import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 import javax.imageio.ImageIO;
 import javax.xml.XMLConstants;
@@ -86,8 +88,14 @@ public class DziImageServer extends AbstractTileableImageServer {
     private final DziSource source;
     private final ImageServerMetadata originalMetadata;
 
-    // Small in-memory guard against re-decoding the very same tile repeatedly.
-    private final Map<String, BufferedImage> tinyCache = new ConcurrentHashMap<>();
+    // Small in-memory LRU guard against re-decoding the very same tile repeatedly.
+    private final Map<String, BufferedImage> tinyCache = Collections.synchronizedMap(
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, BufferedImage> eldest) {
+                    return size() > 8;
+                }
+            });
 
     public DziImageServer(URI uri, String... args) throws IOException {
         super();
@@ -99,7 +107,7 @@ public class DziImageServer extends AbstractTileableImageServer {
         String full = uri.toString();
         int q = full.indexOf('?');
         String noQuery = q >= 0 ? full.substring(0, q) : full;
-        if (!noQuery.toLowerCase().endsWith(".dzi"))
+        if (!noQuery.toLowerCase(Locale.ROOT).endsWith(".dzi"))
             throw new IOException("Not a .dzi URL: " + uri);
 
         String tilesBase = noQuery.substring(0, noQuery.length() - ".dzi".length()) + "_files";
@@ -293,7 +301,7 @@ public class DziImageServer extends AbstractTileableImageServer {
             d.tileSize = Integer.parseInt(image.getAttribute("TileSize"));
             d.overlap = image.hasAttribute("Overlap") ? Integer.parseInt(image.getAttribute("Overlap")) : 0;
             String fmt = image.getAttribute("Format");
-            d.format = (fmt == null || fmt.isBlank()) ? "jpeg" : fmt.toLowerCase();
+            d.format = (fmt == null || fmt.isBlank()) ? "jpeg" : fmt.toLowerCase(Locale.ROOT);
             // Format is concatenated into a tile path, and LocalSource resolves that path segment
             // by segment -- so an descriptor carrying "../../etc/passwd" would escape the tile
             // directory. A real tile extension is alphanumeric; anything else is a broken or
@@ -373,8 +381,7 @@ public class DziImageServer extends AbstractTileableImageServer {
         BufferedImage img = ImageIO.read(new ByteArrayInputStream(bytes));
         if (img == null)
             throw new IOException("Unsupported or corrupt DZI tile: " + relative);
-        if (tinyCache.size() < 8)
-            tinyCache.put(relative, img);
+        tinyCache.put(relative, img);
         return img;
     }
 

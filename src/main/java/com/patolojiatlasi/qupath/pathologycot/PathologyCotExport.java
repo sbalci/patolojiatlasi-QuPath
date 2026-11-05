@@ -202,7 +202,7 @@ public final class PathologyCotExport {
     private static String taskText(AtlasQuiz quiz) {
         String title = quiz == null ? null : quiz.getTitle();
         String base = (title == null || title.isBlank()) ? "bu vaka" : title;
-        return "Görev: \"" + base + "\" slaydını incele. Küçük resimde işaretlenen "
+        return "Görev: \"" + base + "\" slaytını incele. Küçük resimde işaretlenen "
                 + "<inspect>/<peek> bölgelerini sırayla incele, her biri için gözlemini gerekçelendir, "
                 + "ardından kaydedilen tanı/kararı <conclusion></conclusion> etiketiyle bildir.";
     }

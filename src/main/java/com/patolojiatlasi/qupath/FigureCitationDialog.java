@@ -94,7 +94,7 @@ public final class FigureCitationDialog {
         stage.setTitle("Bu bölgeyi alıntıla — " + c.getTitle());
 
         TextField captionField = new TextField();
-        captionField.setPromptText("Şekil açıklaması (opsiyonel)…");
+        captionField.setPromptText("Şekil açıklaması (isteğe bağlı)…");
 
         TextArea textArea = new TextArea();
         textArea.setEditable(false);

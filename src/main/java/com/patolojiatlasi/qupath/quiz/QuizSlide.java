@@ -59,8 +59,13 @@ public final class QuizSlide {
                 DziImageServer server = new DziImageServer(URI.create(slideUrl));
                 ImageData<BufferedImage> imageData = new ImageData<>(server, inferType(slideUrl));
                 Platform.runLater(() -> {
-                    if (stillWanted != null && !stillWanted.getAsBoolean())
+                    if (stillWanted != null && !stillWanted.getAsBoolean()) {
+                        try {
+                            server.close();
+                        } catch (Exception ignored) {
+                        }
                         return;
+                    }
                     try {
                         qupath.getViewer().setImageData(imageData);
                         onDone.run();
@@ -112,8 +117,13 @@ public final class QuizSlide {
                 ImageServer<BufferedImage> server = ImageServers.buildServer(URI.create(uri));
                 ImageData<BufferedImage> imageData = new ImageData<>(server, ImageData.ImageType.OTHER);
                 Platform.runLater(() -> {
-                    if (stillWanted != null && !stillWanted.getAsBoolean())
+                    if (stillWanted != null && !stillWanted.getAsBoolean()) {
+                        try {
+                            server.close();
+                        } catch (Exception ignored) {
+                        }
                         return;
+                    }
                     try {
                         qupath.getViewer().setImageData(imageData);
                         onDone.run();

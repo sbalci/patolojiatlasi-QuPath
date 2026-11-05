@@ -42,9 +42,14 @@ public final class BlindedResearch {
         Boolean decisionPromptOnLeave;
 
         Sidecar(String schema, boolean blindedTracking, boolean consented) {
+            this(schema, blindedTracking, consented, null);
+        }
+
+        Sidecar(String schema, boolean blindedTracking, boolean consented, Boolean decisionPromptOnLeave) {
             this.schema = schema;
             this.blindedTracking = blindedTracking;
             this.consented = consented;
+            this.decisionPromptOnLeave = decisionPromptOnLeave;
         }
     }
 
@@ -87,11 +92,12 @@ public final class BlindedResearch {
     // and used internally by the Project-taking overloads above; no other caller needs them.
 
     /** Write (or update) the sidecar in {@code dir}, setting {@code blindedTracking}. Preserves
-     *  any existing {@code consented} value. Fail-soft: logs and returns on write failure. */
+     *  any existing {@code consented} and {@code decisionPromptOnLeave} values. Fail-soft: logs and returns on write failure. */
     public static void writeFlag(File dir, boolean blinded) {
         Sidecar existing = read(dir);
         boolean consented = existing != null && existing.consented;
-        write(dir, new Sidecar(SCHEMA, blinded, consented));
+        Boolean decisionPromptOnLeave = existing != null ? existing.decisionPromptOnLeave : null;
+        write(dir, new Sidecar(SCHEMA, blinded, consented, decisionPromptOnLeave));
     }
 
     /** Whether the sidecar in {@code dir} has {@code blindedTracking} set. Missing/corrupt -> false. */
@@ -121,11 +127,12 @@ public final class BlindedResearch {
         }
     }
 
-    /** Mark the sidecar in {@code dir} as consented, preserving its {@code blindedTracking} value. */
+    /** Mark the sidecar in {@code dir} as consented, preserving its {@code blindedTracking} and {@code decisionPromptOnLeave} values. */
     static void markConsented(File dir) {
         Sidecar existing = read(dir);
         boolean blinded = existing != null && existing.blindedTracking;
-        write(dir, new Sidecar(SCHEMA, blinded, true));
+        Boolean decisionPromptOnLeave = existing != null ? existing.decisionPromptOnLeave : null;
+        write(dir, new Sidecar(SCHEMA, blinded, true, decisionPromptOnLeave));
     }
 
     /** Whether the sidecar in {@code dir} has {@code consented} set. Missing/corrupt -> false. */

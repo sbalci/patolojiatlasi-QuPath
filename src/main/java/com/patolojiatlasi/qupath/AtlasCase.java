@@ -115,6 +115,77 @@ public class AtlasCase {
         return base;
     }
 
+    /**
+     * Bilingual Turkish-first display title for UI lists and trees, while keeping {@link #getTitle()}
+     * English-first for citations and manifests.
+     */
+    public String getDisplayTitle() {
+        String base;
+        if (!titleTR.isBlank() && !titleEN.isBlank() && !titleTR.equalsIgnoreCase(titleEN)) {
+            base = titleTR + " (" + titleEN + ")";
+        } else if (!titleTR.isBlank()) {
+            base = titleTR;
+        } else {
+            return getTitle();
+        }
+        if (!image.isBlank() && !image.equalsIgnoreCase("HE")) {
+            String a = alnum(base);
+            String b = alnum(image);
+            if (!b.isEmpty() && !a.contains(b))
+                base = base + " — " + image;
+        }
+        return base;
+    }
+
+    /**
+     * Normalizes a string for Turkish/English case- and diacritic-insensitive search.
+     */
+    public static String normalizeSearch(String s) {
+        if (s == null || s.isBlank())
+            return "";
+        String lower = s.replace('İ', 'i').replace('I', 'i').replace('ı', 'i')
+                .toLowerCase(Locale.forLanguageTag("tr"))
+                .toLowerCase(Locale.ROOT);
+        StringBuilder sb = new StringBuilder(lower.length());
+        for (int i = 0; i < lower.length(); i++) {
+            char ch = lower.charAt(i);
+            sb.append(switch (ch) {
+                case 'ı', 'î' -> 'i';
+                case 'ğ' -> 'g';
+                case 'ü', 'û' -> 'u';
+                case 'ş' -> 's';
+                case 'ö' -> 'o';
+                case 'ç' -> 'c';
+                case 'â' -> 'a';
+                default -> ch;
+            });
+        }
+        return sb.toString();
+    }
+
+    /**
+     * True if this case matches {@code rawQuery} across Turkish and English titles, descriptions,
+     * repository slug, organ, speciality, stain/image name, or category.
+     */
+    public boolean matchesQuery(String rawQuery) {
+        if (rawQuery == null || rawQuery.isBlank())
+            return true;
+        String q = normalizeSearch(rawQuery.trim());
+        if (q.isEmpty())
+            return true;
+        return normalizeSearch(titleTR).contains(q)
+                || normalizeSearch(titleEN).contains(q)
+                || normalizeSearch(descriptionTR).contains(q)
+                || normalizeSearch(descriptionEN).contains(q)
+                || normalizeSearch(reponame).contains(q)
+                || normalizeSearch(organEN).contains(q)
+                || normalizeSearch(speciality).contains(q)
+                || normalizeSearch(image).contains(q)
+                || normalizeSearch(stainname).contains(q)
+                || normalizeSearch(getCategory()).contains(q)
+                || normalizeSearch(getDisplayTitle()).contains(q);
+    }
+
     public String getCategory() {
         String cat = AtlasCatalog.normalizeCategory(speciality, organEN, titleEN, reponame);
         if (cat.equals("Uncategorized") && AtlasCatalog.looksLikeStain(image, stainname))
@@ -198,7 +269,7 @@ public class AtlasCase {
     }
 
     private static String alnum(String s) {
-        return s.toLowerCase().replaceAll("[^a-z0-9]", "");
+        return s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
     }
 
     private static String prettify(String slug) {

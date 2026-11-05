@@ -65,7 +65,7 @@ public final class ReferencePickerDialog {
             @Override
             protected void updateItem(AtlasCase item, boolean empty) {
                 super.updateItem(item, empty);
-                setText(empty || item == null ? null : item.getTitle());
+                setText(empty || item == null ? null : item.getDisplayTitle());
             }
         });
         listView.getSelectionModel().selectedItemProperty()
@@ -90,13 +90,10 @@ public final class ReferencePickerDialog {
         return stage;
     }
 
-    /** Case-insensitive substring filter over title, organ (English) and stain/image basename. */
+    /** Case- and diacritic-insensitive substring filter over Turkish/English case fields. */
     private void applyFilter(String text) {
-        String f = text == null ? "" : text.trim().toLowerCase();
-        filtered.setPredicate(c -> f.isEmpty()
-                || c.getTitle().toLowerCase().contains(f)
-                || c.getOrganEN().toLowerCase().contains(f)
-                || c.getImage().toLowerCase().contains(f));
+        String f = text == null ? "" : text.trim();
+        filtered.setPredicate(c -> f.isEmpty() || c.matchesQuery(f));
     }
 
     private void openSelected() {

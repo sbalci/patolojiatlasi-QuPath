@@ -133,7 +133,7 @@ public final class CoverageDashboard {
         exportRow.setStyle("-fx-alignment: center-left;");
 
         Label footerNote = new Label(
-                "Sınıflandırma anahtar-kelime sezgiseldir; 'Diğer'/'Uncategorized' dürüst artık kovalardır.");
+                "Sınıflandırma anahtar kelimelere dayalıdır; otomatik eşleşmeyen vakalar 'Diğer' ve 'Uncategorized' altında toplanır.");
         footerNote.setWrapText(true);
         footerNote.setStyle("-fx-font-size: 11px; -fx-text-fill: #666666;");
 
@@ -166,7 +166,7 @@ public final class CoverageDashboard {
         catCol.setPrefWidth(220);
 
         TableColumn<CategoryRow, Number> heCol = bucketColumn("H&E", StainBucket.HE);
-        TableColumn<CategoryRow, Number> ihcCol = bucketColumn("IHK", StainBucket.IHC);
+        TableColumn<CategoryRow, Number> ihcCol = bucketColumn("İHK", StainBucket.IHC);
         TableColumn<CategoryRow, Number> specialCol = bucketColumn("Özel boya", StainBucket.SPECIAL);
         TableColumn<CategoryRow, Number> otherCol = bucketColumn("Diğer", StainBucket.OTHER);
 
@@ -230,7 +230,7 @@ public final class CoverageDashboard {
         int col = 0;
         grid.add(new Label("TOPLAM"), col++, 0);
         grid.add(new Label("H&E=" + m.colTotals()[StainBucket.HE.ordinal()]), col++, 0);
-        grid.add(new Label("IHK=" + m.colTotals()[StainBucket.IHC.ordinal()]), col++, 0);
+        grid.add(new Label("İHK=" + m.colTotals()[StainBucket.IHC.ordinal()]), col++, 0);
         grid.add(new Label("Özel boya=" + m.colTotals()[StainBucket.SPECIAL.ordinal()]), col++, 0);
         grid.add(new Label("Diğer=" + m.colTotals()[StainBucket.OTHER.ordinal()]), col++, 0);
         grid.add(new Label("Slayt=" + m.totalSlides()), col++, 0);

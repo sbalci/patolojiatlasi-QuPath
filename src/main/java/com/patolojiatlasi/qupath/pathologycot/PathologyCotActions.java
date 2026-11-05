@@ -126,14 +126,11 @@ public final class PathologyCotActions {
 
             AtlasQuizIO.write(draft, draftFile);
 
-            QuizAuthorWindow.show(qupath);
-            // QuizAuthorWindow has no public "load a pack from File" entry point (only its own
-            // "Aç…" FileChooser button) -- so rather than reach into its internals, tell the
-            // reader the exact path to open there themselves.
-            showInfo(qupath, "Taslak kaydedildi: " + draftFile.getAbsolutePath()
+            QuizAuthorWindow.showAndLoad(qupath, draftFile);
+            showInfo(qupath, "Taslak kaydedildi ve düzenleme penceresinde açıldı: " + draftFile.getAbsolutePath()
                     + "\nDavranış sözlüğü (behaviors): " + behaviorsFile.getAbsolutePath()
-                    + "\n\nAçılan \"Sınav/quiz hazırla\" penceresinde \"Aç…\" ile bu taslağı yükleyin ve "
-                    + "her durak için gerekçeyi (neden baktım / ne gördüm) girip kaydedin.");
+                    + "\n\nAçılan \"Sınav/quiz hazırla\" penceresinde her durak için gerekçeyi "
+                    + "(neden baktım / ne gördüm) girip \"Kaydet…\" ile kaydedin.");
         } catch (Exception ex) {
             logger.warn("Pathology-CoT draft creation failed: {}", message(ex), ex);
             showError(qupath, "CoT taslağı oluşturulamadı:\n\n" + message(ex));
@@ -183,22 +180,35 @@ public final class PathologyCotActions {
             PathologyCotIO.writeBehaviors(behaviorsFile, fragment, behaviors);
             AtlasQuizIO.write(draft, draftFile);
 
-            QuizAuthorWindow.show(qupath);
-            showInfo(qupath, "Taslak kaydedildi: " + draftFile.getAbsolutePath()
+            QuizAuthorWindow.showAndLoad(qupath, draftFile);
+            showInfo(qupath, "Taslak kaydedildi ve düzenleme penceresinde açıldı: " + draftFile.getAbsolutePath()
                     + "\nDavranış sözlüğü (behaviors): " + behaviorsFile.getAbsolutePath()
                     + "\n\n" + behaviors.size() + " durak bulundu."
-                    + "\n\nAçılan \"Sınav/quiz hazırla\" penceresinde \"Aç…\" ile bu taslağı yükleyin ve "
-                    + "her durak için gerekçeyi (neden baktım / ne gördüm) girip kaydedin.");
+                    + "\n\nAçılan \"Sınav/quiz hazırla\" penceresinde her durak için gerekçeyi "
+                    + "(neden baktım / ne gördüm) girip \"Kaydet…\" ile kaydedin.");
         } catch (Exception ex) {
             logger.warn("Pathology-CoT draft from take failed: {}", message(ex), ex);
             showError(qupath, "CoT taslağı oluşturulamadı:\n\n" + message(ex));
         }
     }
 
-    /** "CoT taslağını gözden geçir…": thin convenience — the tour author already loads/saves packs. */
+    /** "CoT taslağını gözden geçir…": pick a CoT draft JSON and open it directly in the tour author. */
     public static void reviewDraft(QuPathGUI qupath) {
         try {
-            QuizAuthorWindow.show(qupath);
+            FileChooser fc = new FileChooser();
+            fc.setTitle("CoT taslağını seç");
+            fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("Quiz pack (*.json)", "*.json"));
+            File cotRoot = CotRecordingIO.defaultRoot();
+            File focusDir = atlasFocusDirOrNull(qupath);
+            if (cotRoot != null && cotRoot.isDirectory())
+                fc.setInitialDirectory(cotRoot);
+            else if (focusDir != null)
+                fc.setInitialDirectory(focusDir);
+            File file = fc.showOpenDialog(qupath.getStage());
+            if (file != null)
+                QuizAuthorWindow.showAndLoad(qupath, file);
+            else
+                QuizAuthorWindow.show(qupath);
         } catch (Exception ex) {
             logger.warn("Could not open the Pathology-CoT draft reviewer: {}", message(ex), ex);
             showError(qupath, "Gözden geçirme penceresi açılamadı:\n\n" + message(ex));

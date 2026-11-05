@@ -60,7 +60,7 @@ görmek nasıl baktığınızı değiştirir). Doğal çalışın.
 > belirten bir bilgi yazmayın** (hasta adı, protokol/dosya numarası) — geometri anonimdir, ancak
 > yazdığınız serbest metin olduğu gibi saklanır.
 
-> ⚠️ **Çalışmanız bir tanı/karar girmenizi istiyorsa,** bir slaydı bitirdiğinizde otomatik
+> ⚠️ **Çalışmanız bir tanı/karar girmenizi istiyorsa,** bir slaytı bitirdiğinizde otomatik
 > sorulabilir, ya da kendiniz **Extensions ▸ Araştırma ▸ Odak ısı haritası ▸ Bu slayt için
 > tanı/karar gir…** yolunu açabilirsiniz — serbest metin bir tanı ve isteğe bağlı 1–5 güven
 > derecesi girersiniz. Tanı alanına **kimlik belirten bir bilgi yazmayın** (hasta adı, protokol/
@@ -109,20 +109,20 @@ Dağıttığınız zip'e şunları koyun (küçük tutun — aşağıdaki slayt 
 ### Slaytlar — proje zip'ini küçük tutun
 
 - **Atlas slaytları (bugün çalışır):** projeyi atlas tarayıcısından oluşturun
-  (`Extensions ▸ Patoloji Atlası ▸ Slaytlara gözat… ▸ Create project…`) ve **"Araştırma projesi —
+  (`Extensions ▸ Patoloji Atlası ▸ Slaytlara göz at… ▸ Proje oluştur…`) ve **"Araştırma projesi —
   gezinme kaydı (blinded)"** kutusunu işaretleyin. Girdiler **DZI URL**'leridir; proje zip'i çok
   küçük olur ve slaytlar alıcının makinesinde akış olarak gelir (eklenti + internet gerekir).
 - **Kendi yerel slaytlarınız (SVS vb.):** proje oluşturucu yalnızca atlas içindir; bu yüzden
   slaytlarınızdan **normal bir QuPath projesi** kurun, sonra iki yoldan biriyle araştırma projesi
   olarak işaretleyin:
   - **Tek tık (önerilen):** proje açıkken **Extensions ▸ Araştırma ▸ "Mevcut projeyi araştırma
-    projesi yap (gezinme kaydı)…"** sidecar'ı sizin için yazar, bir kez onaylar ve bu oturumda da
+    projesi yap (gezinme kaydı)…"** proje ayar dosyasını (`atlas-research.json`) sizin için yazar, bir kez onaylar ve bu oturumda da
     kaydı hemen başlatır.
   - **Elle:** proje klasörüne kendiniz bir `atlas-research.json` dosyası ekleyin:
     ```json
     { "schema": "atlas-research/1", "blindedTracking": true, "consented": false }
     ```
-  Her iki yolda da eklentinin proje-açılış kancası sidecar'ı slayt kaynağından bağımsız okur; kayıt
+  Her iki yolda da eklentinin proje-açılış kancası proje ayar dosyasını (`atlas-research.json`) slayt kaynağından bağımsız okur; kayıt
   her açılışta başlar. **Slayt dosyalarını ayrıca gönderin** (büyüktürler — projeye sıkıştırmak
   pratik değildir); alıcılar açarken yeniden bağlar.
 
@@ -165,17 +165,17 @@ Bir okuyucuya, tam işe başlarken izlendiğini söylemek **nasıl baktığını
   yolu; hızlı bakış için `tools/quicklook-blinded-focus.py`. Etiketlerde ad değil **koşul kodu**
   (`--labels sessionId,label`) kullanın.
 - Kayıt beş boyutu yakalar: **uzamsal** (odak ızgarası, sıcak noktalar, örtüşme), **zamansal**
-  (bekleme-ms + toplam süre, boşta-geçen süre), **yakınlaştırma** (büyütme bantları, tarama vs.
-  delme), **yörünge** (sıralı gezinme yolu, şema/3: dönüş açısı, fiksasyon, DTW) ve **fare/imleç**
+  (bekleme-ms + toplam süre, boşta-geçen süre), **yakınlaştırma** (büyütme bantları, genel tarama ve
+  yakın odaklanma), **yörünge** (sıralı gezinme yolu, şema/3: dönüş açısı, fiksasyon, DTW) ve **fare/imleç**
   (şema/5: imleç eşleşmesi, fare-bekleme uyumu). Zenginleştirilmiş ölçüt kümesi (boşta-süre-hariç-
-  tutma uyarıları, fiksasyon/DTW/fare-uyum çıktıları, kanonik-vs-tersil büyütme-bandı anahtarı vb.)
+  tutma uyarıları, fiksasyon/DTW/fare-uyum çıktıları, standart veya üçte birlik (tersil) büyütme dilimi seçeneği vb.)
   [`analysis/python/README.md`](analysis/python/README.md) /
   [`analysis/R/README.md`](analysis/R/README.md) içinde "Phase 3 enrichment" bölümünde
   belgelenmiştir — eski çıktıyla yeni çıktıyı karşılaştırmadan önce okuyun.
 
 #### Çalışmanız slayt-başı tanı kaydediyorsa — iki geçişli elle-notlandırma iş akışı
 
-Kaydedilen tanı her zaman **serbest metindir**; hiçbir şey otomatik notlandırmaz (eşanlamlı
+Kaydedilen tanı her zaman **serbest metindir**; hiçbir şey otomatik notlandırmaz (eş anlamlı
 eşleştirme yok, cevap anahtarıyla metin karşılaştırması yok). Notlandırma, bilinçli, elle yapılan
 ikinci bir geçiştir:
 

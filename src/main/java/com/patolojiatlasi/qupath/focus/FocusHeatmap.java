@@ -94,6 +94,10 @@ public final class FocusHeatmap {
     // point UPLOAD_ENDPOINT at the receiver.
     private static final boolean UPLOAD_ENABLED = false;
     private static final String UPLOAD_ENDPOINT = "";
+    private static final java.net.http.HttpClient UPLOAD_HTTP = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(5))
+            .followRedirects(java.net.http.HttpClient.Redirect.NORMAL)
+            .build();
     private static final String CONTRIBUTION_SCHEMA = "atlas-focus-contribution/1";
     /**
      * Blinded (research) recording schema: same anonymised shape, but {@code grid} holds real dwell
@@ -519,9 +523,11 @@ public final class FocusHeatmap {
         if (pendingDecisionSave)
             return;
         if (!blindedRecording || currentMap == null) {
-            new Alert(Alert.AlertType.INFORMATION,
-                    "Karar kaydı yalnızca gezinme kaydı açık ve bir slayt açıkken kullanılabilir.")
-                    .showAndWait();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION,
+                    "Karar kaydı yalnızca gezinme kaydı açık ve bir slayt açıkken kullanılabilir.");
+            if (qupath != null && qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
             return;
         }
         String header = currentSlide == null ? "Bu slayt" : "Bu slayt: " + currentSlide;
@@ -1147,7 +1153,10 @@ public final class FocusHeatmap {
 
     private void saveDialog() {
         if (currentMap == null || currentMap.isEmpty()) {
-            new Alert(Alert.AlertType.INFORMATION, "Henüz odak verisi yok — önce izlemeyi açın.").showAndWait();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Henüz odak verisi yok — önce izlemeyi açın.");
+            if (qupath != null && qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
             return;
         }
         DirectoryChooser dc = new DirectoryChooser();
@@ -1212,7 +1221,10 @@ public final class FocusHeatmap {
         if (currentMapBlinded)
             return;
         if (currentMap == null || currentMap.isEmpty()) {
-            new Alert(Alert.AlertType.INFORMATION, "Henüz odak verisi yok — önce izlemeyi açın.").showAndWait();
+            Alert alert = new Alert(Alert.AlertType.INFORMATION, "Henüz odak verisi yok — önce izlemeyi açın.");
+            if (qupath != null && qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
             return;
         }
         final String json = buildContributionJson(currentUri, currentMap);
@@ -1224,10 +1236,12 @@ public final class FocusHeatmap {
         if (UPLOAD_ENABLED && !UPLOAD_ENDPOINT.isBlank()) {
             uploadAsync(json);
         } else {
-            new Alert(Alert.AlertType.INFORMATION,
+            Alert alert = new Alert(Alert.AlertType.INFORMATION,
                     "Katkınız yerel olarak (anonim) kaydedildi:\n" + file
-                    + "\n\nAtlas sunucusu henüz hazır değil; paylaşım açıldığında bu dosyayı gönderebilirsiniz.")
-                    .showAndWait();
+                    + "\n\nAtlas sunucusu henüz hazır değil; paylaşım açıldığında bu dosyayı gönderebilirsiniz.");
+            if (qupath != null && qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
+            alert.showAndWait();
         }
     }
 
@@ -1451,13 +1465,13 @@ public final class FocusHeatmap {
     private void uploadAsync(String json) {
         Thread t = new Thread(() -> {
             try {
-                var client = java.net.http.HttpClient.newHttpClient();
                 var req = java.net.http.HttpRequest.newBuilder(java.net.URI.create(UPLOAD_ENDPOINT))
+                        .timeout(java.time.Duration.ofSeconds(10))
                         .header("Content-Type", "application/json")
                         .POST(java.net.http.HttpRequest.BodyPublishers.ofString(json,
                                 java.nio.charset.StandardCharsets.UTF_8))
                         .build();
-                client.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
+                UPLOAD_HTTP.send(req, java.net.http.HttpResponse.BodyHandlers.ofString());
                 logger.info("Uploaded focus contribution to {}", UPLOAD_ENDPOINT);
             } catch (Exception e) {
                 logger.error("Focus contribution upload failed: {}", e.getMessage());

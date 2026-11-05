@@ -32,9 +32,9 @@ oluşturun, sonra slaytı yeniden ekleyin"*.
 **A2. Open the slide.** With a project open, either route adds it automatically:
 
 - *If you have the case repo cloned* — the easiest path, because the export dialog then opens in the
-  right folder: `Extensions → Patoloji Atlası → Yerel DZI aç…`, and pick e.g.
+  right folder: `Extensions → Patoloji Atlası → Bilgisayardan DZI slaytı aç…`, and pick e.g.
   `lymphocytic-gastritis/HE.dzi`.
-- *Otherwise*: `Slaytlara gözat…`, find the case, and open the slide from the atlas. Coordinates are
+- *Otherwise*: `Slaytlara göz at…`, find the case, and open the slide from the atlas. Coordinates are
   identical either way, so you can annotate the streamed slide and add the one file to the
   repository afterwards without ever cloning tens of thousands of tiles.
 
@@ -63,7 +63,7 @@ properties*). Fill in:
 - **Description** *(optional)* — becomes the button's tooltip, split on `|` the same way.
 
 If you leave the name empty the annotation's classification is used instead; if there is no
-classification either, the region is labelled `Bolge` and nobody can tell what it is.
+classification either, the region is labelled `Bölge` and nobody can tell what it is.
 
 **A5. Export.** `Extensions → Patoloji Atlası → Bölgeler → Bölgeleri dışa aktar…`.
 

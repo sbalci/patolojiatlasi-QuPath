@@ -4,6 +4,7 @@ import java.awt.image.BufferedImage;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,6 +75,6 @@ public class DziImageServerBuilder implements ImageServerBuilder<BufferedImage> 
                 || scheme.equalsIgnoreCase("https")
                 || scheme.equalsIgnoreCase("file");
         // High confidence for .dzi URLs so this builder is preferred.
-        return (supported && path.toLowerCase().endsWith(".dzi")) ? 4f : 0f;
+        return (supported && path.toLowerCase(Locale.ROOT).endsWith(".dzi")) ? 4f : 0f;
     }
 }

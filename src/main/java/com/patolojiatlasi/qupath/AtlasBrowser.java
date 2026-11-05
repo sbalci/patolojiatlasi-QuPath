@@ -60,7 +60,7 @@ public class AtlasBrowser {
     private final QuPathGUI qupath;
     private final TreeView<Object> tree = new TreeView<>();
     private final TextField searchField = new TextField();
-    private final CheckBox publishedOnly = new CheckBox("Published only");
+    private final CheckBox publishedOnly = new CheckBox("Yalnızca yayımlanmış vakalar");
     private final Label status = new Label();
     private final ProgressIndicator progress = new ProgressIndicator();
     private final ImageView thumbView = new ImageView();
@@ -73,8 +73,8 @@ public class AtlasBrowser {
     // Persistent selection basket, deduped by AtlasCase (DZI URL). Independent of the tree,
     // so it survives search/filter/refresh. Touched only on the JavaFX thread.
     private final java.util.LinkedHashSet<AtlasCase> selection = new java.util.LinkedHashSet<>();
-    private final Label selectionCount = new Label("0 selected");
-    private final Button createProjectBtn = new Button("Create project…");
+    private final Label selectionCount = new Label("Sepette: 0");
+    private final Button createProjectBtn = new Button("Proje oluştur…");
 
     // Favorites are a fixed-path collection persisted at Favorites.collectionsDir(); loaded once
     // per browser window. Loading is itself fail-soft (see Favorites.load()), so this never
@@ -107,13 +107,13 @@ public class AtlasBrowser {
         if (atlasIconUrl != null)
             s.getIcons().add(new Image(atlasIconUrl.toExternalForm()));
 
-        searchField.setPromptText("Search cases…");
+        searchField.setPromptText("Vaka, tanı, organ veya boya ara…");
         searchField.textProperty().addListener((obs, old, txt) -> rebuildTree());
         publishedOnly.setSelected(false);
         publishedOnly.selectedProperty().addListener((obs, old, v) -> rebuildTree());
 
-        Button refreshBtn = new Button("Refresh list");
-        refreshBtn.setTooltip(new javafx.scene.control.Tooltip("Fetch the latest list.yaml from GitHub"));
+        Button refreshBtn = new Button("Listeyi güncelle");
+        refreshBtn.setTooltip(new javafx.scene.control.Tooltip("İnternetten en güncel Patoloji Atlası vaka listesini indirir"));
         refreshBtn.setOnAction(e -> refreshFromList(refreshBtn));
 
         progress.setVisible(false);
@@ -137,7 +137,7 @@ public class AtlasBrowser {
                     return;
                 }
                 if (item instanceof AtlasCase c)
-                    setText((favorites.contains(c) ? "★ " : "") + c.toString());
+                    setText((favorites.contains(c) ? "★ " : "") + c.getDisplayTitle());
                 else
                     setText(item.toString());
             }
@@ -148,7 +148,7 @@ public class AtlasBrowser {
         });
         tree.getSelectionModel().selectedItemProperty().addListener((obs, old, sel) -> updatePreview());
 
-        MenuItem addToSelectionItem = new MenuItem("Add to selection");
+        MenuItem addToSelectionItem = new MenuItem("Seçim sepetine ekle");
         addToSelectionItem.setOnAction(e -> addToSelection());
         MenuItem referenceItem = new MenuItem("Referans olarak yanında aç");
         referenceItem.setOnAction(e -> openAsReference());
@@ -179,14 +179,19 @@ public class AtlasBrowser {
         SplitPane split = new SplitPane(tree, preview);
         split.setDividerPositions(0.62);
 
-        Button openBtn = new Button("Open in QuPath");
+        Button openBtn = new Button("QuPath'te aç");
+        openBtn.setTooltip(new javafx.scene.control.Tooltip(
+                "Seçili slaytı QuPath görüntüleyicisinde açar (listede çift tıklama ile aynı)"));
         openBtn.setOnAction(e -> openSelected());
-        Button addSelBtn = new Button("Add to selection");
+        Button addSelBtn = new Button("Sepete ekle");
+        addSelBtn.setTooltip(new javafx.scene.control.Tooltip(
+                "Birden fazla slayttan proje veya ders seti oluşturmak için sepete ekler"));
         addSelBtn.setOnAction(e -> addToSelection());
-        Button webBtn = new Button("Copy web link");
+        Button webBtn = new Button("Web bağlantısını kopyala");
         webBtn.setOnAction(e -> copyWebLink());
-        Button aboutBtn = new Button("About");
-        aboutBtn.setTooltip(new javafx.scene.control.Tooltip("About this extension and the atlas websites"));
+        Button aboutBtn = new Button("Hakkında");
+        aboutBtn.setTooltip(new javafx.scene.control.Tooltip(
+                "Eklenti ve Patoloji Atlası web siteleri hakkında bilgi"));
         aboutBtn.setOnAction(e -> showAbout());
 
         createProjectBtn.setDisable(true);
@@ -208,8 +213,13 @@ public class AtlasBrowser {
         status.setMaxWidth(Double.MAX_VALUE);
         HBox.setHgrow(status, Priority.ALWAYS);
 
-        HBox bottom = new HBox(6, openBtn, addSelBtn, webBtn, selectionCount, createProjectBtn,
-                saveCollBtn, loadCollBtn, loadFavBtn, status, aboutBtn);
+        Region row1Spacer = new Region();
+        HBox.setHgrow(row1Spacer, Priority.ALWAYS);
+        HBox row1 = new HBox(6, openBtn, addSelBtn, createProjectBtn, selectionCount, webBtn, row1Spacer, aboutBtn);
+        row1.setStyle("-fx-alignment: center-left;");
+        HBox row2 = new HBox(6, saveCollBtn, loadCollBtn, loadFavBtn, status);
+        row2.setStyle("-fx-alignment: center-left;");
+        VBox bottom = new VBox(6, row1, row2);
         bottom.setPadding(new Insets(8));
 
         BorderPane root = new BorderPane();
@@ -219,7 +229,7 @@ public class AtlasBrowser {
 
         allCases = AtlasCatalog.loadBundled();
         rebuildTree();
-        status.setText(allCases.size() + " images (bundled snapshot)");
+        status.setText(allCases.size() + " slayt (yerleşik katalog)");
 
         s.setScene(new Scene(root, 860, 660));
         s.setOnHidden(e -> stage = null);
@@ -233,14 +243,14 @@ public class AtlasBrowser {
      */
     private void showAbout() {
         Label desc = new Label(
-                "Browse whole-slide images published on the Patoloji Atlası and open them "
-                + "directly in QuPath. Slides are streamed tile-by-tile as Deep Zoom (DZI) "
-                + "pyramids, so there is nothing to download in advance.\n\n"
-                + "The images belong to the atlas and are shared for viewing and study.");
+                "Patoloji Atlası'nda yayımlanan dijital tam slayt görüntülerini (WSI) doğrudan QuPath "
+                + "içinde tarayın ve açın. Slaytlar Deep Zoom (DZI) piramitleri olarak karo karo "
+                + "akışla yüklenir; önceden büyük dosya indirmeniz gerekmez.\n\n"
+                + "Görüntüler Patoloji Atlası koleksiyonuna aittir ve eğitim/inceleme amacıyla paylaşılmaktadır.");
         desc.setWrapText(true);
         desc.setMaxWidth(440);
 
-        Label sitesHeader = new Label("Websites");
+        Label sitesHeader = new Label("Web siteleri");
         sitesHeader.setStyle("-fx-font-weight: bold;");
 
         Hyperlink trLink = new Hyperlink("patolojiatlasi.com  —  Türkçe");
@@ -252,8 +262,8 @@ public class AtlasBrowser {
         content.setPadding(new Insets(4));
 
         Alert alert = new Alert(Alert.AlertType.INFORMATION);
-        alert.setTitle("About");
-        alert.setHeaderText("QuPath Patoloji Atlası extension");
+        alert.setTitle("Hakkında");
+        alert.setHeaderText("QuPath Patoloji Atlası eklentisi");
         alert.getDialogPane().setContent(content);
         if (stage != null)
             alert.initOwner(stage);
@@ -261,7 +271,7 @@ public class AtlasBrowser {
     }
 
     private void rebuildTree() {
-        String f = searchField.getText() == null ? "" : searchField.getText().trim().toLowerCase();
+        String f = searchField.getText() == null ? "" : searchField.getText().trim();
         boolean pubOnly = publishedOnly.isSelected();
         TreeItem<Object> root = new TreeItem<>("Atlas");
         Map<String, List<AtlasCase>> grouped = AtlasCatalog.groupByCategory(allCases);
@@ -271,11 +281,7 @@ public class AtlasBrowser {
             for (AtlasCase c : entry.getValue()) {
                 if (pubOnly && !c.isPublished())
                     continue;
-                if (f.isEmpty()
-                        || c.getTitle().toLowerCase().contains(f)
-                        || c.getReponame().toLowerCase().contains(f)
-                        || c.getOrganEN().toLowerCase().contains(f)
-                        || c.getCategory().toLowerCase().contains(f)) {
+                if (f.isEmpty() || c.matchesQuery(f)) {
                     catItem.getChildren().add(new TreeItem<>(c));
                     shown++;
                 }
@@ -287,7 +293,7 @@ public class AtlasBrowser {
         }
         tree.setRoot(root);
         if (!f.isEmpty() || pubOnly)
-            status.setText(shown + " images shown");
+            status.setText(shown + " slayt gösteriliyor");
     }
 
     private AtlasCase getSelectedCase() {
@@ -309,13 +315,13 @@ public class AtlasBrowser {
             descriptionScroll.setManaged(false);
             return;
         }
-        infoLabel.setText(c.getTitle()
-                + "\n\nCategory: " + c.getCategory()
+        infoLabel.setText(c.getDisplayTitle()
+                + "\n\nKategori: " + c.getCategory()
                 + (c.getOrganEN().isBlank() ? "" : "\nOrgan: " + c.getOrganEN())
-                + (c.getSpeciality().isBlank() ? "" : "\nSpeciality: " + c.getSpeciality())
-                + "\nStain: " + c.getImage()
-                + (c.getMpp() > 0 ? "\nmpp: " + String.format(Locale.US, "%.4f", c.getMpp()) + " µm/px" : "")
-                + "\n" + (c.isPublished() ? "Published" : "Unpublished"));
+                + (c.getSpeciality().isBlank() ? "" : "\nAlt dal: " + c.getSpeciality())
+                + "\nBoya: " + c.getImage()
+                + (c.getMpp() > 0 ? "\nPiksel boyutu: " + String.format(Locale.US, "%.4f", c.getMpp()) + " µm/px" : "")
+                + "\n" + (c.isPublished() ? "Yayımlanmış" : "Taslak"));
         String description = c.getDescription();
         boolean hasDescription = !description.isBlank();
         descriptionLabel.setText(description);
@@ -336,25 +342,25 @@ public class AtlasBrowser {
     private void copyWebLink() {
         AtlasCase c = getSelectedCase();
         if (c == null) {
-            status.setText("Select a case first");
+            status.setText("Önce listeden bir vaka seçin");
             return;
         }
         var content = new javafx.scene.input.ClipboardContent();
         content.putString(c.getViewerUrl());
         javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);
-        status.setText("Copied: " + c.getViewerUrl());
+        status.setText("Panoya kopyalandı: " + c.getViewerUrl());
     }
 
     private void addToSelection() {
         AtlasCase c = getSelectedCase();
         if (c == null) {
-            status.setText("Select a case first");
+            status.setText("Önce listeden bir vaka seçin");
             return;
         }
         if (selection.add(c))
-            status.setText("Added to selection: " + c.getTitle());
+            status.setText("Seçim sepetine eklendi: " + c.getDisplayTitle());
         else
-            status.setText("Already in selection: " + c.getTitle());
+            status.setText("Zaten sepette: " + c.getDisplayTitle());
         updateSelectionCount();
     }
 
@@ -362,7 +368,7 @@ public class AtlasBrowser {
     private void openAsReference() {
         AtlasCase c = getSelectedCase();
         if (c == null) {
-            status.setText("Select a case first");
+            status.setText("Önce listeden bir vaka seçin");
             return;
         }
         BenchReference.openBeside(qupath, c);
@@ -372,7 +378,7 @@ public class AtlasBrowser {
     private void citeSelected() {
         AtlasCase c = getSelectedCase();
         if (c == null) {
-            status.setText("Select a case first");
+            status.setText("Önce listeden bir vaka seçin");
             return;
         }
         CitationDialog.show(qupath, c);
@@ -382,12 +388,12 @@ public class AtlasBrowser {
     private void toggleFavorite() {
         AtlasCase c = getSelectedCase();
         if (c == null) {
-            status.setText("Select a case first");
+            status.setText("Önce listeden bir vaka seçin");
             return;
         }
         boolean now = favorites.toggle(c);
         tree.refresh();
-        status.setText(now ? "Favorilere eklendi: " + c.getTitle() : "Favorilerden çıkarıldı: " + c.getTitle());
+        status.setText(now ? "Favorilere eklendi: " + c.getDisplayTitle() : "Favorilerden çıkarıldı: " + c.getDisplayTitle());
     }
 
     /**
@@ -459,7 +465,7 @@ public class AtlasBrowser {
     }
 
     private void updateSelectionCount() {
-        selectionCount.setText(selection.size() + " selected");
+        selectionCount.setText("Sepette: " + selection.size());
         createProjectBtn.setDisable(selection.isEmpty());
     }
 
@@ -472,11 +478,11 @@ public class AtlasBrowser {
      */
     private void openProjectBuilder() {
         if (opening) {
-            status.setText("Please wait — an image is still opening…");
+            status.setText("Lütfen bekleyin — bir slayt hâlâ açılıyor…");
             return;
         }
         if (selection.isEmpty()) {
-            status.setText("Add some images to the selection first");
+            status.setText("Önce seçim sepetine slayt ekleyin");
             return;
         }
         ProjectBuilderDialog.show(qupath, stage, selection, this::updateSelectionCount);
@@ -485,7 +491,7 @@ public class AtlasBrowser {
     private void openSelected() {
         AtlasCase c = getSelectedCase();
         if (c == null) {
-            status.setText("Select a case first");
+            status.setText("Önce listeden bir vaka seçin");
             return;
         }
         // Re-entrancy guard: opening a case spawns a background thread that mutates the
@@ -494,11 +500,11 @@ public class AtlasBrowser {
         // open in flight at a time. This flag is touched only on the JavaFX thread —
         // openSelected() and the done()/fail() handlers all run there.
         if (opening) {
-            status.setText("Please wait — an image is still opening…");
+            status.setText("Lütfen bekleyin — bir slayt hâlâ açılıyor…");
             return;
         }
         opening = true;
-        status.setText("Opening " + c.getTitle() + "…");
+        status.setText("Açılıyor: " + c.getDisplayTitle() + "…");
         progress.setVisible(true);
 
         Thread t = new Thread(() -> {
@@ -516,11 +522,11 @@ public class AtlasBrowser {
                         }
                         try {
                             if (qupath.openImageEntry(entry)) {
-                                done(c, "Added to project & opened: ", qupath.getImageData().getServer());
+                                done(c, "Projeye eklendi ve açıldı: ", qupath.getImageData().getServer());
                             } else {
                                 opening = false;
                                 progress.setVisible(false);
-                                status.setText("Added to project; image not opened: " + c.getTitle());
+                                status.setText("Projeye eklendi; görüntü açılmadı: " + c.getDisplayTitle());
                             }
                         } catch (Exception ex) {
                             logger.error("Could not open project entry: {}", ex.getMessage(), ex);
@@ -533,7 +539,7 @@ public class AtlasBrowser {
                     Platform.runLater(() -> {
                         try {
                             qupath.getViewer().setImageData(imageData);
-                            done(c, "Opened (no project): ", server);
+                            done(c, "Açıldı (proje açık değil): ", server);
                         } catch (Exception ex) {
                             logger.error("Failed to display atlas case {}: {}", c.getReponame(), ex.getMessage(), ex);
                             fail(c, ex);
@@ -555,23 +561,26 @@ public class AtlasBrowser {
         var calibration = server.getPixelCalibration();
         String cal = calibration.hasPixelSizeMicrons()
                 ? "  (" + String.format(Locale.US, "%.4f", calibration.getAveragedPixelSizeMicrons()) + " µm/px)"
-                : "  (no µm/px calibration — Patoloji Atlası → Piksel boyutu ayarla…)";
-        status.setText(prefix + c.getTitle() + cal);
+                : "  (kalibrasyon yok — Patoloji Atlası → Piksel boyutu ayarla…)";
+        status.setText(prefix + c.getDisplayTitle() + cal);
     }
 
     /** Reset the UI + re-entrancy guard after a failed open and report the error. Runs on the FX thread. */
     private void fail(AtlasCase c, Exception ex) {
         opening = false;
         progress.setVisible(false);
-        status.setText("Failed: " + ex.getMessage());
-        new Alert(Alert.AlertType.ERROR,
-                "Could not open " + c.getTitle() + "\n\n" + ex.getMessage()).showAndWait();
+        status.setText("Hata: " + ex.getMessage());
+        Alert alert = new Alert(Alert.AlertType.ERROR,
+                "Slayt açılamadı: " + c.getDisplayTitle() + "\n\n" + ex.getMessage());
+        if (stage != null)
+            alert.initOwner(stage);
+        alert.showAndWait();
     }
 
     private void refreshFromList(Button refreshBtn) {
         refreshBtn.setDisable(true);
         progress.setVisible(true);
-        status.setText("Fetching latest list from GitHub…");
+        status.setText("Güncel liste indiriliyor…");
         Thread t = new Thread(() -> {
             try {
                 List<AtlasCase> fresh = AtlasCatalog.refreshFromList();
@@ -579,9 +588,9 @@ public class AtlasBrowser {
                     if (!fresh.isEmpty()) {
                         allCases = fresh;
                         rebuildTree();
-                        status.setText(fresh.size() + " images (live from GitHub)");
+                        status.setText(fresh.size() + " slayt (güncel liste)");
                     } else {
-                        status.setText("No images parsed; keeping bundled snapshot");
+                        status.setText("Liste ayrıştırılamadı; yerleşik katalog kullanılıyor");
                     }
                     progress.setVisible(false);
                     refreshBtn.setDisable(false);
@@ -591,7 +600,7 @@ public class AtlasBrowser {
                 Platform.runLater(() -> {
                     progress.setVisible(false);
                     refreshBtn.setDisable(false);
-                    status.setText("Refresh failed: " + ex.getMessage());
+                    status.setText("Güncelleme başarısız: " + ex.getMessage());
                 });
             }
         }, "atlas-list-refresh");

@@ -160,7 +160,7 @@ public final class RegionsExport {
         var pathClass = annotation.getPathClass();
         if (pathClass != null && pathClass.getName() != null && !pathClass.getName().isBlank())
             return pathClass.getName();
-        return "Bolge";
+        return "Bölge";
     }
 
     /**

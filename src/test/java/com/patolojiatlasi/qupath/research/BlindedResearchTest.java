@@ -55,4 +55,14 @@ class BlindedResearchTest {
                         + "\"decisionPromptOnLeave\":true}");
         assertTrue(BlindedResearch.decisionPromptOnLeave(dir));
     }
+
+    @Test void markConsentedPreservesDecisionPromptOnLeaveFalse(@TempDir File dir) throws Exception {
+        java.nio.file.Files.writeString(new File(dir, "atlas-research.json").toPath(),
+                "{\"schema\":\"atlas-research/1\",\"blindedTracking\":true,\"consented\":false,"
+                        + "\"decisionPromptOnLeave\":false}");
+        BlindedResearch.markConsented(dir);
+        assertTrue(BlindedResearch.readConsented(dir));
+        assertTrue(BlindedResearch.readBlinded(dir));
+        assertFalse(BlindedResearch.decisionPromptOnLeave(dir));
+    }
 }

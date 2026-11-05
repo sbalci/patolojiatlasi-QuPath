@@ -41,6 +41,10 @@ public final class ProvenanceService {
             "https://api.github.com/repos/patolojiatlasi/patolojiatlasi.github.io/commits"
                     + "?path=lists/list.yaml&per_page=1";
     private static final Duration NETWORK_TIMEOUT = Duration.ofSeconds(3);
+    private static final HttpClient HTTP = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build();
     private static final String DEFAULT_VERSION = "0.1.0";
 
     private ProvenanceService() {}
@@ -83,15 +87,12 @@ public final class ProvenanceService {
      */
     private static String resolveCatalogCommitSha() {
         try {
-            HttpClient client = HttpClient.newBuilder()
-                    .connectTimeout(NETWORK_TIMEOUT)
-                    .build();
             HttpRequest request = HttpRequest.newBuilder(URI.create(COMMITS_URL))
                     .timeout(NETWORK_TIMEOUT)
                     .header("Accept", "application/vnd.github+json")
                     .GET()
                     .build();
-            HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200)
                 return null;
             JsonArray commits = JsonParser.parseString(response.body()).getAsJsonArray();

@@ -4,6 +4,7 @@ import java.awt.image.BufferedImage;
 import java.net.URI;
 import java.util.Locale;
 
+import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -23,6 +24,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
+import javafx.stage.Window;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -79,6 +81,8 @@ public final class PixelSizeDialog {
                     "Önce bir görüntü açın — piksel boyutu açık görüntüye uygulanır.");
             alert.setTitle("Piksel boyutu ayarla");
             alert.setHeaderText(null);
+            if (qupath != null && qupath.getStage() != null)
+                alert.initOwner(qupath.getStage());
             alert.showAndWait();
             return;
         }
@@ -189,7 +193,7 @@ public final class PixelSizeDialog {
         applySession.setOnAction(e -> {
             Double mpp = resolveValue(directMode.isSelected(), directField, origMppField, origWidthField, expWidthField);
             if (mpp == null) {
-                warn("Geçerli bir µm/px değeri girin (0'dan büyük bir sayı).");
+                warn(stage, "Geçerli bir µm/px değeri girin (0'dan büyük bir sayı).");
                 return;
             }
             try {
@@ -204,7 +208,7 @@ public final class PixelSizeDialog {
                 logger.info("Applied session pixel size {} µm/px to open image", mpp);
             } catch (Exception ex) {
                 logger.error("Could not apply pixel size", ex);
-                warn("Piksel boyutu uygulanamadı: " + ex.getMessage());
+                warn(stage, "Piksel boyutu uygulanamadı: " + ex.getMessage());
             }
         });
 
@@ -212,7 +216,7 @@ public final class PixelSizeDialog {
             Double mpp = resolveValue(directMode.isSelected(), directField, origMppField, origWidthField, expWidthField);
             URI uri = mppUri(imageData, mpp);
             if (uri == null) {
-                warn("Kalıcı URL üretilemedi — geçerli bir değer girin ve görüntünün bir DZI adresi olduğundan emin olun.");
+                warn(stage, "Kalıcı URL üretilemedi — geçerli bir değer girin ve görüntünün bir DZI adresi olduğundan emin olun.");
                 return;
             }
             ClipboardContent content = new ClipboardContent();
@@ -225,25 +229,44 @@ public final class PixelSizeDialog {
             Double mpp = resolveValue(directMode.isSelected(), directField, origMppField, origWidthField, expWidthField);
             URI uri = mppUri(imageData, mpp);
             if (uri == null) {
-                warn("Yeniden açılamadı — geçerli bir değer girin ve görüntünün bir DZI adresi olduğundan emin olun.");
+                warn(stage, "Yeniden açılamadı — geçerli bir değer girin ve görüntünün bir DZI adresi olduğundan emin olun.");
                 return;
             }
             if (qupath.getProject() != null) {
-                warn("Bu görüntü bir proje girdisi olabilir. Projedeki girdinin adresi değiştirilmez;\n"
+                warn(stage, "Bu görüntü bir proje girdisi olabilir. Projedeki girdinin adresi değiştirilmez;\n"
                      + "kalıcı düzeltme için vakayı Atlas kataloğundan ?mpp= değeriyle yeniden ekleyin,\n"
                      + "ya da \"Bu oturum için uygula\" ile devam edin.");
                 return;
             }
-            try {
-                DziImageServer server = new DziImageServer(uri);
-                ImageData<BufferedImage> reopened = new ImageData<>(server, imageData.getImageType());
-                viewer.setImageData(reopened);
-                logger.info("Reopened atlas slide with calibration: {}", uri);
-                stage.close();
-            } catch (Exception ex) {
-                logger.error("Could not reopen with ?mpp=", ex);
-                warn("Yeniden açılamadı: " + ex.getMessage());
-            }
+            if (CaseCompare.isChangedSafe(imageData) && !CaseCompare.confirmReplace(stage))
+                return;
+            reopen.setDisable(true);
+            ImageData.ImageType imageType = imageData.getImageType();
+            Thread t = new Thread(() -> {
+                try {
+                    DziImageServer server = new DziImageServer(uri);
+                    ImageData<BufferedImage> reopened = new ImageData<>(server, imageType);
+                    Platform.runLater(() -> {
+                        try {
+                            viewer.setImageData(reopened);
+                            logger.info("Reopened atlas slide with calibration: {}", uri);
+                            stage.close();
+                        } catch (Exception ex) {
+                            reopen.setDisable(false);
+                            logger.error("Could not reopen with ?mpp=", ex);
+                            warn(stage, "Yeniden açılamadı: " + ex.getMessage());
+                        }
+                    });
+                } catch (Exception ex) {
+                    Platform.runLater(() -> {
+                        reopen.setDisable(false);
+                        logger.error("Could not reopen with ?mpp=", ex);
+                        warn(stage, "Yeniden açılamadı: " + ex.getMessage());
+                    });
+                }
+            }, "atlas-mpp-reopen");
+            t.setDaemon(true);
+            t.start();
         });
 
         close.setOnAction(e -> stage.close());
@@ -341,10 +364,12 @@ public final class PixelSizeDialog {
         }
     }
 
-    private static void warn(String message) {
+    private static void warn(Window owner, String message) {
         Alert alert = new Alert(Alert.AlertType.WARNING, message);
         alert.setTitle("Piksel boyutu ayarla");
         alert.setHeaderText(null);
+        if (owner != null)
+            alert.initOwner(owner);
         alert.showAndWait();
     }
 }

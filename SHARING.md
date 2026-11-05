@@ -110,7 +110,7 @@ Put these in the zip you distribute (keep it small — see slide notes below):
 ### Slides — keep the project zip small
 
 - **Atlas slides (works today):** build the project from the atlas browser
-  (`Extensions ▸ Patoloji Atlası ▸ Slaytlara gözat… ▸ Create project…`) with the
+  (`Extensions ▸ Patoloji Atlası ▸ Slaytlara göz at… ▸ Proje oluştur…`) with the
   **"Araştırma projesi — gezinme kaydı (blinded)"** box checked. Entries are **DZI URLs**, so the
   project zip is tiny and slides stream on the recipient's machine (they need internet + the
   extension).

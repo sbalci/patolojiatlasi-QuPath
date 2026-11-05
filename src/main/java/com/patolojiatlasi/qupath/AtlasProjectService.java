@@ -7,6 +7,7 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import org.slf4j.Logger;
@@ -143,6 +144,11 @@ public final class AtlasProjectService {
         public String summary() {
             int failed = failures == null ? 0 : failures.size();
             return "added " + added + ", skipped " + skipped + ", failed " + failed;
+        }
+
+        public String summaryTr() {
+            int failed = failures == null ? 0 : failures.size();
+            return String.format(Locale.US, "%d eklendi, %d atlandı, %d başarısız", added, skipped, failed);
         }
     }
 }

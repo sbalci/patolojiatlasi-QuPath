@@ -10,6 +10,7 @@ import java.util.Set;
 import javafx.application.Platform;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.stage.Window;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -109,23 +110,23 @@ public final class CaseCompare {
         QuPathViewer active = qupath.getViewer();
         ImageData<BufferedImage> activeData = active == null ? null : active.getImageData();
         if (activeData == null) {
-            infoAlert("Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
+            infoAlert(qupath, "Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
             return;
         }
 
         String openUrl = firstUri(activeData);
         if (openUrl == null || openUrl.isBlank()) {
-            infoAlert("Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
+            infoAlert(qupath, "Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
             return;
         }
 
         List<AtlasCase> stains = siblingStains(AtlasCatalog.loadBundled(), openUrl);
         if (stains.isEmpty()) {
-            infoAlert("Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
+            infoAlert(qupath, "Bu bir atlas slaytı değil ya da katalogda bulunamadı.");
             return;
         }
         if (stains.size() == 1) {
-            infoAlert("Bu vakada karşılaştırılacak başka boya yok.");
+            infoAlert(qupath, "Bu vakada karşılaştırılacak başka boya yok.");
             return;
         }
 
@@ -137,7 +138,7 @@ public final class CaseCompare {
                 break;
             }
         }
-        if (anyUnsaved && !confirmReplace())
+        if (anyUnsaved && !confirmReplace(qupath.getStage()))
             return;
 
         int dropped = 0;
@@ -160,7 +161,7 @@ public final class CaseCompare {
         List<QuPathViewer> viewers = qupath.getViewerManager().getAllViewers();
         int n = Math.min(stains.size(), viewers.size());
         for (int i = 0; i < n; i++) {
-            openInto(viewers.get(i), stains.get(i));
+            openInto(qupath, viewers.get(i), stains.get(i));
         }
 
         qupath.getViewerManager().setSynchronizeViewers(true);
@@ -212,6 +213,10 @@ public final class CaseCompare {
      * other viewer's open.
      */
     static void openInto(QuPathViewer viewer, AtlasCase c) {
+        openInto(null, viewer, c);
+    }
+
+    static void openInto(QuPathGUI qupath, QuPathViewer viewer, AtlasCase c) {
         Thread t = new Thread(() -> {
             try {
                 DziImageServer server = new DziImageServer(c.getDziURI());
@@ -220,20 +225,26 @@ public final class CaseCompare {
                     try {
                         viewer.setImageData(imageData);
                     } catch (Exception ex) {
-                        reportOpenFailure(c, ex);
+                        reportOpenFailure(qupath, c, ex);
                     }
                 });
             } catch (Exception ex) {
-                Platform.runLater(() -> reportOpenFailure(c, ex));
+                Platform.runLater(() -> reportOpenFailure(qupath, c, ex));
             }
         }, "atlas-compare-open-" + c.getReponame());
         t.setDaemon(true);
         t.start();
     }
 
-    /** Logs a failed per-stain open. Runs on the FX thread (called only from within Platform.runLater). */
-    private static void reportOpenFailure(AtlasCase c, Exception ex) {
+    /** Logs + alerts a failed per-stain open. Runs on the FX thread (called only from within Platform.runLater). */
+    private static void reportOpenFailure(QuPathGUI qupath, AtlasCase c, Exception ex) {
         logger.error("Case compare: failed to open {} ({}): {}", c.getTitle(), c.getReponame(), ex.getMessage(), ex);
+        Alert alert = new Alert(Alert.AlertType.WARNING,
+                "Slayt açılamadı: " + c.getDisplayTitle() + "\n\n" + ex.getMessage());
+        alert.setHeaderText(null);
+        if (qupath != null && qupath.getStage() != null)
+            alert.initOwner(qupath.getStage());
+        alert.showAndWait();
     }
 
     /**
@@ -272,17 +283,22 @@ public final class CaseCompare {
      * they chose to proceed. Used before rebuilding the compare grid, since
      * {@link QuPathViewer#setImageData} does not itself prompt to save.
      */
-    private static boolean confirmReplace() {
+    static boolean confirmReplace(Window owner) {
         Alert confirm = new Alert(Alert.AlertType.CONFIRMATION,
-                "Karşılaştırma görünümü, görüntüleyicideki görüntülerin yerini alır; "
+                "Bu işlem görüntüleyicideki mevcut görüntünün yerini alır; "
                 + "kaydedilmemiş değişiklikler kaybolabilir. Devam edilsin mi?",
                 ButtonType.OK, ButtonType.CANCEL);
         confirm.setHeaderText(null);
+        if (owner != null)
+            confirm.initOwner(owner);
         Optional<ButtonType> result = confirm.showAndWait();
         return result.isPresent() && result.get() == ButtonType.OK;
     }
 
-    private static void infoAlert(String message) {
-        new Alert(Alert.AlertType.INFORMATION, message).showAndWait();
+    private static void infoAlert(QuPathGUI qupath, String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION, message);
+        if (qupath != null && qupath.getStage() != null)
+            alert.initOwner(qupath.getStage());
+        alert.showAndWait();
     }
 }

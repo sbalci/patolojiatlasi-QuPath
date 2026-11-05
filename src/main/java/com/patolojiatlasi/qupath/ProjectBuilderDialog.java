@@ -90,41 +90,48 @@ public class ProjectBuilderDialog {
         stage.initModality(Modality.WINDOW_MODAL);
         if (owner != null)
             stage.initOwner(owner);
-        stage.setTitle("Create project from selection");
+        stage.setTitle("Seçilen slaytlardan proje oluştur");
         stage.setOnCloseRequest(e -> { if (building) e.consume(); });
 
         listView.setPrefHeight(220);
-        listView.setPlaceholder(new Label("No images selected"));
+        listView.setPlaceholder(new Label("Seçili slayt yok"));
+        listView.setCellFactory(lv -> new javafx.scene.control.ListCell<>() {
+            @Override
+            protected void updateItem(AtlasCase item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.getDisplayTitle());
+            }
+        });
 
-        Button removeBtn = new Button("Remove");
+        Button removeBtn = new Button("Seçileni çıkar");
         removeBtn.setOnAction(e -> removeSelected());
-        Button clearBtn = new Button("Clear all");
+        Button clearBtn = new Button("Tümünü temizle");
         clearBtn.setOnAction(e -> clearAll());
         HBox listButtons = new HBox(6, removeBtn, clearBtn);
 
         ToggleGroup group = new ToggleGroup();
-        newRadio = new RadioButton("New project");
+        newRadio = new RadioButton("Yeni proje oluştur");
         newRadio.setToggleGroup(group);
         newRadio.setSelected(true);
-        currentRadio = new RadioButton("Add to current project");
+        currentRadio = new RadioButton("Açık olan projeye ekle");
         currentRadio.setToggleGroup(group);
         boolean hasProject = qupath.getProject() != null;
         currentRadio.setDisable(!hasProject);
         if (!hasProject)
-            currentRadio.setTooltip(new Tooltip("Open a project first to use this option"));
+            currentRadio.setTooltip(new Tooltip("Bu seçeneği kullanmak için önce QuPath'te bir proje açın"));
 
         nameField = new TextField();
-        nameField.setPromptText("Project name");
+        nameField.setPromptText("Örn. GI-Egitim-Seti");
         nameField.textProperty().addListener((obs, old, txt) -> updateTargetLabel());
-        Button locationBtn = new Button("Choose location…");
+        Button locationBtn = new Button("Klasör seç…");
         locationBtn.setOnAction(e -> chooseLocation());
-        locationLabel = new Label("(no location chosen)");
+        locationLabel = new Label("(henüz klasör seçilmedi)");
         HBox locationRow = new HBox(6, locationBtn, locationLabel);
         // Shows the resolved project folder (<location>/<name>) live, so it's clear the project
         // goes into its OWN new subfolder — e.g. location "D:\" + name "deneme" → "D:\deneme".
         targetLabel = new Label();
         targetLabel.setWrapText(true);
-        VBox newBox = new VBox(6, new Label("Project name:"), nameField, locationRow, targetLabel);
+        VBox newBox = new VBox(6, new Label("Proje adı:"), nameField, locationRow, targetLabel);
         newBox.setPadding(new Insets(4, 0, 0, 20));
         newBox.disableProperty().bind(newRadio.selectedProperty().not());
 
@@ -133,9 +140,9 @@ public class ProjectBuilderDialog {
         // built/added to; AtlasExtension's project-open hook does the actual auto-start + consent.
         blindedCheckBox = new CheckBox("Araştırma projesi — gezinme kaydı (blinded)");
 
-        createBtn = new Button("Create");
+        createBtn = new Button("Oluştur");
         createBtn.setOnAction(e -> runBuild());
-        cancelBtn = new Button("Cancel");
+        cancelBtn = new Button("İptal");
         cancelBtn.setOnAction(e -> stage.close());
         manifestBtn = new Button("Künye / manifest dışa aktar…");
         manifestBtn.setOnAction(e -> exportManifest());
@@ -146,8 +153,8 @@ public class ProjectBuilderDialog {
         HBox actions = new HBox(6, statusLabel, progress, spacer, manifestBtn, cancelBtn, createBtn);
 
         VBox rootBox = new VBox(10,
-                new Label("Selected images:"), listView, listButtons,
-                new Label("Target:"), newRadio, newBox, currentRadio,
+                new Label("Seçili slaytlar:"), listView, listButtons,
+                new Label("Hedef:"), newRadio, newBox, currentRadio,
                 blindedCheckBox,
                 actions);
         rootBox.setPadding(new Insets(12));
@@ -231,7 +238,7 @@ public class ProjectBuilderDialog {
 
     private void chooseLocation() {
         DirectoryChooser dc = new DirectoryChooser();
-        dc.setTitle("Choose a parent folder for the new project");
+        dc.setTitle("Yeni proje için üst klasör seçin");
         File dir = dc.showDialog(stage);
         if (dir != null) {
             location = dir;
@@ -253,7 +260,7 @@ public class ProjectBuilderDialog {
     }
 
     private void updateStatus() {
-        statusLabel.setText(items.size() + " image(s)");
+        statusLabel.setText(items.size() + " slayt");
         if (createBtn != null)
             createBtn.setDisable(items.isEmpty());
     }
@@ -261,7 +268,7 @@ public class ProjectBuilderDialog {
     private void runBuild() {
         List<AtlasCase> cases = new ArrayList<>(items);
         if (cases.isEmpty()) {
-            statusLabel.setText("No images selected");
+            statusLabel.setText("Seçili slayt yok");
             return;
         }
         boolean makeNew = newRadio.isSelected();
@@ -269,12 +276,15 @@ public class ProjectBuilderDialog {
         if (makeNew) {
             String name = nameField.getText() == null ? "" : nameField.getText().trim();
             if (name.isEmpty()) {
-                statusLabel.setText("Enter a project name");
+                statusLabel.setText("Lütfen bir proje adı yazın");
                 return;
             }
             if (location == null) {
-                statusLabel.setText("Choose a location");
-                return;
+                chooseLocation();
+                if (location == null) {
+                    statusLabel.setText("Lütfen bir klasör seçin");
+                    return;
+                }
             }
             File candidate = new File(location, name);
             String[] existing = candidate.list();
@@ -286,7 +296,7 @@ public class ProjectBuilderDialog {
             projectDir = candidate;
         } else {
             if (qupath.getProject() == null) {
-                statusLabel.setText("No project open");
+                statusLabel.setText("Açık proje yok");
                 return;
             }
             projectDir = null;
@@ -296,7 +306,7 @@ public class ProjectBuilderDialog {
         createBtn.setDisable(true);
         cancelBtn.setDisable(true);
         progress.setVisible(true);
-        statusLabel.setText("Building…");
+        statusLabel.setText("Oluşturuluyor…");
 
         Thread t = new Thread(() -> {
             try {
@@ -340,9 +350,12 @@ public class ProjectBuilderDialog {
                     progress.setVisible(false);
                     createBtn.setDisable(false);
                     cancelBtn.setDisable(false);
-                    statusLabel.setText("Failed: " + ex.getMessage());
-                    new Alert(Alert.AlertType.ERROR,
-                            "Could not build project\n\n" + ex.getMessage()).showAndWait();
+                    statusLabel.setText("Hata: " + ex.getMessage());
+                    Alert alert = new Alert(Alert.AlertType.ERROR,
+                            "Proje oluşturulamadı\n\n" + ex.getMessage());
+                    if (stage != null)
+                        alert.initOwner(stage);
+                    alert.showAndWait();
                 });
             }
         }, "atlas-project-build");
@@ -381,12 +394,15 @@ public class ProjectBuilderDialog {
         onSelectionChanged.run();
         if (result.hasFailures()) {
             StringBuilder sb = new StringBuilder(
-                    "Some images could not be added (kept in the selection so you can retry):\n\n");
+                    "Bazı slaytlar eklenemedi (tekrar deneyebilmeniz için sepette bırakıldı):\n\n");
             for (AtlasProjectService.BuildResult.Failure f : result.failures())
-                sb.append("• ").append(f.c().getTitle()).append(" — ").append(f.reason()).append('\n');
-            new Alert(Alert.AlertType.WARNING, sb.toString()).showAndWait();
+                sb.append("• ").append(f.c().getDisplayTitle()).append(" — ").append(f.reason()).append('\n');
+            Alert alert = new Alert(Alert.AlertType.WARNING, sb.toString());
+            if (stage != null)
+                alert.initOwner(stage);
+            alert.showAndWait();
         }
-        statusLabel.setText("Done — " + result.summary());
+        statusLabel.setText("Tamamlandı — " + result.summaryTr());
         stage.close();
     }
 }
