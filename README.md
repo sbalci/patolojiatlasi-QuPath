@@ -19,12 +19,12 @@ Bilgisayarınızda **QuPath 0.6.0 veya daha yeni** bir sürüm kurulu olmalıdı
 
 **Yol A — Eklenti listesi (katalog) ile (önerilen; sonraki güncellemeler de buradan gelir)**
 
-1. QuPath üst menüsünden **Extensions → Manage extension catalogs** penceresini açın.
-2. **Add** düğmesine tıklayın, aşağıdaki adresi olduğu gibi kopyalayıp yapıştırın ve onaylayın:
+1. QuPath üst menüsünden **Extensions → Manage extensions** penceresini açın ve penceredeki **Manage extension catalogs** düğmesine tıklayın.
+2. Açılan pencerede **Add** düğmesine tıklayın, aşağıdaki adresi olduğu gibi kopyalayıp yapıştırın ve onaylayın:
    ```text
    https://github.com/sbalci/patolojiatlasi-QuPath
    ```
-3. Ardından **Extensions → Manage extensions** penceresini açın; listede **QuPath Patoloji Atlası extension** satırındaki **Install** (Kur) düğmesine tıklayın.
+3. **Manage extensions** penceresine dönün; listede **QuPath Patoloji Atlası extension** satırındaki **Install** (Kur) düğmesine tıklayın.
 4. QuPath'i **tamamen kapatıp yeniden açın**.
 
 **Yol B — JAR dosyasını sürükleyip bırakarak**
@@ -341,7 +341,8 @@ is a one-time manual download if you'd rather not add a catalog.
 
 You add the catalog **once**; afterwards QuPath installs and updates the extension from it.
 
-1. In QuPath, open **Extensions → Manage extension catalogs**.
+1. In QuPath, open **Extensions → Manage extensions** and click the **Manage extension catalogs**
+   button in that window.
 2. Click **Add**, paste this repository URL, and confirm:
    ```
    https://github.com/sbalci/patolojiatlasi-QuPath
