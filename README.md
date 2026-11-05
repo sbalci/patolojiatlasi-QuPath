@@ -5,54 +5,82 @@
 [![Build](https://github.com/sbalci/patolojiatlasi-QuPath/actions/workflows/build.yml/badge.svg)](https://github.com/sbalci/patolojiatlasi-QuPath/actions/workflows/build.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21443833.svg)](https://doi.org/10.5281/zenodo.21443833)
 
-Browse the whole-slide images published on **patolojiatlasi.com** from inside QuPath and open
-any of them directly — the slides are streamed tile-by-tile over HTTP, with nothing to download
-in advance.
-
-The atlas serves its slides as **Deep Zoom (DZI)** pyramids (produced by `vips dzsave` and shown
-on the website with OpenSeadragon). This extension adds a DZI image reader to QuPath plus a
-browsable catalogue driven by the atlas's own image list.
+**Türkçe:** patolojiatlasi.com'daki slaytları dosya indirmeden QuPath içinde açın. · **English:** open the patolojiatlasi.com slides inside QuPath without downloading files — [jump to the English documentation](#about).
 
 ---
 
 ## Türkçe Hızlı Başlangıç Kılavuzu (Patologlar İçin)
 
-**Patoloji Atlası QuPath Eklentisi**, [patolojiatlasi.com](https://www.patolojiatlasi.com/) ([histopathologyatlas.com](https://www.histopathologyatlas.com/)) üzerindeki yüzlerce tam kesit dijital patoloji slaytını (WSI) **bilgisayarınıza gigabaytlarca dosya indirmeden**, doğrudan QuPath içinde açmanızı, karşılaştırmanızı ve eğitim/araştırma setleri hazırlamanızı sağlar.
+**Patoloji Atlası QuPath Eklentisi**, [patolojiatlasi.com](https://www.patolojiatlasi.com/) ([histopathologyatlas.com](https://www.histopathologyatlas.com/)) üzerindeki yüzlerce tam kesit dijital patoloji slaytını (WSI) **bilgisayarınıza gigabaytlarca dosya indirmeden**, doğrudan QuPath içinde açmanızı, karşılaştırmanızı ve eğitim/araştırma setleri hazırlamanızı sağlar. Slaytlar internet üzerinden, görüntülediğiniz kısım kadar parça parça yüklenir; bu yüzden **internet bağlantısı gerekir**.
 
-### 1. Kurulum (Yalnızca Bir Kez Yapılır)
+### 1. Kurulum (yalnızca bir kez yapılır)
 
-1. Bilgisayarınızda **QuPath 0.6.0 veya daha yeni** bir sürümün kurulu olduğundan emin olun.
-2. QuPath üst menüsünden **Extensions → Manage extension catalogs** penceresini açın.
-3. **Add** düğmesine tıklayın, aşağıdaki adresi yapıştırıp onaylayın:
+Bilgisayarınızda **QuPath 0.6.0 veya daha yeni** bir sürüm kurulu olmalıdır (QuPath'te **Help → About QuPath** penceresinden bakabilirsiniz). İki yoldan birini seçin.
+
+**Yol A — Eklenti listesi (katalog) ile (önerilen; sonraki güncellemeler de buradan gelir)**
+
+1. QuPath üst menüsünden **Extensions → Manage extension catalogs** penceresini açın.
+2. **Add** düğmesine tıklayın, aşağıdaki adresi olduğu gibi kopyalayıp yapıştırın ve onaylayın:
    ```text
    https://github.com/sbalci/patolojiatlasi-QuPath
    ```
-4. Ardından **Extensions → Manage extensions** penceresini açın; listede **QuPath Patoloji Atlası extension** yanındaki **Install** (Kur) düğmesine tıklayın.
-5. QuPath'i kapatıp yeniden başlatın. Artık üst menüde **Extensions → Patoloji Atlası** ve **Extensions → Araştırma** menülerini göreceksiniz.
+3. Ardından **Extensions → Manage extensions** penceresini açın; listede **QuPath Patoloji Atlası extension** satırındaki **Install** (Kur) düğmesine tıklayın.
+4. QuPath'i **tamamen kapatıp yeniden açın**.
 
-### 2. Günlük Kullanım ve Temel Özellikler
+**Yol B — JAR dosyasını sürükleyip bırakarak**
 
-- **Slayt Arama ve Açma (`Extensions → Patoloji Atlası → Slaytlara göz at…`):**
+1. [Son sürüm sayfasındaki](https://github.com/sbalci/patolojiatlasi-QuPath/releases/latest) **Assets** bölümünden `qupath-extension-atlas-<sürüm>.jar` dosyasını indirin. (JAR, QuPath'in okuduğu bir eklenti dosyasıdır; açmaya veya çift tıklamaya çalışmayın.)
+2. QuPath'i açın ve dosyayı **QuPath penceresinin üzerine sürükleyip bırakın**; kurulum sorusunu onaylayın.
+3. QuPath'i **tamamen kapatıp yeniden açın**.
+
+**Kurulumdan sonra ne görmelisiniz?** Üst menüde **Extensions → Patoloji Atlası** satırı görünür. (**Extensions → Araştırma** menüsü de eklenir; yalnızca araştırma projeleri içindir, günlük kullanımda gerekmez.)
+
+**Menü görünmüyorsa:** QuPath'i tamamen kapatıp açın (pencereyi küçültmek yetmez). Hâlâ yoksa **Extensions → Manage extensions** penceresinde eklentinin kurulu görünüp görünmediğine bakın; görünmüyorsa Yol B'yi deneyin.
+
+### 2. İlk 5 dakika
+
+1. **Extensions → Patoloji Atlası → Slaytlara göz at…** menüsünü açın. Slayt listesini içeren bir pencere açılır.
+2. Üstteki arama kutusuna bir tanı, organ veya boya adı yazın (ör. `gastrit`). Liste kendiliğinden daralır.
+3. Bir vakaya **çift tıklayın**. Slayt birkaç saniye içinde QuPath'in ana penceresinde açılır; pencerenin altındaki durum satırı "açılıyor…" der.
+4. Fare tekerleğiyle yakınlaştırın, sürükleyerek gezinin. Görüntü bulanık başlayıp netleşirse bu normaldir: parçalar internetten yükleniyordur.
+5. Aynı vakanın diğer boyalarını görmek için **Extensions → Patoloji Atlası → Karşılaştır → Bu vakanın boyalarını karşılaştır…** seçin; boyalar yan yana ve birlikte hareket eden pencerelerde açılır. Tek pencereye dönmek için aynı menüde **Tek görünüme dön** seçin.
+
+### 3. Günlük kullanım ve temel özellikler
+
+- **Slayt arama ve açma (`Extensions → Patoloji Atlası → Slaytlara göz at…`):**
   - Arama kutusuna Türkçe veya İngilizce **tanı, organ veya boya adı** (örn. `gastrit`, `ksantogranülomatöz`, `CD3`, `PAS`) yazarak filtreleyin.
   - İstediğiniz vakaya **çift tıklayın** veya **QuPath'te aç** düğmesine basın; slayt internet üzerinden anında yüklenir.
-- **Sade Görünüm (`Extensions → Patoloji Atlası → Sade görünüm (yalnızca görüntüleyici)`):**
-  - Mikroskop başında ders anlatırken veya slayt incelerken QuPath'in sol/sağ panellerini tek tıkla gizleyip tam ekran slayt görünümüne geçer.
-- **Aynı Vakanın Boyalarını Yan Yana Karşılaştırma (`Karşılaştır → Bu vakanın boyalarını karşılaştır…`):**
+- **Sade görünüm (`Extensions → Patoloji Atlası → Sade görünüm (yalnızca görüntüleyici)`):**
+  - Ders anlatırken veya slayt incelerken QuPath'in sol/sağ panellerini tek tıkla gizleyip tam ekran slayt görünümüne geçer.
+- **Aynı vakanın boyalarını yan yana karşılaştırma (`Extensions → Patoloji Atlası → Karşılaştır → Bu vakanın boyalarını karşılaştır…`):**
   - Açık olan vakanın H&E, İHK ve özel boyalarını QuPath'in eş zamanlı (senkronize) bölünmüş ekranında yan yana açar; birinde gezindiğinizde diğer boyalar da aynı alanı takip eder.
-- **Kendi Vakanızın Yanında Referans Açma (`Referans → Referans slayt aç…`):**
+- **Kendi vakanızın yanında referans açma (`Extensions → Patoloji Atlası → Referans → Referans slayt aç…`):**
   - Kendi bilgisayarınızdaki bir slaytı incelerken, atlas kataloğundan benzer bir vakayı **ikinci bir pencerede ve aynı büyütmede (µm/px eşlenmiş olarak)** yanına açar.
-- **Ders / Sınav / Proje Seti Oluşturma (`Sepete ekle` → `Proje oluştur…`):**
+- **Ders / sınav / proje seti oluşturma (`Sepete ekle` → `Proje oluştur…`):**
   - Tarayıcıda beğendiğiniz slaytları **Sepete ekle** ile toplayıp **Proje oluştur…** düğmesine basın. Slaytlar internetten aktığı için oluşan QuPath projesi birkaç kilobayttır; asistanlarınıza veya öğrencilerinize e-postayla gönderebilirsiniz.
-- **Kendi Kendine Çalışma Sınavı ve Slayt Turları (`Sınav / Quiz → Çöz…` veya `Hazırla…`):**
+- **Kendi kendine çalışma sınavı ve slayt turları (`Extensions → Patoloji Atlası → Sınav / Quiz → Çöz…` veya `Hazırla…`):**
   - Çoktan seçmeli, açık uçlu, çizim (anotasyon) veya bölge bulma soruları içeren taşınabilir `.json` sınav/tur paketleri hazırlayın veya çözün.
-- **Yayın ve Sunum İçin Hazır Atıf (`Atıf → Açık slaytı alıntıla…` / `Bu bölgeyi alıntıla…`):**
-  - Makale, poster veya ders sunumlarınızda kullandığınız slayt veya işaretlediğiniz bölge için APA/BibTeX/RIS formatında hazır kaynakça ve şekil altyazısı üretir.
+- **Yayın ve sunum için hazır atıf (`Extensions → Patoloji Atlası → Atıf → Açık slaytı alıntıla…` / `Bu bölgeyi alıntıla…`):**
+  - Makale, poster veya ders sunumlarınızda kullandığınız slayt veya işaretlediğiniz bölge için APA/BibTeX/RIS biçiminde hazır kaynakça ve şekil altyazısı üretir.
 
-> Araştırma projeleri ve sessiz gezinme/odak kaydı için Türkçe kılavuz: **[SHARING.tr.md](SHARING.tr.md)**.
+### 4. Sık karşılaşılan durumlar
+
+- **"Slayt açılamadı" penceresi:** çoğunlukla internet bağlantısı veya kurum güvenlik duvarıdır. Bağlantınızı kontrol edin; kurum ağındaysanız bilgi işlem birimine `patolojiatlasi.com` adresinin erişime açık olup olmadığını sorun. Pencerenin **Ayrıntıları göster** bölümü, destek isterken göndermeniz gereken teknik bilgiyi içerir.
+- **Görüntü gri veya parça parça boş:** parçalar hâlâ yükleniyordur ya da bağlantı yavaştır; birkaç saniye bekleyin, gerekirse biraz uzaklaştırıp yeniden yakınlaştırın.
+- **Durum satırında "kalibrasyon yok":** slaytın piksel boyutu (µm/px) bilinmiyor demektir. **Yalnızca bakıyorsanız sorun değildir.** µm cinsinden ölçüm (uzunluk, alan) yapacaksanız önce **Extensions → Patoloji Atlası → Piksel boyutu ayarla…** ile ayarlayın.
+- **Liste güncellenemedi:** internet yoksa eklenti kendi içindeki yerleşik listeyi kullanır; slaytları açmak için yine internet gerekir.
+
+> Araştırma projeleri ve gezinme kaydı (araştırma) için Türkçe kılavuz: **[SHARING.tr.md](SHARING.tr.md)**. Geliştirici ve araştırma ayrıntıları aşağıdaki İngilizce bölümlerdedir.
 
 ---
 
 ## About
+
+Browse the whole-slide images published on **patolojiatlasi.com** from inside QuPath and open
+any of them directly — the slides are streamed tile-by-tile over HTTP, with nothing to download
+in advance. The atlas serves its slides as **Deep Zoom (DZI)** pyramids (produced by `vips dzsave`
+and shown on the website with OpenSeadragon); this extension adds a DZI image reader to QuPath plus
+a browsable catalogue driven by the atlas's own image list.
 
 The **Patoloji Atlası** is a whole-slide image teaching collection curated by pathologists and
 published openly on the web. This extension brings that same collection into QuPath so the slides

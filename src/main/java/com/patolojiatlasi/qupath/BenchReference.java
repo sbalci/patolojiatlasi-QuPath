@@ -193,7 +193,9 @@ public final class BenchReference {
     /** Logs + alerts a failed reference open and runs the caller's cleanup. Runs on the FX thread. */
     private static void reportOpenFailure(QuPathGUI qupath, AtlasCase ref, Exception ex, Runnable onFailure) {
         logger.error("Bench reference: failed to open {} ({}): {}", ref.getTitle(), ref.getReponame(), ex.getMessage(), ex);
-        infoAlert(qupath, "Referans slayt açılamadı: " + ref.getDisplayTitle() + "\n\n" + ex.getMessage());
+        UserMessages.show(qupath != null ? qupath.getStage() : null, javafx.scene.control.Alert.AlertType.WARNING,
+                "Referans slayt açılamadı: " + ref.getDisplayTitle(),
+                "Kendi slaytınız açık kalır.\n\n" + UserMessages.NETWORK_ADVICE, ex);
         if (onFailure != null)
             onFailure.run();
     }

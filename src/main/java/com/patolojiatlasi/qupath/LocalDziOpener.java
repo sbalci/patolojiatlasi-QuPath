@@ -134,13 +134,13 @@ public final class LocalDziOpener {
     }
 
     private static void error(QuPathGUI qupath, Exception ex) {
-        Alert alert = new Alert(Alert.AlertType.ERROR,
-                "Yerel DZI açılamadı:\n\n" + ex.getMessage()
-                + "\n\n.dzi dosyasının yanında aynı adlı \"_files\" klasörünün bulunduğundan emin olun.");
-        alert.setHeaderText("Yerel DZI");
-        alert.getDialogPane().setPrefWidth(520);
-        if (qupath.getStage() != null)
-            alert.initOwner(qupath.getStage());
-        alert.showAndWait();
+        UserMessages.show(qupath.getStage(), Alert.AlertType.ERROR,
+                "Bilgisayardaki Deep Zoom (DZI) slaytı açılamadı",
+                "Yapabilecekleriniz:\n"
+                + "  1. .dzi dosyasının hemen yanında aynı adlı \"_files\" klasörünün bulunduğundan emin olun "
+                + "(ör. vaka.dzi ve vaka_files).\n"
+                + "  2. Klasörü taşıdıysanız .dzi dosyasıyla birlikte taşıyın.\n"
+                + "  3. Sorun sürerse bu pencerenin ekran görüntüsünü (\"Ayrıntıları göster\" açıkken) gönderin.",
+                ex);
     }
 }

@@ -239,12 +239,9 @@ public final class CaseCompare {
     /** Logs + alerts a failed per-stain open. Runs on the FX thread (called only from within Platform.runLater). */
     private static void reportOpenFailure(QuPathGUI qupath, AtlasCase c, Exception ex) {
         logger.error("Case compare: failed to open {} ({}): {}", c.getTitle(), c.getReponame(), ex.getMessage(), ex);
-        Alert alert = new Alert(Alert.AlertType.WARNING,
-                "Slayt açılamadı: " + c.getDisplayTitle() + "\n\n" + ex.getMessage());
-        alert.setHeaderText(null);
-        if (qupath != null && qupath.getStage() != null)
-            alert.initOwner(qupath.getStage());
-        alert.showAndWait();
+        UserMessages.show(qupath != null ? qupath.getStage() : null, Alert.AlertType.WARNING,
+                "Slayt açılamadı: " + c.getDisplayTitle(),
+                "Diğer boyalar açılmaya devam eder.\n\n" + UserMessages.NETWORK_ADVICE, ex);
     }
 
     /**

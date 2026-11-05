@@ -569,12 +569,10 @@ public class AtlasBrowser {
     private void fail(AtlasCase c, Exception ex) {
         opening = false;
         progress.setVisible(false);
-        status.setText("Hata: " + ex.getMessage());
-        Alert alert = new Alert(Alert.AlertType.ERROR,
-                "Slayt açılamadı: " + c.getDisplayTitle() + "\n\n" + ex.getMessage());
-        if (stage != null)
-            alert.initOwner(stage);
-        alert.showAndWait();
+        status.setText("Slayt açılamadı: " + c.getDisplayTitle());
+        logger.warn("Could not open {}: {}", c.getDisplayTitle(), UserMessages.technical(ex), ex);
+        UserMessages.show(stage, Alert.AlertType.ERROR,
+                "Slayt açılamadı: " + c.getDisplayTitle(), UserMessages.NETWORK_ADVICE, ex);
     }
 
     private void refreshFromList(Button refreshBtn) {
@@ -590,7 +588,7 @@ public class AtlasBrowser {
                         rebuildTree();
                         status.setText(fresh.size() + " slayt (güncel liste)");
                     } else {
-                        status.setText("Liste ayrıştırılamadı; yerleşik katalog kullanılıyor");
+                        status.setText("Güncel liste okunamadı; bilgisayardaki yerleşik liste kullanılıyor (slaytlar yine açılır).");
                     }
                     progress.setVisible(false);
                     refreshBtn.setDisable(false);
@@ -600,7 +598,8 @@ public class AtlasBrowser {
                 Platform.runLater(() -> {
                     progress.setVisible(false);
                     refreshBtn.setDisable(false);
-                    status.setText("Güncelleme başarısız: " + ex.getMessage());
+                    status.setText("Güncel liste indirilemedi (internet bağlantısı olmayabilir); "
+                            + "yerleşik liste kullanılmaya devam ediliyor.");
                 });
             }
         }, "atlas-list-refresh");
