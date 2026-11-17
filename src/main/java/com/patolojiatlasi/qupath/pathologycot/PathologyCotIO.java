@@ -36,6 +36,16 @@ public final class PathologyCotIO {
         if (o.has("decision") && o.get("decision").isJsonObject())
             for (var e : o.getAsJsonObject("decision").entrySet())
                 decision.put(e.getKey(), toPlainValue(e.getValue()));
+        // The parsed schema is evidence; never infer origin from the file name or session id.
+        Map<String, Object> provenance = new LinkedHashMap<>();
+        Object existing = decision.get("cotProvenance");
+        if (existing instanceof Map<?, ?> map)
+            for (var e : map.entrySet())
+                if (e.getKey() instanceof String key) provenance.put(key, e.getValue());
+        if (existing != null && !(existing instanceof Map<?, ?>))
+            provenance.put("recordingMode", "invalid");
+        provenance.put("sourceSchema", str(o, "schema"));
+        decision.put("cotProvenance", provenance);
         return new CotFragment(str(o,"slideKey"), str(o,"sessionId"),
                 intt(o,"imageWidth"), intt(o,"imageHeight"), baseMag, path, decision);
     }

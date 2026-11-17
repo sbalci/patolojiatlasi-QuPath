@@ -15,6 +15,7 @@ public final class PathologyCotDraft {
     public static AtlasQuiz buildDraft(List<Behavior> behaviors, String slideUrl, String slideTitle,
                                        Double baseMag, Map<String,Object> decision) {
         AtlasQuiz quiz = new AtlasQuiz();
+        quiz.setCotProvenance(PathologyCotProvenance.fromDecision(decision));
         quiz.setTitle("Pathology-CoT taslağı — " + (slideTitle == null ? "" : slideTitle));
         String dx = decision == null ? null : Objects.toString(decision.get("diagnosis"), null);
         quiz.setDescription(dx == null || dx.isBlank()

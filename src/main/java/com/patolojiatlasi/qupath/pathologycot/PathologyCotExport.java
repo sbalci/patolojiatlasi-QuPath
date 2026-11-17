@@ -284,11 +284,16 @@ public final class PathologyCotExport {
         List<Map<String, Object>> conversation = buildConversation(reviewed, thumbPxW, thumbPxH, thumbDs);
         Files.writeString(new File(outDir, "conversation.json").toPath(), GSON.toJson(conversation), StandardCharsets.UTF_8);
 
+        Files.writeString(new File(outDir, "provenance.json").toPath(),
+                GSON.toJson(PathologyCotProvenance.exportMetadata(reviewed)), StandardCharsets.UTF_8);
+
         String readme = "Bu klasör, kullanıcının açık bir dışa aktarma eylemiyle ürettiği ONAYLI ve "
                 + "ANONİMLEŞTİRİLMEMİŞ bir araştırma çıktısıdır: slayt görüntü kırpmaları, kaydedilen "
                 + "tanı/karar ve bu karara ait gerekçe metnini içerir. Anotasyon panosuna gönderilen "
                 + "anonimleştirilmiş harmanlanmış (blinded) katkılardan farklıdır ve yalnızca açık bir "
-                + "kullanıcı dışa aktarma eylemiyle üretilir; başka hiçbir otomatik süreçle oluşmaz.\n";
+                + "kullanıcı dışa aktarma eylemiyle üretilir; başka hiçbir otomatik süreçle oluşmaz.\n"
+                + "Kayıt kökeni provenance.json dosyasındadır; unknown kökenli kayıtları demo veya blinded "
+                + "gözlem olarak sınıflandırmayın. Dışa aktarma onayı kayıt kökenini belirlemez.\n";
         Files.writeString(new File(outDir, "README.txt").toPath(), readme, StandardCharsets.UTF_8);
 
         BufferedImage thumbnail = server.readRegion(
